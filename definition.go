@@ -165,6 +165,13 @@ func (d *Definition) validate() error {
 		if _, err := parseOutcome(f.Outcome); err != nil {
 			return fmt.Errorf("failures[%d]: %w", i, err)
 		}
+		// "\b" in JSON is a backspace, not a word boundary: a control
+		// character in a pattern is almost always that mistake, and the rule
+		// would silently never match.
+		if j := strings.IndexFunc(f.Match, func(r rune) bool { return r < 0x20 && r != '\t' }); j >= 0 {
+			return fmt.Errorf("failures[%d].match has a control character (%q) at byte %d; in JSON write \\\\b for a regex word boundary, \\\\d for a digit",
+				i, f.Match[j], j)
+		}
 		re, err := regexp.Compile(f.Match)
 		if err != nil {
 			return fmt.Errorf("failures[%d]: %w", i, err)

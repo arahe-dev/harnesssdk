@@ -126,7 +126,9 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 	if err := os.MkdirAll(filepath.Join(g.dir, "live"), 0o700); err != nil {
 		return nil, err
 	}
-	id := randHex(8)
+	// The "t" keeps an id from ever reading as a number where a CLI parses
+	// it as TOML or JSON (a definition can pass {lineage} on).
+	id := "t" + randHex(8)
 	live, err := lockOpen(g.liveFile(id))
 	if err != nil {
 		return nil, err
@@ -252,7 +254,7 @@ func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
 }
 
 func readGate(dir string) (*gateState, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	data, err := readShared(filepath.Join(dir, "state.json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return &gateState{}, nil
 	}

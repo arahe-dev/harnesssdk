@@ -51,6 +51,7 @@ var builtinVars = map[string]bool{
 	"prompt": true, "prompt_file": true, "system_file": true,
 	"session": true, "new_session": true, "resume_session": true,
 	"cwd": true, "run_id": true, "run_dir": true,
+	"harness_home": true, "lineage": true,
 }
 
 // CheckVar reports whether a placeholder value may be set from outside the

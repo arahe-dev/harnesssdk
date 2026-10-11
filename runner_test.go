@@ -73,6 +73,20 @@ func fakeHarness(args []string) int {
 	case "sleep":
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		fmt.Println("slept")
+	case "nested":
+		// Act as a harness command run by the agent; with strip=1, as one
+		// whose harness removed harness's environment variables.
+		if opts["strip"] == "1" {
+			os.Unsetenv(EnvRun)
+			os.Unsetenv(EnvLineage)
+		}
+		h, err := NewHome(opts["home"])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		p := h.DiscoverParentage()
+		fmt.Printf("parent=%s lineage=%s found=%s\n", p.Parent, strings.Join(p.Lineage, ","), p.Found)
 	case "sleeppid":
 		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(os.Getpid())), 0o644)
 		time.Sleep(time.Duration(ms) * time.Millisecond)

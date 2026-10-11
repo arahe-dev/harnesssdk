@@ -918,6 +918,9 @@ func (c *cli) show(args []string) error {
 }
 
 func (c *cli) status() error {
+	if p := c.home.DiscoverParentage(); p.Parent != "" {
+		fmt.Fprintf(c.stdout, "this process runs inside run %s (found through %s; lineage %s)\n\n", p.Parent, p.Found, dash(p.Lineage))
+	}
 	gates, err := c.home.GateStatus()
 	if err != nil {
 		return err

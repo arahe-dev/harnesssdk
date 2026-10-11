@@ -75,7 +75,7 @@ func (h *Home) locate(kind, name, cwd string) (Item, []byte, error) {
 	file := name + kindExt[kind]
 	if proj, ok := h.projectDir(cwd); ok {
 		path := filepath.Join(proj, kind, file)
-		data, err := os.ReadFile(path)
+		data, err := readShared(path)
 		if err == nil {
 			if err := h.checkTrust(proj, kind+"/"+file, data); err != nil {
 				return Item{}, nil, err
@@ -87,7 +87,7 @@ func (h *Home) locate(kind, name, cwd string) (Item, []byte, error) {
 		}
 	}
 	path := filepath.Join(h.Dir, kind, file)
-	data, err := os.ReadFile(path)
+	data, err := readShared(path)
 	if err != nil {
 		return Item{}, nil, err
 	}
@@ -178,7 +178,7 @@ func (h *Home) store(kind, name string, data []byte, projectDir string) error {
 
 // Budgets loads the named capacities; a missing file means none.
 func (h *Home) Budgets() (map[string]int64, error) {
-	data, err := os.ReadFile(h.budgetsPath())
+	data, err := readShared(h.budgetsPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]int64{}, nil
 	}
@@ -289,7 +289,7 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := renameShared(tmp.Name(), path); err != nil {
 		os.Remove(tmp.Name())
 		return err
 	}
