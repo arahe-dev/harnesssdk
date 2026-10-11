@@ -19,6 +19,8 @@
 //	detach*.go    starting a worker that outlives its starter
 //	process*.go   one CLI invocation; process-tree containment (job object;
 //	              on Unix a guard leading the process group)
+//	config.go     file format versions; config.json limits
+//	gc.go         retention: removing old runs
 //	lock*.go      cross-process file locks
 //	share*.go     reading records while another process replaces them
 package engine
