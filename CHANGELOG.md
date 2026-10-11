@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.6.0 (2026-10-12)
+
+Choosing a harness and model from evidence, after *An Empirical Study of
+Harness Design for Coding Agents* (Fan et al., arXiv:2609.20804). The study
+found that no harness setup is best everywhere: which tools, planning and
+context handling help depends on the model, the task type and the budget.
+HarnessSDK's job is that choice, so this release measures it.
+
+- **Metrics.** A definition's `output.metrics` reads numbers from the CLI's
+  own output with every turn: tokens, cost, model calls, tool calls. Two
+  new picks, `sum` and `count`; a field may add paths with `+`; array
+  indexes may count from the end (`-1`). Every attempt counts, failed ones
+  too. Turns record their metrics and model; `--json`, `show` and the
+  status line print them. harness keeps no prices: cost is recorded only
+  where the CLI reports it.
+- **`harness stats`** sums up finished turns per profile, model and kind:
+  success rate, failures by outcome, median and p90 time, attempts, tokens
+  and cost per turn, and cost per success. `--kind <label>` on `run` and
+  `start` labels runs for it.
+- **`harness compare a,b,... "task"`** runs one task on several profiles at
+  once and sets their answers, outcomes, time, tokens and cost side by
+  side. Every profile is checked before any run is created.
+- **Repeat guard.** When the same request (profile, prompt, inputs and
+  caller) fails `repeat_warn` (3) times in a row within an hour, harness
+  adds a hint to change approach; after `repeat_refuse` (5) it refuses the
+  request (exit 3). A success clears the count; throttled and cancelled
+  turns do not count. This is the study's stuck detection, applied to whole
+  runs, which cost far more than a repeated tool call.
+- **Guide:** a section on choosing a harness, model and settings (tools,
+  planning, context) with the study's numbers and caveats, and how to check
+  them with `compare` and `stats`. The verified definitions now record
+  metrics; Pi's uses `--mode json`, which reports usage and cost.
+- **Go API:** `Client.Compare`, `Client.Stats`, `Request.Kind`, and
+  `Result.Model`, `Result.Metrics`, `Result.Hint`, `Result.Error`
+  (additions only).
+
+### Verified (Windows 11)
+
+- `go test ./...`, `-race`, `go vet` and staticcheck for Windows, Linux and
+  macOS; the guide's example definitions are parsed by a test.
+- Live, with the new definitions: `compare` of Claude Haiku, Pi
+  (`gpt-6.1-sol`, JSON mode) and OpenCode on one task, all three answering
+  with tokens and cost; a Pi run that used a tool (`tool_calls: 1`,
+  `turns: 2`); a Codex agent that ran a nested Pi agent, with Codex token
+  counts and the nested run at depth 1; `harness stats` over these runs; and
+  the repeat guard on a missing CLI (hint from the 3rd failure, refusal of
+  the 6th, a different prompt still allowed).
+
 ## v1.5.0 (2026-10-12)
 
 A stable Go API, machine-wide limits, retention, versioned files, and the

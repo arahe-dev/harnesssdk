@@ -29,8 +29,10 @@ import (
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.
 
   harness guide                            the manual: read this first
-  harness run <profile> [prompt | -]       run an agent and wait; --task --file --cwd --set --json --dry-run
+  harness run <profile> [prompt | -]       run an agent and wait; --task --file --cwd --set --kind --json --dry-run
   harness start <profile> [prompt | -]     start an agent in the background (same flags); prints run ids
+  harness compare <p1>,<p2>[,...] [prompt] run one task on several profiles side by side; --file --cwd --set --kind --json
+  harness stats [--profile p] [--kind k]   how each profile's turns ended and what they cost; --days --json
   harness send <run-id> [prompt | -]       follow up in the same session; --file --set --json --dry-run --detach
   harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running)
   harness result <run-id>                  print a run's last turn without waiting
@@ -40,7 +42,7 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness def set|show|list|rm             harness definitions (JSON); --project for this project
   harness trust [--approve]                review, then trust, this project's .harness files
   harness budget set|list|rm               capacity limits shared by every harness process
-  harness config [set <key> <n>]           max_depth, max_running, retention_days
+  harness config [set <key> <n>]           limits: nesting, running turns, retention, repeated failures
   harness gc [--days n] [--dry-run]        remove finished runs older than retention_days
   harness home | skill | version
 `
@@ -123,6 +125,10 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return 0, c.config(args)
 	case "gc":
 		return 0, c.gc(args)
+	case "stats":
+		return 0, c.stats(args)
+	case "compare":
+		return c.compare(args)
 	case "trust":
 		return 0, c.trust(args)
 	case "run":
@@ -482,6 +488,8 @@ func (c *cli) config(args []string) error {
 		fmt.Fprintf(w, "max_depth\t%d\thow deep runs may nest (0: no nesting)\n", cfg.MaxDepth)
 		fmt.Fprintf(w, "max_running\t%d\tturns running at once on this machine (0: no cap)\n", cfg.MaxRunning)
 		fmt.Fprintf(w, "retention_days\t%d\tdays finished runs are kept (0: forever)\n", cfg.RetentionDays)
+		fmt.Fprintf(w, "repeat_warn\t%d\twarn after the same request fails this many times in a row (0: never)\n", cfg.RepeatWarn)
+		fmt.Fprintf(w, "repeat_refuse\t%d\trefuse it after this many (0: never)\n", cfg.RepeatRefuse)
 		return w.Flush()
 	case args[0] == "set" && len(args) == 3:
 		n, err := strconv.Atoi(args[2])
@@ -607,6 +615,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	var tasks multi
 	fs.Var(&tasks, "task", "start a separate run for this task (repeatable)")
 	cwdFlag := fs.String("cwd", "", "working folder for the agent (default: current)")
+	kind := fs.String("kind", "", "label the run for harness stats, such as review")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -660,7 +669,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 		return 0, nil
 	}
 	if detach {
-		runs, err := r.Prepare(profile, prompts, dir, extra)
+		runs, err := r.Prepare(profile, prompts, dir, extra, *kind)
 		if err != nil {
 			return exitFor(err), err
 		}
@@ -675,7 +684,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	reports, err := r.Start(ctx, profile, prompts, dir, extra, func(run *harness.Run) {
+	reports, err := r.Start(ctx, profile, prompts, dir, extra, *kind, func(run *harness.Run) {
 		fmt.Fprintf(c.stderr, "harness: %s started (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
 	})
 	c.drain(r)
@@ -844,17 +853,21 @@ func (c *cli) drain(r *harness.Runner) {
 }
 
 type jsonReport struct {
-	Run        string `json:"run"`
-	Turn       int    `json:"turn"`
-	Profile    string `json:"profile"`
-	Harness    string `json:"harness"`
-	Outcome    string `json:"outcome"`
-	ExitCode   int    `json:"exit_code"`
-	Attempts   int    `json:"attempts"`
-	Session    string `json:"session,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	Output     string `json:"output"`
-	Error      string `json:"error,omitempty"`
+	Run        string             `json:"run"`
+	Turn       int                `json:"turn"`
+	Profile    string             `json:"profile"`
+	Harness    string             `json:"harness"`
+	Model      string             `json:"model,omitempty"`
+	Kind       string             `json:"kind,omitempty"`
+	Outcome    string             `json:"outcome"`
+	ExitCode   int                `json:"exit_code"`
+	Attempts   int                `json:"attempts"`
+	Session    string             `json:"session,omitempty"`
+	DurationMS int64              `json:"duration_ms"`
+	Metrics    map[string]float64 `json:"metrics,omitempty"`
+	Output     string             `json:"output"`
+	Error      string             `json:"error,omitempty"`
+	Hint       string             `json:"hint,omitempty"`
 }
 
 // report prints the answers and returns the most severe exit code.
@@ -866,9 +879,9 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 		code = worse(code, ec)
 		if asJSON {
 			j := jsonReport{Turn: rep.Turn, Outcome: rep.Outcome, ExitCode: ec, Attempts: rep.Attempts,
-				DurationMS: rep.Duration.Milliseconds(), Output: rep.Output}
+				DurationMS: rep.Duration.Milliseconds(), Output: rep.Output, Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint}
 			if rep.Run != nil {
-				j.Run, j.Profile, j.Harness, j.Session = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session
+				j.Run, j.Profile, j.Harness, j.Session, j.Kind = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session, rep.Run.Kind
 			}
 			if rep.Err != nil {
 				j.Error = rep.Err.Error()
@@ -878,7 +891,7 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 		}
 		c.status1(rep)
 		if many {
-			fmt.Fprintf(c.stdout, "=== %s · %s\n", rep.Run.ID, rep.Outcome)
+			fmt.Fprintf(c.stdout, "=== %s · %s · %s\n", runID(rep), runProfile(rep), rep.Outcome)
 		}
 		if rep.Output != "" {
 			fmt.Fprintln(c.stdout, rep.Output)
@@ -901,8 +914,11 @@ func (c *cli) status1(rep harness.Report) {
 	if rep.Run != nil {
 		id = rep.Run.ID
 	}
-	fmt.Fprintf(c.stderr, "harness: %s %s · turn %d · %d attempt(s) · %s\n",
-		id, rep.Outcome, rep.Turn, rep.Attempts, rep.Duration.Round(time.Second))
+	fmt.Fprintf(c.stderr, "harness: %s %s · turn %d · %d attempt(s) · %s%s\n",
+		id, rep.Outcome, rep.Turn, rep.Attempts, rep.Duration.Round(time.Second), spend(rep.Metrics))
+	if rep.Hint != "" {
+		fmt.Fprintf(c.stderr, "harness: hint: %s\n", rep.Hint)
+	}
 	if rep.Err == nil {
 		return
 	}
@@ -970,16 +986,26 @@ func (c *cli) show(args []string) error {
 	fmt.Fprintf(c.stdout, "run:     %s\nprofile: %s (harness %s)\ncwd:     %s\nsession: %s\ndir:     %s\n",
 		r.ID, r.Profile, r.Harness, r.Cwd, r.Session, r.Dir())
 	if r.Parent != "" {
-		fmt.Fprintf(c.stdout, "parent:  %s\n", r.Parent)
+		fmt.Fprintf(c.stdout, "parent:  %s (depth %d)\n", r.Parent, r.Depth)
+	}
+	if r.Kind != "" {
+		fmt.Fprintf(c.stdout, "kind:    %s\n", r.Kind)
 	}
 	for _, t := range r.Turns {
 		dur := "-"
 		if !t.Ended.IsZero() && !t.Started.IsZero() {
 			dur = t.Ended.Sub(t.Started).Round(time.Second).String()
 		}
-		fmt.Fprintf(c.stdout, "turn %d:  %s · %d attempt(s) · exit %d · %s\n", t.N, t.Outcome, t.Attempts, t.ExitCode, dur)
+		model := ""
+		if t.Model != "" {
+			model = " · " + t.Model
+		}
+		fmt.Fprintf(c.stdout, "turn %d:  %s · %d attempt(s) · exit %d · %s%s%s\n", t.N, t.Outcome, t.Attempts, t.ExitCode, dur, model, spend(t.Metrics))
 		if t.Error != "" {
 			fmt.Fprintf(c.stdout, "         %s\n", t.Error)
+		}
+		if t.Hint != "" {
+			fmt.Fprintf(c.stdout, "         hint: %s\n", t.Hint)
 		}
 	}
 	if n := len(r.Turns); n > 0 {
@@ -1022,6 +1048,191 @@ func (c *cli) status() error {
 		fmt.Fprintf(c.stdout, "  %s  %s  turn %d %s  %s\n", r.ID, r.Profile, t.N, t.Outcome, r.Cwd)
 	}
 	return nil
+}
+
+// compare runs one task on several profiles and sets their outcomes and
+// metrics side by side.
+func (c *cli) compare(args []string) (int, error) {
+	fs := c.flags("compare")
+	var tf turnFlags
+	tf.register(fs)
+	cwdFlag := fs.String("cwd", "", "working folder for the agents (default: current)")
+	kind := fs.String("kind", "", "label the runs for harness stats, such as review")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	if tf.dry {
+		return harness.ExitUsage, usageErr("compare has no --dry-run; check each profile with: harness run <profile> --dry-run")
+	}
+	if len(pos) == 0 {
+		return harness.ExitUsage, usageErr("compare needs profiles, separated by commas: harness compare a,b \"task\"")
+	}
+	var profiles []string
+	for p := range strings.SplitSeq(pos[0], ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			profiles = append(profiles, p)
+		}
+	}
+	prompt, err := c.prompt(pos[1:], tf.files)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return harness.ExitUsage, usageErr("empty prompt")
+	}
+	extra, err := tf.extra()
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	dir, err := folder(*cwdFlag)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	reps, err := r.Compare(ctx, profiles, prompt, dir, extra, *kind, func(run *harness.Run) {
+		fmt.Fprintf(c.stderr, "harness: %s started (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
+	})
+	c.drain(r)
+	if err != nil {
+		return exitFor(err), err
+	}
+	code := c.report(reps, tf.asJSON, true)
+	if !tf.asJSON {
+		fmt.Fprintln(c.stdout)
+		w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "PROFILE\tMODEL\tOUTCOME\tTIME\tTRIES\tIN\tOUT\tCOST")
+		for _, rep := range reps {
+			m := rep.Metrics
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", runProfile(rep), or(rep.Model, "-"), rep.Outcome,
+				rep.Duration.Round(time.Second), rep.Attempts, tokens(m, "input_tokens"), tokens(m, "output_tokens"), money(m, "cost_usd"))
+		}
+		w.Flush()
+	}
+	return code, nil
+}
+
+// stats prints how each profile's turns ended and what they cost.
+func (c *cli) stats(args []string) error {
+	fs := c.flags("stats")
+	profile := fs.String("profile", "", "only this profile")
+	kind := fs.String("kind", "", "only runs with this label")
+	days := fs.Int("days", 30, "runs started in the last n days")
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 0 {
+		return usageErr("stats takes no arguments")
+	}
+	st, err := c.home.Stats(harness.StatsFilter{Profile: *profile, Kind: *kind, Since: time.Now().AddDate(0, 0, -*days)})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		if st == nil {
+			st = []harness.Stats{}
+		}
+		data, _ := json.MarshalIndent(st, "", "  ")
+		fmt.Fprintln(c.stdout, string(data))
+		return nil
+	}
+	if len(st) == 0 {
+		fmt.Fprintf(c.stderr, "harness: no finished turns in the last %d days\n", *days)
+		return nil
+	}
+	w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "PROFILE\tMODEL\tKIND\tTURNS\tOK\tP50\tP90\tTRIES\tIN\tOUT\tCOST\tCOST/OK\tFAILED")
+	for _, s := range st {
+		ok := s.Outcomes["success"]
+		mean := map[string]float64{}
+		for k, m := range s.Metrics {
+			mean[k] = m.Mean()
+		}
+		perOK := "-"
+		if m, has := s.Metrics["cost_usd"]; has && ok > 0 {
+			perOK = fmt.Sprintf("$%.4f", m.Sum/float64(ok))
+		}
+		var failed []string
+		for _, o := range slices.Sorted(maps.Keys(s.Outcomes)) {
+			if o != "success" {
+				failed = append(failed, fmt.Sprintf("%s %d", o, s.Outcomes[o]))
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d%%\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n",
+			s.Profile, or(s.Model, "-"), or(s.Kind, "-"), s.Turns, 100*ok/s.Turns,
+			s.Median.Round(time.Second), s.P90.Round(time.Second), float64(s.Attempts)/float64(s.Turns),
+			tokens(mean, "input_tokens"), tokens(mean, "output_tokens"), money(mean, "cost_usd"), perOK, dash(failed))
+	}
+	fmt.Fprintln(w, "\nIN, OUT and COST are means per turn, over the turns whose harness reports them.")
+	return w.Flush()
+}
+
+// spend renders a turn's tokens and cost, when its harness reports them.
+func spend(m map[string]float64) string {
+	var parts []string
+	if _, ok := m["input_tokens"]; ok {
+		parts = append(parts, tokens(m, "input_tokens")+" in")
+	}
+	if _, ok := m["output_tokens"]; ok {
+		parts = append(parts, tokens(m, "output_tokens")+" out")
+	}
+	if _, ok := m["cost_usd"]; ok {
+		parts = append(parts, money(m, "cost_usd"))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " · " + strings.Join(parts, " · ")
+}
+
+func tokens(m map[string]float64, key string) string {
+	v, ok := m[key]
+	switch {
+	case !ok:
+		return "-"
+	case v >= 1e6:
+		return fmt.Sprintf("%.1fM", v/1e6)
+	case v >= 1e3:
+		return fmt.Sprintf("%.1fk", v/1e3)
+	}
+	return fmt.Sprintf("%.0f", v)
+}
+
+func money(m map[string]float64, key string) string {
+	if v, ok := m[key]; ok {
+		return fmt.Sprintf("$%.4f", v)
+	}
+	return "-"
+}
+
+// runID and runProfile name a report's run, which a turn that failed
+// before its record was read does not have.
+func runID(rep harness.Report) string {
+	if rep.Run == nil {
+		return "?"
+	}
+	return rep.Run.ID
+}
+
+func runProfile(rep harness.Report) string {
+	if rep.Run == nil {
+		return "?"
+	}
+	return rep.Run.Profile
+}
+
+func or(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
 }
 
 func dash(s []string) string {

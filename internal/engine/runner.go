@@ -31,6 +31,8 @@ type Turn struct {
 	lineage     []string   // gate tickets held for this turn and its ancestors
 	inherit     []*os.File // locks the agent CLI inherits (Unix)
 	attempts    int
+	metrics     map[string]float64 // summed over attempts
+	repeat      string             // the request's fingerprint, for the repeat guard
 	argv        []string
 	exitCode    int
 	lastSession string
@@ -53,6 +55,11 @@ type Report struct {
 	Attempts   int
 	Duration   time.Duration
 	StderrTail string
+	Model      string
+	Metrics    map[string]float64
+	// Hint is advice for the caller, such as to stop repeating a request
+	// that keeps failing.
+	Hint string
 }
 
 // Environment harness sets for every CLI it starts, so a harness command
@@ -348,14 +355,23 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	// The attempt's own deadline or the caller ending: return the context
 	// error untagged, so Herta reads an expired deadline as Uncertain and a
 	// cancelled caller as cancellation.
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
-	}
 	if runErr != nil {
 		return nil, hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("start %s: %w", t.Def.Name, runErr))
 	}
-	answer, failed, session, xerr := extractFile(t.Def, stdoutPath)
-	if code == 0 && xerr == nil && !failed {
+	// Every attempt's metrics count, a failed or stopped one's too: its
+	// tokens were spent.
+	x, xerr := extractFile(t.Def, stdoutPath)
+	for k, n := range x.Metrics {
+		if t.metrics == nil {
+			t.metrics = map[string]float64{}
+		}
+		t.metrics[k] += n
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
+	}
+	answer, session := x.Answer, x.Session
+	if code == 0 && xerr == nil && !x.Failed {
 		if session == "" {
 			session = v["session"]
 		}
@@ -391,8 +407,9 @@ func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
 
 // request is what a queued turn needs besides its prompt.
 type request struct {
-	Resume bool `json:"resume"`
-	Extra  Vars `json:"extra,omitempty"`
+	Resume bool   `json:"resume"`
+	Extra  Vars   `json:"extra,omitempty"`
+	Repeat string `json:"repeat,omitempty"` // the request's fingerprint
 }
 
 // queue appends a queued turn with its prompt and request. The caller owns
@@ -412,24 +429,61 @@ func queue(run *Run, prompt string, req request) (int, error) {
 
 // Prepare records one new run per task, each with its first turn queued,
 // after checking that the profile and its harness load from cwd.
-func (r *Runner) Prepare(profile string, tasks []string, cwd string, extra Vars) ([]*Run, error) {
+func (r *Runner) Prepare(profile string, tasks []string, cwd string, extra Vars, kind string) ([]*Run, error) {
+	nr, err := r.check(profile, tasks, cwd, extra, kind)
+	if err != nil {
+		return nil, err
+	}
+	r.home.AutoGC()
+	return r.create(nr)
+}
+
+// newRuns are runs that passed every check and are about to be created.
+type newRuns struct {
+	p      *Profile
+	d      *Definition
+	tasks  []string
+	fps    []string
+	cwd    string
+	extra  Vars
+	kind   string
+	depth  int
+	parent string
+}
+
+// check loads the profile and applies max_depth and the repeat guard.
+func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, kind string) (*newRuns, error) {
 	p, d, err := r.load(profile, cwd)
 	if err != nil {
 		return nil, err
+	}
+	if kind != "" && !validName(kind) {
+		return nil, fmt.Errorf("kind %q: use lower-case letters, digits, '.', '_' and '-'", kind)
 	}
 	depth, err := r.depth()
 	if err != nil {
 		return nil, err
 	}
-	r.home.AutoGC()
-	var runs []*Run
+	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, extra: extra, kind: kind, depth: depth, parent: r.kin().Parent}
 	for _, task := range tasks {
-		run, err := r.home.NewRun(p.Name, d.Name, cwd, r.kin().Parent)
+		fp := fingerprint("run", nr.parent, p.Name, cwd, task, varsKey(extra))
+		if err := r.home.checkRepeat(fp); err != nil {
+			return nil, fmt.Errorf("profile %s: %w", p.Name, err)
+		}
+		nr.fps = append(nr.fps, fp)
+	}
+	return nr, nil
+}
+
+func (r *Runner) create(nr *newRuns) ([]*Run, error) {
+	var runs []*Run
+	for i, task := range nr.tasks {
+		run, err := r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent)
 		if err != nil {
 			return nil, err
 		}
-		run.Depth = depth
-		if _, err := queue(run, task, request{Extra: extra}); err != nil {
+		run.Depth, run.Kind = nr.depth, nr.kind
+		if _, err := queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i]}); err != nil {
 			return nil, err
 		}
 		if err := run.Save(); err != nil {
@@ -443,6 +497,10 @@ func (r *Runner) Prepare(profile string, tasks []string, cwd string, extra Vars)
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
+	fp := fingerprint("send", id, prompt, varsKey(extra))
+	if err := r.home.checkRepeat(fp); err != nil {
+		return 0, err
+	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
 		p, _, err := r.load(run.Profile, run.Cwd)
@@ -461,7 +519,7 @@ func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: extra})
+		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp})
 		return err
 	})
 	return n, err
@@ -538,7 +596,10 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	defer r.home.clearActive(run.ID)
 
 	res, t, err := r.execute(ctx, run, n, execLock)
-	run, ferr := r.finish(run.ID, n, t, res, err)
+	if t != nil && t.repeat != "" {
+		rep.Hint = r.home.noteRepeat(t.repeat, OutcomeName(err))
+	}
+	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
 	if run != nil {
 		rep.Run = run
 	}
@@ -549,6 +610,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	rep.Duration = time.Since(start)
 	if t != nil {
 		rep.Attempts, rep.StderrTail = t.attempts, t.stderrTail
+		rep.Model, rep.Metrics = t.vars()["model"], t.metrics
 	}
 	if res != nil && err == nil {
 		rep.Output = res.Output
@@ -588,7 +650,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, nil, err
 		}
 	}
-	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir}
+	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
 
 	// Validate the policy before waiting anywhere: a project file reaches
 	// here without passing through SaveProfile.
@@ -673,7 +735,7 @@ func claimsFor(p *Profile, budgets map[string]int64, t *Turn) []Claim {
 
 // finish records a turn's outcome. The answer is saved before the record,
 // so the record never claims an answer that is not on disk.
-func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error) (*Run, error) {
+func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint string) (*Run, error) {
 	var saveErr error
 	run, uerr := r.home.updateRun(id, func(run *Run) error {
 		switch {
@@ -691,13 +753,14 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error) (*Run
 		}
 		rec := &run.Turns[n-1]
 		rec.Ended = time.Now().UTC()
-		rec.Outcome = OutcomeName(err)
+		rec.Outcome, rec.Hint = OutcomeName(err), hint
 		rec.Error = ""
 		if err != nil {
 			rec.Error = err.Error()
 		}
 		if t != nil {
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
+			rec.Metrics, rec.Model = t.metrics, t.vars()["model"]
 		}
 		return nil // always save: the record must leave "running"
 	})
@@ -727,11 +790,46 @@ func watchStop(ctx context.Context, path string, cancel context.CancelFunc) {
 // Start runs each task as a new run of the profile, in this process. Tasks
 // run concurrently, admitted against the profile's budgets. started, if
 // set, is called with each run before any of them executes.
-func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd string, extra Vars, started func(*Run)) ([]Report, error) {
-	runs, err := r.Prepare(profile, tasks, cwd, extra)
+func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd string, extra Vars, kind string, started func(*Run)) ([]Report, error) {
+	runs, err := r.Prepare(profile, tasks, cwd, extra, kind)
 	if err != nil {
 		return nil, err
 	}
+	return r.executeAll(ctx, runs, started), nil
+}
+
+// Compare runs one task on each of several profiles side by side, so their
+// answers, outcomes and metrics can be compared. Every profile is checked
+// before any run is created.
+func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd string, extra Vars, kind string, started func(*Run)) ([]Report, error) {
+	if len(profiles) < 2 {
+		return nil, errors.New("compare needs at least two profiles")
+	}
+	var all []*newRuns
+	for i, name := range profiles {
+		if slices.Contains(profiles[:i], name) {
+			return nil, fmt.Errorf("profile %s is listed twice", name)
+		}
+		nr, err := r.check(name, []string{task}, cwd, extra, kind)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, nr)
+	}
+	r.home.AutoGC()
+	var runs []*Run
+	for _, nr := range all {
+		rs, err := r.create(nr)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, rs...)
+	}
+	return r.executeAll(ctx, runs, started), nil
+}
+
+// executeAll executes the first turn of each run concurrently.
+func (r *Runner) executeAll(ctx context.Context, runs []*Run, started func(*Run)) []Report {
 	for _, run := range runs {
 		if started != nil {
 			started(run)
@@ -743,7 +841,7 @@ func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd 
 		wg.Go(func() { reports[i] = r.Execute(ctx, run.ID, 1) })
 	}
 	wg.Wait()
-	return reports, nil
+	return reports
 }
 
 // Send continues a run with one more turn in the same harness session, in
@@ -838,7 +936,7 @@ func fileStamp(path string) string {
 // reportOf builds a report from a run's record of turn n.
 func reportOf(run *Run, n int) Report {
 	rec := run.Turns[n-1]
-	rep := Report{Run: run, Turn: n, Outcome: rec.Outcome, Attempts: rec.Attempts}
+	rep := Report{Run: run, Turn: n, Outcome: rec.Outcome, Attempts: rec.Attempts, Model: rec.Model, Metrics: rec.Metrics, Hint: rec.Hint}
 	if rec.Error != "" {
 		rep.Err = errors.New(rec.Error)
 	}
@@ -927,10 +1025,10 @@ func readTail(path string, from, n int64) string {
 	return string(b[:m])
 }
 
-func extractFile(d *Definition, path string) (answer string, failed bool, session string, err error) {
+func extractFile(d *Definition, path string) (extraction, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false, "", err
+		return extraction{}, err
 	}
 	defer f.Close()
 	return d.extract(f)

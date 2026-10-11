@@ -24,6 +24,7 @@ type Run struct {
 	Cwd     string       `json:"cwd"`
 	Parent  string       `json:"parent,omitempty"` // the harness run whose agent started this one
 	Depth   int          `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
+	Kind    string       `json:"kind,omitempty"`   // a label for grouping stats, such as review
 	Session string       `json:"session,omitempty"`
 	Created time.Time    `json:"created"`
 	Turns   []TurnRecord `json:"turns"`
@@ -44,6 +45,10 @@ type TurnRecord struct {
 	Lineage  []string  `json:"lineage,omitempty"` // gate tickets of this turn and its ancestors
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
+	Model    string    `json:"model,omitempty"` // the model placeholder's value
+	Hint     string    `json:"hint,omitempty"`  // advice for the caller, such as the repeat guard's
+	// Metrics are the definition's metrics, summed over attempts.
+	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
 
 // finished reports whether the turn has a final outcome.

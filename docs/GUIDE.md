@@ -67,9 +67,10 @@ Unknown fields are rejected, so typos fail at `def set`.
 A **selector** is `{"where": {"type": "text"}, "field": "part.text", "pick": "join"}`:
 events whose dotted paths equal the `where` values, the value at `field`, and
 `pick` `"last"` (default), `"first"` or `"join"` (all, joined with `join`,
-default empty). Lines that are not JSON are skipped. Any event matching the
-`error` selector (with a non-empty `field`, if one is given) marks the run
-failed. Example, for `opencode run --format json`:
+default empty). A path may index arrays, and `-1` is the last element
+(`message.content.-1.text`). Lines that are not JSON are skipped. Any event
+matching the `error` selector (with a non-empty `field`, if one is given)
+marks the run failed. Example, for `opencode run --format json`:
 
 ```json
 "output": {
@@ -79,6 +80,29 @@ failed. Example, for `opencode run --format json`:
   "error": {"where": {"type": "error"}}
 }
 ```
+
+### Metrics
+
+`output.metrics` records numbers with every turn, for `harness stats`,
+`harness compare` and `--json`: tokens, cost, model calls, tool calls,
+whatever the CLI reports. Each is a selector (in `json` output, over the
+one document). Two picks are for metrics only: `"sum"` adds up every match,
+`"count"` counts matches (no `field` needed). A `field` may add several paths
+with `+`. Every attempt's metrics count, a failed one's too.
+
+```json
+"metrics": {
+  "input_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.input+part.tokens.cache.read", "pick": "sum"},
+  "cost_usd": {"where": {"type": "step_finish"}, "field": "part.cost", "pick": "sum"},
+  "turns": {"where": {"type": "step_finish"}, "pick": "count"}
+}
+```
+
+Use these names, so profiles on different harnesses compare:
+`input_tokens` (every prompt token, cached ones included), `cached_tokens`,
+`output_tokens`, `cost_usd` (only as the CLI reports it; harness keeps no
+prices), `turns` (model calls) and `tool_calls`. Text output has no metrics:
+prefer a CLI's JSON mode (the examples below all use one).
 
 ### Placeholders
 
@@ -142,6 +166,42 @@ execution policy (HertaSDK); every other key is a placeholder value.
 Update single keys without rewriting: `harness profile set <name> thinking=xhigh`
 (an empty value removes the key).
 
+## Choosing a harness, model and settings
+
+No harness setup is best for every model and task. A controlled study of
+coding-agent harnesses (Fan et al., *An Empirical Study of Harness Design
+for Coding Agents*, arXiv:2609.20804, 2026) varied one component at a time
+across four models and two benchmarks. Its findings, as starting points:
+
+- **Tools.** Structured file tools (read, edit, grep) helped a weaker model
+  a lot (+15 points of success). The strongest model did better with bash
+  alone, and cost 30–53% less. For one model the answer flipped with the
+  task: bash alone did better on command-line tasks, the structured tools
+  on repository bug fixes. So: for a
+  strong model on shell-heavy work, try a bash-only tool set; for a weaker
+  model, or careful multi-file edits, give it the harness's file tools.
+- **Planning.** An explicit plan raised the weakest model's success by 11.6
+  points. For strong models it mostly cut cost (about 30%), at a small
+  accuracy loss. Turn on a harness's plan mode or todo tool for weaker or
+  cheaper models; leave it off for strong ones unless the task is long.
+- **Context.** Context management mattered a great deal with a 32k window
+  and little at 128k. Every harness here compacts its own context; what is
+  yours to manage is the task: give an agent with a small window a smaller
+  task, and keep follow-ups in one session with `send` only while it fits.
+
+The study used open models in its own harness, not these CLIs, so treat
+these as hypotheses for your setup and check them with your own runs:
+
+1. Give runs a label: `--kind review`, `--kind refactor`.
+2. Try candidates on the same task: `harness compare a,b,c "task"` prints
+   each answer, then outcome, time, tokens and cost side by side.
+3. Look at the record: `harness stats` (or `--kind review`) lists, per
+   profile and model, success rate, failures by outcome, median and p90
+   time, attempts, tokens and cost per turn, and cost per success.
+
+Prefer the profile with the best success and cost for that kind of task,
+and say why when you report it.
+
 ## Budgets and keys hold across every harness process
 
 `budget` and `serialize` are enforced machine-wide: every `harness` process
@@ -162,7 +222,7 @@ and how it was found.
 
 ## Machine limits
 
-`harness config` lists three limits for every run on the machine;
+`harness config` lists the limits for every run on the machine;
 `harness config set <key> <n>` changes one.
 
 - `max_depth` (default 3): how deep runs may nest. A run started by an agent
@@ -177,6 +237,13 @@ and how it was found.
   their prompts and answers, are removed this many days after their last
   turn. harness does this at most once a day as runs start;
   `harness gc [--days n] [--dry-run]` does it now.
+- `repeat_warn` (default 3) and `repeat_refuse` (default 5), 0 to turn either
+  off: when the same request (profile, prompt, `--set` values and parent run;
+  for `send`, the same run and prompt) fails that many times in a row within
+  an hour, harness adds a `hint` telling you to change approach, and then
+  refuses it (exit 3). A success clears the count; throttled and cancelled
+  turns do not count. Do not loop on a failing request: read the error,
+  change the prompt, the profile or the plan.
 
 ## Per-project profiles
 
@@ -195,8 +262,10 @@ file).
 ## Running
 
 ```
-harness run <profile> [prompt words | -] [--task T]... [--file F]... [--cwd D] [--set k=v]... [--json] [--dry-run]
+harness run <profile> [prompt words | -] [--task T]... [--file F]... [--cwd D] [--set k=v]... [--kind K] [--json] [--dry-run]
 harness start <profile> ...           same flags; returns run ids at once
+harness compare <p1>,<p2>[,...] [prompt words | -] [--file F]... [--cwd D] [--set k=v]... [--kind K] [--json]
+harness stats [--profile P] [--kind K] [--days N] [--json]
 harness send <run-id> [prompt words | -] [--file F]... [--set k=v]... [--json] [--dry-run] [--detach]
 harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json]
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
@@ -209,8 +278,16 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   the profile's budgets.
 - `--cwd` sets the agent's working folder (default: the current one) and the
   project whose profiles apply.
-- `--json` prints `{run, turn, profile, harness, outcome, exit_code, attempts, session, duration_ms, output, error}`
-  (an array for several tasks).
+- `--kind` labels runs (lower-case, such as `review`) so `harness stats` can
+  compare profiles per kind of task.
+- `compare` runs the same task on each profile at once, prints each answer,
+  then a table of outcome, time, attempts, tokens and cost. The agents share
+  the working folder: compare profiles that edit files only in separate
+  checkouts (`--cwd`), one compare per checkout.
+- `--json` prints `{run, turn, profile, harness, model, kind, outcome, exit_code, attempts, session, duration_ms, metrics, output, error, hint}`
+  (an array for several tasks, and for `compare`).
+- A `hint` (also printed as `harness: hint: ...`) is advice to act on, such
+  as the repeat guard's.
 - Every run is kept in `<home>/runs/<run-id>/` for `retention_days` after
   its last turn: `run.json`, each turn's prompt, answer (`turn-N.out.md`),
   raw stdout/stderr, and `worker.log` for background turns.
@@ -220,7 +297,7 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
 |---:|---|
 | 0 | success |
 | 2 | bad command line, profile or definition |
-| 3 | permanent (also: nested deeper than `max_depth`) |
+| 3 | permanent (also: nested deeper than `max_depth`; a request refused by the repeat guard) |
 | 4 | transient |
 | 5 | throttled (also: the run is busy with another turn; a nested turn found every `max_running` slot taken) |
 | 6 | uncertain |
@@ -235,18 +312,32 @@ background turn whose worker died is reported as `uncertain` by `wait`.
 Definitions known to work, with the CLI version they were checked against.
 Start from one, then check the flags against the installed CLI's `--help`.
 
-**Pi** (1.0.4), print mode, answer on stdout:
+**Pi** (1.0.4), print mode with JSON events (`--mode json`). Each model
+call ends with a `turn_end` event carrying its usage and cost; the answer is
+the last part of the final message:
 
 ```json
 {"command": "pi",
- "args": [["-p"], ["--model", "{model}"], ["--thinking", "{thinking}"], ["--tools", "{tools}"],
+ "args": [["-p"], ["--mode", "json"], ["--model", "{model}"], ["--thinking", "{thinking}"], ["--tools", "{tools}"],
           ["{no_mcp?--no-mcp}"], ["--append-system-prompt", "{system_file}"], ["--session-id", "{session}"]],
- "session": "mint", "output": {"format": "text"},
+ "session": "mint",
+ "output": {"format": "jsonl",
+   "answer": {"where": {"type": "turn_end"}, "field": "message.content.-1.text"},
+   "error": {"where": {"type": "turn_end", "message.stopReason": "error"}},
+   "metrics": {
+     "input_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.input+message.usage.cacheRead+message.usage.cacheWrite", "pick": "sum"},
+     "cached_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.cacheRead", "pick": "sum"},
+     "output_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.output", "pick": "sum"},
+     "cost_usd": {"where": {"type": "turn_end"}, "field": "message.usage.cost.total", "pick": "sum"},
+     "turns": {"where": {"type": "turn_end"}, "pick": "count"},
+     "tool_calls": {"where": {"type": "tool_execution_end"}, "pick": "count"}}},
  "failures": [{"match": "(?i)\\b429\\b|rate.?limit|too many requests", "outcome": "throttled"},
               {"match": "(?i)ECONNRESET|ETIMEDOUT|fetch failed", "outcome": "uncertain"}]}
 ```
 
 `--tools` keeps MCP tools; a read-only profile also needs `no_mcp: true`.
+Without `--mode json`, Pi prints only the answer (`"output": {"format": "text"}`),
+and reports no tokens or cost.
 
 **Claude Code** (2.1.220), one JSON result:
 
@@ -256,7 +347,13 @@ Start from one, then check the flags against the installed CLI's `--help`.
           ["--append-system-prompt-file", "{system_file}"],
           ["--session-id", "{new_session}"], ["--resume", "{resume_session}"]],
  "session": "mint",
- "output": {"format": "json", "field": "result", "error_field": "is_error", "session_field": "session_id"},
+ "output": {"format": "json", "field": "result", "error_field": "is_error", "session_field": "session_id",
+   "metrics": {
+     "input_tokens": {"field": "usage.input_tokens+usage.cache_read_input_tokens+usage.cache_creation_input_tokens"},
+     "cached_tokens": {"field": "usage.cache_read_input_tokens"},
+     "output_tokens": {"field": "usage.output_tokens"},
+     "cost_usd": {"field": "total_cost_usd"},
+     "turns": {"field": "num_turns"}}},
  "failures": [{"match": "(?i)rate.?limit|overloaded|\\b429\\b", "outcome": "throttled"}]}
 ```
 
@@ -277,12 +374,18 @@ prompt:
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"},
    "session": {"where": {"type": "thread.started"}, "field": "thread_id", "pick": "first"},
-   "error": {"where": {"type": "turn.failed"}, "field": "error.message"}},
+   "error": {"where": {"type": "turn.failed"}, "field": "error.message"},
+   "metrics": {
+     "input_tokens": {"where": {"type": "turn.completed"}, "field": "usage.input_tokens", "pick": "sum"},
+     "cached_tokens": {"where": {"type": "turn.completed"}, "field": "usage.cached_input_tokens", "pick": "sum"},
+     "output_tokens": {"where": {"type": "turn.completed"}, "field": "usage.output_tokens", "pick": "sum"},
+     "tool_calls": {"where": {"type": "item.completed", "item.type": "command_execution"}, "pick": "count"}}},
  "failures": [{"match": "(?i)rate.?limit|\\b429\\b|usage limit", "outcome": "throttled"}]}
 ```
 
-A Codex agent that runs harness needs `sandbox: danger-full-access` (harness
-writes to its data folder, and the agents it starts need the network).
+Codex reports tokens but no cost. A Codex agent that runs harness needs
+`sandbox: danger-full-access` (harness writes to its data folder, and the
+agents it starts need the network).
 
 **OpenCode** (1.18.35), JSONL events, session captured from the stream; no
 system-prompt option, so the profile body goes at the top of the prompt:
@@ -294,13 +397,20 @@ system-prompt option, so the profile body goes at the top of the prompt:
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "text"}, "field": "part.text", "pick": "join"},
    "session": {"field": "sessionID", "pick": "first"},
-   "error": {"where": {"type": "error"}}}}
+   "error": {"where": {"type": "error"}},
+   "metrics": {
+     "input_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.input+part.tokens.cache.read+part.tokens.cache.write", "pick": "sum"},
+     "cached_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.cache.read", "pick": "sum"},
+     "output_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.output", "pick": "sum"},
+     "cost_usd": {"where": {"type": "step_finish"}, "field": "part.cost", "pick": "sum"},
+     "turns": {"where": {"type": "step_finish"}, "pick": "count"}}}}
 ```
 
 ## Other commands
 
 `harness def show|list|rm`, `harness profile show|list|rm` (with `--project`
 and `--cwd`), `harness budget set|list|rm`, `harness config [set <key> <n>]`,
-`harness gc [--days n] [--dry-run]`, `harness trust [--approve]`,
+`harness gc [--days n] [--dry-run]`, `harness stats`, `harness compare`,
+`harness trust [--approve]`,
 `harness home` (data folder; `HARNESS_HOME` overrides it), `harness skill`
 (the skill file for parent harnesses), `harness version`.

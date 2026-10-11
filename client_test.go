@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/arahe-dev/harnesssdk/internal/engine"
 )
 
 // The test binary is also the fake agent CLI (HARNESS_SDK_FAKE=1) and, as
@@ -115,6 +117,44 @@ func TestStartAndWait(t *testing.T) {
 	}
 	if res, err = c.Wait(ctx, id); err != nil || res.Turn != 2 || res.Output != "answer: more" {
 		t.Fatalf("second wait: %+v %v", res, err)
+	}
+}
+
+func TestCompareAndStats(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	res, err := c.Compare(ctx, []string{"echo", "fail"}, Request{Prompt: "q", Kind: "eval"})
+	if err != nil || len(res) != 2 {
+		t.Fatal(err)
+	}
+	if res[0].Profile != "echo" || res[0].Outcome != Success || res[1].Outcome != Permanent || res[1].Error == "" {
+		t.Fatalf("%+v %+v", res[0], res[1])
+	}
+	st, err := c.Stats(StatsFilter{Kind: "eval"})
+	if err != nil || len(st) != 2 || st[0].Turns != 1 {
+		t.Fatalf("%+v %v", st, err)
+	}
+	runs, _ := c.Runs(0)
+	if runs[0].Kind != "eval" {
+		t.Fatalf("kind %q", runs[0].Kind)
+	}
+}
+
+// Every complete definition in the guide is one def set accepts.
+func TestGuideDefinitionsParse(t *testing.T) {
+	n := 0
+	for _, block := range strings.Split(Guide, "```json\n")[1:] {
+		body, _, _ := strings.Cut(block, "```")
+		if !strings.HasPrefix(body, `{"command"`) {
+			continue
+		}
+		n++
+		if _, err := engine.ParseDefinition("example", []byte(body)); err != nil {
+			t.Errorf("guide example %d: %v\n%s", n, err, body)
+		}
+	}
+	if n < 4 {
+		t.Fatalf("found %d example definitions, want at least 4", n)
 	}
 }
 

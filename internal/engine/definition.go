@@ -63,6 +63,11 @@ type OutputRule struct {
 	Answer  *Selector `json:"answer,omitempty"`
 	Session *Selector `json:"session,omitempty"`
 	Error   *Selector `json:"error,omitempty"`
+	// Metrics are numbers recorded with each turn, such as tokens and
+	// cost, by name. Each is a selector: over the events for jsonl output,
+	// over the one document for json. Pick "sum" adds up every match and
+	// "count" counts matches; a field may add several paths with "+".
+	Metrics map[string]*Selector `json:"metrics,omitempty"`
 }
 
 // Selector picks a field from the events of a JSONL stream that match
@@ -70,7 +75,8 @@ type OutputRule struct {
 type Selector struct {
 	Where map[string]string `json:"where,omitempty"`
 	Field string            `json:"field,omitempty"`
-	// Pick is "last" (default), "first" or "join" (all matches, joined).
+	// Pick is "last" (default), "first" or "join" (all matches, joined);
+	// a metric may also "sum" or "count" its matches.
 	Pick string `json:"pick,omitempty"`
 	Join string `json:"join,omitempty"`
 }
@@ -170,6 +176,14 @@ func (d *Definition) validate() error {
 	default:
 		return fmt.Errorf("output.format must be \"text\", \"json\" or \"jsonl\", got %q", o.Format)
 	}
+	if len(o.Metrics) > 0 && o.Format == "text" {
+		return errors.New("metrics need json or jsonl output")
+	}
+	for name, sel := range o.Metrics {
+		if err := sel.validateMetric(name); err != nil {
+			return fmt.Errorf("output.metrics.%s: %w", name, err)
+		}
+	}
 	for i := range d.Failures {
 		f := &d.Failures[i]
 		if _, err := parseOutcome(f.Outcome); err != nil {
@@ -260,48 +274,89 @@ func (s *Selector) validate(needField bool) error {
 	return nil
 }
 
-// extract finds the answer, the failure flag and the session id in stdout.
-func (d *Definition) extract(stdout io.Reader) (answer string, failed bool, session string, err error) {
+func (s *Selector) validateMetric(name string) error {
+	switch {
+	case !validName(name):
+		return errors.New("use lower-case letters, digits, '.', '_' and '-'")
+	case s == nil:
+		return errors.New("needs a selector")
+	case s.Field == "" && s.Pick != "count":
+		return errors.New("field is required, except with \"pick\": \"count\"")
+	case s.Join != "":
+		return errors.New("join is for text values")
+	}
+	switch s.Pick {
+	case "", "last", "first", "sum", "count":
+		return nil
+	}
+	return fmt.Errorf("pick must be last, first, sum or count, got %q", s.Pick)
+}
+
+// extraction is what one attempt's stdout says.
+type extraction struct {
+	Answer  string
+	Failed  bool
+	Session string
+	Metrics map[string]float64
+}
+
+// extract finds the answer, the failure flag, the session id and the
+// metrics in stdout. The error says the answer could not be found; what
+// was found is returned with it.
+func (d *Definition) extract(stdout io.Reader) (extraction, error) {
 	if d.Output.Format == "jsonl" {
 		return d.extractEvents(stdout)
 	}
+	var x extraction
 	data, err := io.ReadAll(stdout)
 	if err != nil {
-		return "", false, "", err
+		return x, err
 	}
 	if d.Output.Format == "text" {
-		return strings.TrimRight(string(data), "\r\n"), false, "", nil
+		x.Answer = strings.TrimRight(string(data), "\r\n")
+		return x, nil
 	}
 	var doc any
 	if err := json.Unmarshal(bytes.TrimSpace(data), &doc); err != nil {
-		return "", false, "", fmt.Errorf("output is not one JSON document: %w", err)
+		return x, fmt.Errorf("output is not one JSON document: %w", err)
 	}
-	// The failure flag and session are read first: a failure document often
-	// has no answer, and its session is still worth resuming.
+	// The failure flag, session and metrics are read first: a failure
+	// document often has no answer, and its session is still worth resuming.
 	if d.Output.ErrorField != "" {
 		if e, ok := lookup(doc, d.Output.ErrorField); ok {
-			failed = jsonTruthy(e)
+			x.Failed = jsonTruthy(e)
 		}
 	}
 	if d.Output.SessionField != "" {
 		if s, ok := lookup(doc, d.Output.SessionField); ok {
-			session = scalar(s)
+			x.Session = scalar(s)
 		}
 	}
+	metrics := newMetrics(d.Output.Metrics)
+	for _, c := range metrics {
+		c.add(doc)
+	}
+	x.Metrics = metricValues(metrics)
 	ans, ok := lookup(doc, d.Output.Field)
 	if !ok {
-		return "", failed, session, fmt.Errorf("output has no field %q", d.Output.Field)
+		return x, fmt.Errorf("output has no field %q", d.Output.Field)
 	}
-	return scalar(ans), failed, session, nil
+	x.Answer = scalar(ans)
+	return x, nil
 }
 
 // extractEvents applies the jsonl selectors to one event at a time, so a
 // long stream is never held in memory. Lines that are not JSON are skipped:
 // some CLIs print banners on stdout.
-func (d *Definition) extractEvents(stdout io.Reader) (answer string, failed bool, session string, err error) {
+func (d *Definition) extractEvents(stdout io.Reader) (extraction, error) {
+	var x extraction
 	o := d.Output
 	errs, sess, ans := newCollector(o.Error), newCollector(o.Session), newCollector(o.Answer)
+	metrics := newMetrics(o.Metrics)
 	cs := []*collector{errs, sess, ans}
+	for _, c := range metrics {
+		cs = append(cs, c)
+	}
 	events := 0
 	br := bufio.NewReaderSize(stdout, 64<<10)
 	for {
@@ -316,7 +371,7 @@ func (d *Definition) extractEvents(stdout io.Reader) (answer string, failed bool
 			}
 			line = long
 		}
-		if line = bytes.TrimSpace(line); len(line) > 0 && (errs.mayMatch(line) || sess.mayMatch(line) || ans.mayMatch(line)) {
+		if line = bytes.TrimSpace(line); len(line) > 0 && slices.ContainsFunc(cs, func(c *collector) bool { return c.mayMatch(line) }) {
 			var ev any
 			if json.Unmarshal(line, &ev) == nil {
 				events++
@@ -331,25 +386,30 @@ func (d *Definition) extractEvents(stdout io.Reader) (answer string, failed bool
 			break
 		}
 		if rerr != nil {
-			return "", false, "", rerr
+			return x, rerr
 		}
 	}
 	if _, ok := errs.value(); errs.matched > 0 && (o.Error.Field == "" || ok) {
-		failed = true
+		x.Failed = true
 	}
-	session, _ = sess.value()
+	x.Session, _ = sess.value()
+	x.Metrics = metricValues(metrics)
 	answer, ok := ans.value()
 	if !ok {
-		return "", failed, session, fmt.Errorf("no event matched output.answer in %d events", events)
+		return x, fmt.Errorf("no event matched output.answer in %d events", events)
 	}
-	return answer, failed, session, nil
+	x.Answer = answer
+	return x, nil
 }
 
 // collector applies one selector to a stream of events.
 type collector struct {
 	s       *Selector
+	metric  bool
 	matched int
 	vals    []string // every value for pick join; otherwise the chosen one
+	num     float64  // a metric's value so far
+	found   bool     // a metric found a number
 	// literal holds Where values that can be found in a raw line before it
 	// is decoded; see mayMatch.
 	literal [][]byte
@@ -367,6 +427,29 @@ func newCollector(s *Selector) *collector {
 		c.literal = append(c.literal, []byte(want))
 	}
 	return c
+}
+
+func newMetrics(m map[string]*Selector) map[string]*collector {
+	out := map[string]*collector{}
+	for name, s := range m {
+		c := newCollector(s)
+		c.metric = true
+		out[name] = c
+	}
+	return out
+}
+
+func metricValues(cs map[string]*collector) map[string]float64 {
+	var out map[string]float64
+	for name, c := range cs {
+		if v, ok := c.number(); ok {
+			if out == nil {
+				out = map[string]float64{}
+			}
+			out[name] = v
+		}
+	}
+	return out
 }
 
 // mayMatch reports whether a raw line can match, without decoding it. A
@@ -389,6 +472,18 @@ func (c *collector) add(ev any) {
 		return
 	}
 	c.matched++
+	if c.metric {
+		v, ok := numberAt(ev, c.s.Field)
+		switch {
+		case c.s.Pick == "count", !ok, c.s.Pick == "first" && c.found:
+		case c.s.Pick == "sum":
+			c.num += v
+			c.found = true
+		default:
+			c.num, c.found = v, true
+		}
+		return
+	}
 	if c.s.Field == "" {
 		return
 	}
@@ -418,6 +513,35 @@ func (c *collector) value() (string, bool) {
 	return c.vals[0], true
 }
 
+// number is a metric's value; a count is known even when nothing matched.
+func (c *collector) number() (float64, bool) {
+	if c.s.Pick == "count" {
+		return float64(c.matched), true
+	}
+	return c.num, c.found
+}
+
+// numberAt adds up the numbers at one or more paths joined with "+".
+func numberAt(ev any, field string) (float64, bool) {
+	var sum float64
+	found := false
+	for path := range strings.SplitSeq(field, "+") {
+		v, ok := lookup(ev, strings.TrimSpace(path))
+		if !ok {
+			continue
+		}
+		switch x := v.(type) {
+		case float64:
+			sum, found = sum+x, true
+		case string:
+			if f, err := strconv.ParseFloat(x, 64); err == nil {
+				sum, found = sum+f, true
+			}
+		}
+	}
+	return sum, found
+}
+
 func (s *Selector) matches(ev any) bool {
 	for path, want := range s.Where {
 		v, ok := lookup(ev, path)
@@ -428,7 +552,8 @@ func (s *Selector) matches(ev any) bool {
 	return true
 }
 
-// lookup follows a dotted path through objects and array indexes.
+// lookup follows a dotted path through objects and array indexes; a
+// negative index counts from the end.
 func lookup(doc any, path string) (any, bool) {
 	cur := doc
 	for _, key := range strings.Split(path, ".") {
@@ -441,6 +566,9 @@ func lookup(doc any, path string) (any, bool) {
 			cur = next
 		case []any:
 			i, err := strconv.Atoi(key)
+			if i < 0 {
+				i += len(node) // -1 is the last element
+			}
 			if err != nil || i < 0 || i >= len(node) {
 				return nil, false
 			}

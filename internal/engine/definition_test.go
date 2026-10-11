@@ -65,22 +65,24 @@ func TestParseDefinitionErrors(t *testing.T) {
 
 func TestExtractJSON(t *testing.T) {
 	d := &Definition{Output: OutputRule{Format: "json", Field: "result", ErrorField: "is_error", SessionField: "meta.session"}}
-	ans, failed, session, err := d.extract(strings.NewReader(`{"result":"done","is_error":false,"meta":{"session":"s-1"}}`))
+	x, err := d.extract(strings.NewReader(`{"result":"done","is_error":false,"meta":{"session":"s-1"}}`))
+	ans, failed, session := x.Answer, x.Failed, x.Session
 	if err != nil || ans != "done" || failed || session != "s-1" {
 		t.Fatalf("got %q %v %q %v", ans, failed, session, err)
 	}
-	_, failed, _, _ = d.extract(strings.NewReader(`{"result":"x","is_error":true}`))
+	x, _ = d.extract(strings.NewReader(`{"result":"x","is_error":true}`))
+	failed = x.Failed
 	if !failed {
 		t.Fatal("error_field true should mark failure")
 	}
-	if _, _, _, err := d.extract(strings.NewReader(`not json`)); err == nil {
+	if _, err := d.extract(strings.NewReader(`not json`)); err == nil {
 		t.Fatal("want error for non-JSON output")
 	}
-	if _, _, _, err := d.extract(strings.NewReader(`{"other":1}`)); err == nil {
+	if _, err := d.extract(strings.NewReader(`{"other":1}`)); err == nil {
 		t.Fatal("want error for a missing field")
 	}
 	d.Output.Field = "items.1"
-	if ans, _, _, _ := d.extract(strings.NewReader(`{"items":["a","b"]}`)); ans != "b" {
+	if x, _ := d.extract(strings.NewReader(`{"items":["a","b"]}`)); x.Answer != "b" {
 		t.Fatalf("array index: %q", ans)
 	}
 }
@@ -108,19 +110,21 @@ func TestExtractJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ans, failed, session, err := d.extract(strings.NewReader(opencodeEvents))
+	x, err := d.extract(strings.NewReader(opencodeEvents))
+	ans, failed, session := x.Answer, x.Failed, x.Session
 	if err != nil || ans != "OK" || failed || session != "ses_ed4e8557fffeMwuZjsS6XPzGJk" {
 		t.Fatalf("got %q %v %q %v", ans, failed, session, err)
 	}
-	_, failed, _, _ = d.extract(strings.NewReader(opencodeEvents + `{"type":"error","error":{"message":"boom"}}` + "\n"))
+	x, _ = d.extract(strings.NewReader(opencodeEvents + `{"type":"error","error":{"message":"boom"}}` + "\n"))
+	failed = x.Failed
 	if !failed {
 		t.Fatal("an error event should mark failure")
 	}
-	if _, _, _, err := d.extract(strings.NewReader(`{"type":"step_start"}`)); err == nil {
+	if _, err := d.extract(strings.NewReader(`{"type":"step_start"}`)); err == nil {
 		t.Fatal("no answer event should be an error")
 	}
 	d.Output.Answer.Pick = "last"
-	if ans, _, _, _ := d.extract(strings.NewReader(opencodeEvents)); ans != "K" {
+	if x, _ := d.extract(strings.NewReader(opencodeEvents)); x.Answer != "K" {
 		t.Fatalf("pick last: %q", ans)
 	}
 }
@@ -135,7 +139,8 @@ func TestExtractJSONLSpellings(t *testing.T) {
 		`{"type":"text","n":1e2,"v":"escaped"}` + "\n" +
 		`{"type":"other","n":100,"v":"no"}` + "\n" +
 		`{"type":"text","n":100,"v":"` + strings.Repeat("x", 200<<10) + `"}` // longer than the read buffer, no newline
-	ans, _, _, err := d.extract(strings.NewReader(stream))
+	x, err := d.extract(strings.NewReader(stream))
+	ans := x.Answer
 	if err != nil {
 		t.Fatal(err)
 	}
