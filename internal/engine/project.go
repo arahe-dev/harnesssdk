@@ -3,7 +3,6 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -95,16 +94,9 @@ type trustStore map[string]map[string]string // project dir â†’ relative path â†
 func (h *Home) trustPath() string { return filepath.Join(h.Dir, "trust.json") }
 
 func (h *Home) readTrust() (trustStore, error) {
-	data, err := readShared(h.trustPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return trustStore{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
 	t := trustStore{}
-	if err := json.Unmarshal(data, &t); err != nil {
-		return nil, fmt.Errorf("trust.json: %w", err)
+	if _, err := readVersioned(h.trustPath(), "projects", &t); err != nil {
+		return nil, err
 	}
 	return t, nil
 }
@@ -121,8 +113,7 @@ func (h *Home) updateTrust(change func(trustStore)) error {
 		return err
 	}
 	change(t)
-	data, _ := json.MarshalIndent(t, "", "  ")
-	return writeFileAtomic(h.trustPath(), append(data, '\n'))
+	return writeVersioned(h.trustPath(), "projects", t)
 }
 
 // checkTrust refuses a project file whose content has not been trusted.

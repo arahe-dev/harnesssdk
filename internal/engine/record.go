@@ -17,6 +17,7 @@ import (
 // harness session and turns. It lives in runs/<id>/ with the prompts,
 // answers and raw output of every turn.
 type Run struct {
+	Format  int          `json:"format"`
 	ID      string       `json:"id"`
 	Profile string       `json:"profile"`
 	Harness string       `json:"harness"`
@@ -59,7 +60,7 @@ func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
 		if err != nil {
 			return nil, err
 		}
-		r := &Run{ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
+		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
 		return r, r.Save()
 	}
 	return nil, errors.New("could not allocate a run id")
@@ -81,6 +82,9 @@ func (h *Home) LoadRun(id string) (*Run, error) {
 	var r Run
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("run %s: %w", id, err)
+	}
+	if err := checkFormat("run "+id, r.Format); err != nil {
+		return nil, err
 	}
 	r.dir = dir
 	return &r, nil

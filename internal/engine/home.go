@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -178,16 +177,9 @@ func (h *Home) store(kind, name string, data []byte, projectDir string) error {
 
 // Budgets loads the named capacities; a missing file means none.
 func (h *Home) Budgets() (map[string]int64, error) {
-	data, err := readShared(h.budgetsPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]int64{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
 	b := map[string]int64{}
-	if err := json.Unmarshal(data, &b); err != nil {
-		return nil, fmt.Errorf("budgets.json: %w", err)
+	if _, err := readVersioned(h.budgetsPath(), "budgets", &b); err != nil {
+		return nil, err
 	}
 	for name, c := range b {
 		if !validName(name) || c < 1 {
@@ -221,8 +213,7 @@ func (h *Home) SetBudget(name string, capacity int64) error {
 	} else {
 		b[name] = capacity
 	}
-	data, _ := json.MarshalIndent(b, "", "  ")
-	return writeFileAtomic(h.budgetsPath(), append(data, '\n'))
+	return writeVersioned(h.budgetsPath(), "budgets", b)
 }
 
 // List returns the definitions or profiles a run in cwd can see: the

@@ -63,8 +63,9 @@ type gateEntry struct {
 }
 
 type gateState struct {
-	Held  []gateEntry `json:"held"`
-	Queue []gateEntry `json:"queue"`
+	Format int         `json:"format"`
+	Held   []gateEntry `json:"held"`
+	Queue  []gateEntry `json:"queue"`
 }
 
 // Gate is the machine-wide arbiter in one data folder.
@@ -146,18 +147,23 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		live.Close()
 		os.Remove(g.liveFile(id))
 	}
-	for first := true; ; first = false {
-		granted, verdict, err := g.try(claims, me, first, reject)
-		if err != nil {
+	for queued := false; ; {
+		granted, verdict, err := g.try(claims, me, !queued, reject)
+		switch {
+		case errors.Is(err, errBusy) && !reject:
+			// A ledger stayed locked by others all through this pass:
+			// contention is part of waiting, never a failure. The request
+			// is queued by the first pass that gets through.
+		case err != nil:
 			leave()
 			return nil, err
-		}
-		if granted {
+		case granted:
 			return &Ticket{ID: id, Live: live, release: leave}, nil
-		}
-		if verdict != nil {
+		case verdict != nil:
 			leave()
 			return nil, verdict
+		default:
+			queued = true
 		}
 		select {
 		case <-ctx.Done():
@@ -219,34 +225,42 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 // update changes ledgers under their locks, taken in name order, after
 // dropping dead tickets.
 func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
-	var unlocks []func()
+	var locks []*os.File
 	defer func() {
-		for i := len(unlocks) - 1; i >= 0; i-- {
-			unlocks[i]()
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].Close()
 		}
 	}()
 	sts := make([]*gateState, len(claims))
+	before := make([][]byte, len(claims))
 	for i, c := range claims {
 		dir := g.ledger(c.Name)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		unlock, err := lockFileWait(filepath.Join(dir, "state.lock"), 10*time.Second)
+		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), 2*time.Second)
 		if err != nil {
 			return fmt.Errorf("gate %s: %w", c.Name, err)
 		}
-		unlocks = append(unlocks, unlock)
+		locks = append(locks, lk)
 		st, err := readGate(dir)
 		if err != nil {
 			return err
 		}
+		before[i], _ = json.Marshal(st)
 		st.prune(g)
 		sts[i] = st
 	}
 	change(sts)
+	// Write only what changed: waiters poll, and most passes change
+	// nothing.
 	for i, c := range claims {
-		data, _ := json.MarshalIndent(sts[i], "", "  ")
-		if err := writeFileAtomic(filepath.Join(g.ledger(c.Name), "state.json"), append(data, '\n')); err != nil {
+		sts[i].Format = formatVersion
+		after, _ := json.Marshal(sts[i])
+		if string(after) == string(before[i]) {
+			continue
+		}
+		if err := writeFileAtomic(filepath.Join(g.ledger(c.Name), "state.json"), append(after, '\n')); err != nil {
 			return err
 		}
 	}
@@ -265,11 +279,14 @@ func readGate(dir string) (*gateState, error) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("gate %s: %w", filepath.Base(dir), err)
 	}
+	if err := checkFormat("gate "+filepath.Base(dir), st.Format); err != nil {
+		return nil, err
+	}
 	return &st, nil
 }
 
 // alive reports whether a ticket's owner, or an agent that inherited its
-// lock, still holds it.
+// lock, still holds it, and removes the liveness file of a dead one.
 func (g *Gate) alive(id string) bool {
 	unlock, err := lockFile(g.liveFile(id))
 	if errors.Is(err, errBusy) {
@@ -280,6 +297,18 @@ func (g *Gate) alive(id string) bool {
 		os.Remove(g.liveFile(id))
 	}
 	return false
+}
+
+// held is alive without the cleanup, for readers.
+func (g *Gate) held(id string) bool {
+	if _, err := os.Stat(g.liveFile(id)); err != nil {
+		return false
+	}
+	unlock, err := lockFile(g.liveFile(id))
+	if err == nil {
+		unlock()
+	}
+	return errors.Is(err, errBusy)
 }
 
 // prune drops dead tickets.
@@ -333,12 +362,14 @@ func (h *Home) GateStatus() ([]GateInfo, error) {
 		if strings.HasPrefix(n, "key-") {
 			info.Capacity = 1
 		}
-		st := &gateState{}
-		if _, err := os.Stat(g.ledger(n)); err == nil {
-			if err := g.update([]Claim{{Name: n}}, func(s []*gateState) { st = s[0] }); err != nil {
-				return nil, err
-			}
+		// Read without the lock: ledgers are replaced whole, and status
+		// must not queue behind the waiters it reports on.
+		st, err := readGate(g.ledger(n))
+		if err != nil {
+			return nil, err
 		}
+		st.Held = slices.DeleteFunc(st.Held, func(e gateEntry) bool { return !g.held(e.ID) })
+		st.Queue = slices.DeleteFunc(st.Queue, func(e gateEntry) bool { return !g.held(e.ID) })
 		if strings.HasPrefix(n, "key-") && len(st.Held)+len(st.Queue) == 0 {
 			continue
 		}

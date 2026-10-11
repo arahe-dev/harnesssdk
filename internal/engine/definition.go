@@ -15,6 +15,8 @@ import (
 // Definition says how to run one harness's headless CLI. It is data: the
 // binary knows nothing about any particular harness.
 type Definition struct {
+	// Format is the definition format, 1; omitted means 1.
+	Format      int    `json:"format,omitempty"`
 	Name        string `json:"-"`
 	Scope       string `json:"-"` // project or global
 	Path        string `json:"-"`
@@ -97,6 +99,9 @@ func ParseDefinition(name string, data []byte) (*Definition, error) {
 }
 
 func (d *Definition) validate() error {
+	if err := checkFormat("definition", d.Format); err != nil {
+		return err
+	}
 	if strings.TrimSpace(d.Command) == "" {
 		return errors.New("command is required")
 	}

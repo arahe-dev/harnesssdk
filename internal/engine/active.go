@@ -15,6 +15,7 @@ import (
 // one harness process share that process.
 
 type activeMarker struct {
+	Format     int    `json:"format"`
 	Run        string `json:"run"`
 	Turn       int    `json:"turn"`
 	PID        int    `json:"pid"` // the process executing the turn
@@ -32,6 +33,7 @@ func (h *Home) writeActive(m activeMarker) error {
 	if err := os.MkdirAll(h.activeDir(), 0o700); err != nil {
 		return err
 	}
+	m.Format = formatVersion
 	data, _ := json.Marshal(m)
 	return writeFileAtomic(h.activePath(m.Run), data)
 }
@@ -57,7 +59,7 @@ func (h *Home) activeMarkers() []activeMarker {
 			continue
 		}
 		var m activeMarker
-		if json.Unmarshal(data, &m) != nil {
+		if json.Unmarshal(data, &m) != nil || checkFormat("active marker", m.Format) != nil {
 			continue
 		}
 		run, err := h.LoadRun(id)
