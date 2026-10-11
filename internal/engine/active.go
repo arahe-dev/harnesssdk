@@ -62,8 +62,7 @@ func (h *Home) activeMarkers() []activeMarker {
 		if json.Unmarshal(data, &m) != nil || checkFormat("active marker", m.Format) != nil {
 			continue
 		}
-		run, err := h.LoadRun(id)
-		if err != nil || !run.executing() {
+		if !validName(id) || !executingAt(filepath.Join(h.Dir, "runs", id)) {
 			h.clearActive(id)
 			continue
 		}

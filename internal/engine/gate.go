@@ -81,13 +81,17 @@ type gateState struct {
 type Gate struct {
 	dir     string
 	lineage map[string]bool
-	poll    time.Duration
+	// A waiter checks its ledgers' files every poll and passes over them
+	// under their locks only when one has changed, or every recheck: a
+	// dead ticket changes nothing until a pass removes it.
+	poll, recheck time.Duration
 }
 
 // Gate returns the arbiter. lineage lists the ticket ids held by the
 // harness runs this process was started from.
 func (h *Home) Gate(lineage []string) *Gate {
-	g := &Gate{dir: filepath.Join(h.Dir, "gate"), lineage: map[string]bool{}, poll: 200 * time.Millisecond}
+	g := &Gate{dir: filepath.Join(h.Dir, "gate"), lineage: map[string]bool{},
+		poll: 100 * time.Millisecond, recheck: time.Second}
 	for _, id := range lineage {
 		if id != "" {
 			g.lineage[id] = true
@@ -157,6 +161,8 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		os.Remove(g.liveFile(id))
 	}
 	for queued := false; ; {
+		// Stamped before the pass, so a change during it is not missed.
+		stamps := g.stamps(claims)
 		granted, verdict, err := g.try(claims, me, !queued, reject)
 		switch {
 		case errors.Is(err, errBusy) && !reject:
@@ -174,11 +180,34 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		default:
 			queued = true
 		}
+		if err := g.waitChange(ctx, claims, stamps); err != nil {
+			leave()
+			return nil, err
+		}
+	}
+}
+
+// stamps identifies the current version of each claim's ledger file.
+func (g *Gate) stamps(claims []Claim) []string {
+	out := make([]string, len(claims))
+	for i, c := range claims {
+		out[i] = fileStamp(filepath.Join(g.ledger(c.Name), "state.json"))
+	}
+	return out
+}
+
+// waitChange returns when a ledger differs from stamps, recheck has
+// passed, or ctx ends.
+func (g *Gate) waitChange(ctx context.Context, claims []Claim, stamps []string) error {
+	deadline := time.Now().Add(g.recheck)
+	for {
 		select {
 		case <-ctx.Done():
-			leave()
-			return nil, ctx.Err()
+			return ctx.Err()
 		case <-time.After(g.poll):
+		}
+		if time.Now().After(deadline) || !slices.Equal(g.stamps(claims), stamps) {
+			return nil
 		}
 	}
 }

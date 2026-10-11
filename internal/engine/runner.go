@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -783,30 +784,38 @@ func (r *Runner) Wait(ctx context.Context, id string) (rep Report, finished bool
 // WaitTurn is Wait for turn n: a turn queued after it does not change what
 // is waited for.
 func (r *Runner) WaitTurn(ctx context.Context, id string, n int) (rep Report, finished bool, err error) {
-	tick := time.NewTicker(300 * time.Millisecond)
+	// The record is read when it changes, and every few seconds to notice a
+	// turn whose process died without recording an end.
+	record := filepath.Join(r.home.Dir, "runs", id, "run.json")
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
+	var run *Run
+	var stamp string
+	var read time.Time
 	for {
-		run, err := r.home.LoadRun(id)
-		if err != nil {
-			return Report{}, false, err
-		}
-		if n < 1 || n > len(run.Turns) {
-			return Report{}, false, fmt.Errorf("run %s has no turn %d", id, n)
-		}
-		// Only the last turn can be unfinished: a turn is queued only after
-		// the one before it finished.
-		if !run.Turns[n-1].finished() && !run.executing() {
-			if run, err = r.home.updateRun(id, func(run *Run) error {
-				if !run.Turns[len(run.Turns)-1].finished() {
-					r.reapLost(run)
-				}
-				return nil
-			}); err != nil {
+		if s := fileStamp(record); run == nil || s != stamp || time.Since(read) > 3*time.Second {
+			stamp, read = s, time.Now()
+			if run, err = r.home.LoadRun(id); err != nil {
 				return Report{}, false, err
 			}
-		}
-		if run.Turns[n-1].finished() {
-			return reportOf(run, n), true, nil
+			if n < 1 || n > len(run.Turns) {
+				return Report{}, false, fmt.Errorf("run %s has no turn %d", id, n)
+			}
+			// Only the last turn can be unfinished: a turn is queued only
+			// after the one before it finished.
+			if !run.Turns[n-1].finished() && !run.executing() {
+				if run, err = r.home.updateRun(id, func(run *Run) error {
+					if !run.Turns[len(run.Turns)-1].finished() {
+						r.reapLost(run)
+					}
+					return nil
+				}); err != nil {
+					return Report{}, false, err
+				}
+			}
+			if run.Turns[n-1].finished() {
+				return reportOf(run, n), true, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -814,6 +823,16 @@ func (r *Runner) WaitTurn(ctx context.Context, id string, n int) (rep Report, fi
 		case <-tick.C:
 		}
 	}
+}
+
+// fileStamp identifies a file's current version: its modification time
+// and size, or "" if it is missing.
+func fileStamp(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprint(fi.ModTime().UnixNano(), fi.Size())
 }
 
 // reportOf builds a report from a run's record of turn n.

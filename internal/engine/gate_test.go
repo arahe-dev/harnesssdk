@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func newGateHome(t *testing.T) *Home {
+func newGateHome(t testing.TB) *Home {
 	t.Helper()
 	h, err := NewHome(t.TempDir())
 	if err != nil {
@@ -22,7 +22,7 @@ func newGateHome(t *testing.T) *Home {
 
 func fastGate(h *Home, lineage ...string) *Gate {
 	g := h.Gate(lineage)
-	g.poll = 10 * time.Millisecond
+	g.poll, g.recheck = 10*time.Millisecond, 50*time.Millisecond
 	return g
 }
 

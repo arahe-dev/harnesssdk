@@ -138,8 +138,11 @@ func (h *Home) updateRun(id string, change func(*Run) error) (*Run, error) {
 }
 
 // executing reports whether a process holds the run's execution lock.
-func (r *Run) executing() bool {
-	unlock, err := lockFile(r.Path("exec.lock"))
+func (r *Run) executing() bool { return executingAt(r.dir) }
+
+// executingAt is executing for a run folder, without reading its record.
+func executingAt(dir string) bool {
+	unlock, err := lockFile(filepath.Join(dir, "exec.lock"))
 	if err != nil {
 		return errors.Is(err, errBusy)
 	}
