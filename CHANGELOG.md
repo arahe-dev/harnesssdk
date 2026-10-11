@@ -52,8 +52,9 @@ their own headless CLIs, with HertaSDK v1.0.0-next as execution policy.
 
 ### Known limits
 
-- Unix builds and vets but has not been run; CI runs the suite on Ubuntu and
-  Windows.
+- The full suite, including the process-group tree-kill test, passes in CI on
+  Ubuntu and Windows with Go 1.26 and stable; no harness CLI has been run on
+  Unix yet.
 - If Windows refuses a Job Object (a parent job can forbid it), cancelling
   falls back to `taskkill /T`, and processes the CLI leaves running when it
   exits are not cleaned up. The attempt's stderr log records a warning.

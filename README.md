@@ -9,9 +9,9 @@ Delegation is one shell command, `harness run <profile> "task"`, so the parent
 keeps its own loop, tools, prompts and context. The child runs in its own
 harness's native one-shot mode (`pi -p`, `claude -p`, `codex exec`, ...).
 
-> **Status: v0.1.0.** Built and tested on Windows 11 with Pi 1.0.4 and
-> Claude Code 2.1.220; Unix support compiles and is vetted but has not been
-> run on Linux or macOS yet. See [What v0 does not do](#what-v0-does-not-do).
+> **Status: v0.1.0.** Used on Windows 11 with Pi 1.0.4 and Claude Code
+> 2.1.220. The test suite passes in CI on Ubuntu and Windows; no real harness
+> CLI has been run on Linux or macOS yet. See [What v0 does not do](#what-v0-does-not-do).
 
 ## One layer, nothing hardcoded
 
