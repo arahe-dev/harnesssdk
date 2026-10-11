@@ -22,7 +22,8 @@ import (
 
 	"github.com/arahe-dev/hertasdk"
 
-	harness "github.com/arahe-dev/harnesssdk"
+	sdk "github.com/arahe-dev/harnesssdk"
+	harness "github.com/arahe-dev/harnesssdk/internal/engine"
 )
 
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.
@@ -39,6 +40,8 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness def set|show|list|rm             harness definitions (JSON); --project for this project
   harness trust [--approve]                review, then trust, this project's .harness files
   harness budget set|list|rm               capacity limits shared by every harness process
+  harness config [set <key> <n>]           max_depth, max_running, retention_days
+  harness gc [--days n] [--dry-run]        remove finished runs older than retention_days
   harness home | skill | version
 `
 
@@ -92,13 +95,13 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		fmt.Fprint(c.stdout, usage)
 		return 0, nil
 	case "guide":
-		fmt.Fprint(c.stdout, harness.Guide)
+		fmt.Fprint(c.stdout, sdk.Guide)
 		return 0, nil
 	case "skill":
-		fmt.Fprint(c.stdout, harness.Skill)
+		fmt.Fprint(c.stdout, sdk.Skill)
 		return 0, nil
 	case "version":
-		fmt.Fprintln(c.stdout, "harness", harness.Version)
+		fmt.Fprintln(c.stdout, "harness", sdk.Version)
 		return 0, nil
 	}
 	h, err := harness.OpenHome()
@@ -116,6 +119,10 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return 0, c.profile(args)
 	case "budget":
 		return 0, c.budget(args)
+	case "config":
+		return 0, c.config(args)
+	case "gc":
+		return 0, c.gc(args)
 	case "trust":
 		return 0, c.trust(args)
 	case "run":
@@ -462,6 +469,74 @@ func (c *cli) budget(args []string) error {
 		return c.home.SetBudget(args[1], 0)
 	}
 	return usageErr("unknown budget command %q", args[0])
+}
+
+func (c *cli) config(args []string) error {
+	switch {
+	case len(args) == 0 || len(args) == 1 && args[0] == "list":
+		cfg, err := c.home.Config()
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintf(w, "max_depth\t%d\thow deep runs may nest (0: no nesting)\n", cfg.MaxDepth)
+		fmt.Fprintf(w, "max_running\t%d\tturns running at once on this machine (0: no cap)\n", cfg.MaxRunning)
+		fmt.Fprintf(w, "retention_days\t%d\tdays finished runs are kept (0: forever)\n", cfg.RetentionDays)
+		return w.Flush()
+	case args[0] == "set" && len(args) == 3:
+		n, err := strconv.Atoi(args[2])
+		if err != nil {
+			return usageErr("%s must be a whole number", args[1])
+		}
+		if err := c.home.SetConfig(args[1], n); err != nil {
+			return errUsage{err}
+		}
+		return nil
+	}
+	return usageErr("config takes no arguments, list, or set <key> <n>")
+}
+
+func (c *cli) gc(args []string) error {
+	fs := c.flags("gc")
+	days := fs.Int("days", -1, "remove runs last active this many days ago or more (default: retention_days)")
+	dry := fs.Bool("dry-run", false, "list what would be removed")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 0 {
+		return usageErr("gc takes no arguments")
+	}
+	if *days < 0 {
+		cfg, err := c.home.Config()
+		if err != nil {
+			return err
+		}
+		if cfg.RetentionDays == 0 {
+			return usageErr("retention_days is 0 (keep runs forever); pass --days n")
+		}
+		*days = cfg.RetentionDays
+	}
+	rep, err := c.home.GC(time.Now().AddDate(0, 0, -*days), *dry)
+	verb := "removed"
+	if *dry {
+		verb = "would remove"
+	}
+	for _, id := range rep.Runs {
+		fmt.Fprintln(c.stdout, id)
+	}
+	fmt.Fprintf(c.stderr, "harness: %s %d run(s), %s, last active %d+ days ago\n", verb, len(rep.Runs), size(rep.Bytes), *days)
+	return err
+}
+
+func size(b int64) string {
+	switch {
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
+	}
+	return fmt.Sprintf("%d bytes", b)
 }
 
 // turnFlags are shared by run, start and send.

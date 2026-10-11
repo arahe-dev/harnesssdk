@@ -4,38 +4,32 @@
 // between: one process starts the CLI, feeds it a prompt, and reads its
 // answer.
 //
-// Nothing about a particular harness is compiled in. A Definition (JSON)
-// says how to call one CLI; a Profile (Markdown with a header) names an
-// agent built on it: model, tools, system prompt and execution policy. An
-// agent creates both by running the harness command.
+// Nothing about a particular harness is compiled in. A definition (JSON)
+// says how to call one CLI; a profile (Markdown with a header) names an
+// agent built on it: model, tools, system prompt and execution policy.
+// HertaSDK is the execution contract: each profile is a Herta operation
+// with a declared effect, retry table and per-attempt timeout. Budgets,
+// serialize keys and max_running are arbitrated across every harness
+// process on the machine.
 //
-// Execution policy is HertaSDK: each profile becomes a Herta operation with
-// a declared Effect, budgets, admission, per-attempt timeout and retry
-// table, validated when the profile is saved. Budgets and serialize keys
-// hold across every harness process on the machine through the gate.
+// The harness command is the main interface; see Guide. This package is
+// the same engine for Go programs:
 //
-// harness starts its own executable as a detached worker and, on Unix, as
-// the guard of each agent's process tree; a program embedding Runner must
-// call Subcommand first in main.
+//	func main() {
+//		if code, ok := harnesssdk.Subcommand(); ok {
+//			os.Exit(code)
+//		}
+//		c, err := harnesssdk.Open(harnesssdk.Options{})
+//		...
+//		res, err := c.Run(ctx, harnesssdk.Request{Profile: "pr-review", Prompt: "Review the diff."})
+//	}
 //
-// Layout:
+// # Compatibility
 //
-//	template.go   argument templates: {name}, {name?text}, {*name}
-//	definition.go harness definitions: args, output (text, json, jsonl), failure rules
-//	profile.go    profiles and their Herta policy fields
-//	home.go       the data directory (~/.harness) and lookups
-//	project.go    per-project .harness folders and trust
-//	gate.go       machine-wide FIFO ledgers for budgets and serialize keys
-//	lineage.go    nested runs: parent and lineage from env or process ancestry
-//	ancestors*.go process ancestry per OS
-//	active.go     the index of running turns and their agents
-//	record.go     run records (runs/<id>/)
-//	runner.go     turns: prepare, execute under the gate and Herta, wait, stop
-//	worker.go     detached workers (harness start, send --detach)
-//	detach*.go    starting a worker that outlives its starter
-//	process*.go   one CLI invocation; process-tree containment (job object;
-//	              on Unix a guard leading the process group)
-//	lock*.go      cross-process file locks
-//	share*.go     reading records while another process replaces them
-//	guide.go      the embedded agent guide and skill
+// From v1.5.0 this package follows semantic versioning: within v1, nothing
+// exported here is removed or changes meaning, and the data folder stays
+// readable. Every file harness writes for itself carries a format number,
+// and a harness refuses a format newer than it reads rather than misread
+// it. Definitions and profiles written for v1 keep working. The
+// implementation lives in internal packages and may change in any release.
 package harnesssdk

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/arahe-dev/harnesssdk"
+	harness "github.com/arahe-dev/harnesssdk/internal/engine"
 )
 
 // The test binary doubles as the harness CLI (HARNESS_TEST_CLI=1) and as a
@@ -120,6 +120,28 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 	if code, _, _ := harnessCLI(t, "", "nonsense"); code != 2 {
 		t.Fatalf("unknown command: %d", code)
+	}
+}
+
+func TestCLIConfigAndGC(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "max_depth") || !strings.Contains(out, "retention_days  30") {
+		t.Fatalf("config: %d %q", code, out)
+	}
+	if code, _, errs := harnessCLI(t, "", "config", "set", "max_depth", "x"); code != 2 {
+		t.Fatalf("config set non-number: %d %s", code, errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "config", "set", "retention_days", "0"); code != 0 {
+		t.Fatalf("config set: %d %s", code, errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "gc"); code != 2 || !strings.Contains(errs, "--days") {
+		t.Fatalf("gc with retention off: %d %s", code, errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "gc", "--days", "1", "--dry-run"); code != 0 || !strings.Contains(errs, "would remove 0 run(s)") {
+		t.Fatalf("gc --dry-run: %d %s", code, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "status"); code != 0 || !strings.Contains(out, "(max_running)") {
+		t.Fatalf("status: %d %s", code, out)
 	}
 }
 

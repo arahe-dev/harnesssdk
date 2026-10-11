@@ -10,7 +10,7 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v1.2.0.** Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
+> **Status: v1.5.0**, with a stable Go API. Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35 and Codex 0.162.1, including a Codex agent that starts a Pi
 > agent through harness. The test suite passes in CI on Ubuntu and Windows; no
 > real harness CLI has been run on Linux or macOS yet. See
@@ -23,11 +23,12 @@ prompts and context. The child runs in its own harness's native one-shot mode
 - **No harness-specific code.** How to call a CLI is a JSON **definition**;
   an agent built on it is a Markdown **profile**. Agents create both by
   running `harness` commands, after reading the CLI's own `--help`.
-- **HertaSDK owns execution policy.** Each profile is a Herta operation with a
-  declared effect, budgets, admission, per-attempt timeout and retry table,
-  checked when the profile is saved: a profile that could replay a
-  half-finished file-editing run is rejected before it ever runs. Budgets and
-  serialize keys hold across every harness process on the machine.
+- **HertaSDK owns the execution contract.** Each profile is a Herta operation
+  with a declared effect, retry table and per-attempt timeout, checked when the
+  profile is saved: a profile that could replay a half-finished file-editing
+  run is rejected before it ever runs. Budgets and serialize keys are
+  arbitrated once, across every harness process on the machine, with Herta's
+  budget rules.
 
 ## Example: a Pi GPT-6.1 Sol reviewer
 
@@ -85,6 +86,36 @@ harness skill > ~/.agents/skills/harness/SKILL.md                # Codex, Pi
 placeholders, output rules, policy keys, exit codes. Data lives in
 `~/.harness` (`HARNESS_HOME` overrides it).
 
+## Go API
+
+The root package is the same engine for Go programs, with the same data
+folder, profiles and machine-wide limits as the command:
+
+```go
+func main() {
+	if code, ok := harnesssdk.Subcommand(); ok { // background workers and process guards
+		os.Exit(code)
+	}
+	c, err := harnesssdk.Open(harnesssdk.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer c.Close(context.Background())
+	res, err := c.Run(ctx, harnesssdk.Request{Profile: "pr-review", Prompt: "Review the diff on this branch."})
+	if err != nil {
+		log.Fatalf("%s: %v", res.Outcome, err) // res is nil only if no run was created
+	}
+	fmt.Println(res.Output)
+}
+```
+
+`Run`, `Start`, `Send`, `SendStart`, `Wait`, `Result`, `Stop`, `Runs`,
+`SetDefinition`, `SetProfile`, `SetBudget`, `Config`, `SetConfig` and `GC`
+mirror the commands. From v1.5.0 the package follows semantic versioning:
+nothing exported is removed or changes meaning within v1. Every file harness
+writes for itself carries a format number; a harness refuses a newer format
+rather than misread it, and reads files from earlier releases as they are.
+
 ## Concepts
 
 | | |
@@ -93,6 +124,7 @@ placeholders, output rules, policy keys, exit codes. Data lives in
 | **Profile** (`profiles/<name>.md`) | Header: harness, placeholder values, and the Herta policy (`effect`, `retry`, `timeout`, `budget`, `admission`, `serialize`). Body: the system prompt. |
 | **Project** (`.harness/` in a repository) | Definitions and profiles for one project, taking precedence there. Used only once trusted; any change needs trusting again. |
 | **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs (an agent that runs harness itself) know their parent and never deadlock on their ancestors, even under a harness that strips its agents' environment. |
+| **Config** (`config.json`) | Machine-wide limits: `max_depth` (3) for how deep runs nest, `max_running` (16) for turns running at once, `retention_days` (30) before finished runs are removed. `harness config` lists and sets them. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,
@@ -118,9 +150,9 @@ Windows, falling back to a parent-pid walk; a process group on Unix) and is
   log says when this happens.
 - A process that leaves its process group or job on purpose (a daemon that
   calls `setsid`) is outside the tree and is not stopped with it.
-- Programs that embed the Go package must call `harnesssdk.Subcommand()`
-  first in `main`: harness starts its own executable as a detached worker and,
-  on Unix, as the guard of each agent's process tree.
+- Programs that use the Go API must call `harnesssdk.Subcommand()` first in
+  `main`: harness starts its own executable as a detached worker and, on
+  Unix, as the guard of each agent's process tree.
 
 ## What HarnessSDK is not
 

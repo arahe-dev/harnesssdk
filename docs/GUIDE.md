@@ -160,6 +160,24 @@ process ancestors to the run executing it instead, so this works with no
 setup. `harness status`, run inside an agent, prints the run it belongs to
 and how it was found.
 
+## Machine limits
+
+`harness config` lists three limits for every run on the machine;
+`harness config set <key> <n>` changes one.
+
+- `max_depth` (default 3): how deep runs may nest. A run started by an agent
+  that harness launched is one level below that agent's run; a run that
+  would go deeper than `max_depth` is refused (exit 3) with the command to
+  raise it. Do the work yourself rather than nest further.
+- `max_running` (default 16, 0 for no cap): turns running at once, across
+  every profile. A top-level turn waits for a slot like any budget. A nested
+  turn does not wait (its ancestors hold slots while they wait for it): when
+  every slot is taken it fails at once as `throttled` (exit 5).
+- `retention_days` (default 30, 0 to keep everything): finished runs, with
+  their prompts and answers, are removed this many days after their last
+  turn. harness does this at most once a day as runs start;
+  `harness gc [--days n] [--dry-run]` does it now.
+
 ## Per-project profiles
 
 A project can keep definitions and profiles in a `.harness` folder at or
@@ -193,18 +211,18 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   project whose profiles apply.
 - `--json` prints `{run, turn, profile, harness, outcome, exit_code, attempts, session, duration_ms, output, error}`
   (an array for several tasks).
-- Every run is kept in `<home>/runs/<run-id>/`: `run.json`, each turn's
-  prompt, answer (`turn-N.out.md`), raw stdout/stderr, and `worker.log` for
-  background turns.
+- Every run is kept in `<home>/runs/<run-id>/` for `retention_days` after
+  its last turn: `run.json`, each turn's prompt, answer (`turn-N.out.md`),
+  raw stdout/stderr, and `worker.log` for background turns.
 - A turn's duration includes any time spent waiting for its budget.
 
 | Exit code | Outcome |
 |---:|---|
 | 0 | success |
 | 2 | bad command line, profile or definition |
-| 3 | permanent |
+| 3 | permanent (also: nested deeper than `max_depth`) |
 | 4 | transient |
-| 5 | throttled (also: the run is busy with another turn) |
+| 5 | throttled (also: the run is busy with another turn; a nested turn found every `max_running` slot taken) |
 | 6 | uncertain |
 | 7 | still running (`wait --timeout`, `result`) |
 | 130 | cancelled (Ctrl-C, SIGTERM, `harness stop`) |
@@ -282,6 +300,7 @@ system-prompt option, so the profile body goes at the top of the prompt:
 ## Other commands
 
 `harness def show|list|rm`, `harness profile show|list|rm` (with `--project`
-and `--cwd`), `harness budget set|list|rm`, `harness trust [--approve]`,
+and `--cwd`), `harness budget set|list|rm`, `harness config [set <key> <n>]`,
+`harness gc [--days n] [--dry-run]`, `harness trust [--approve]`,
 `harness home` (data folder; `HARNESS_HOME` overrides it), `harness skill`
 (the skill file for parent harnesses), `harness version`.
