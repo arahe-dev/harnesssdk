@@ -1,6 +1,9 @@
 package harnesssdk
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 // A run started by an agent that harness launched is nested: it knows its
 // parent run and the gate tickets held by its ancestors (its lineage), so
@@ -35,29 +38,44 @@ func (h *Home) DiscoverParentage() Parentage {
 	return p
 }
 
-// ancestorRun returns the running run whose executing process is an
-// ancestor of this one.
+// ancestorRun returns the running turn's run whose agent is an ancestor of
+// this process. Each turn's agent process is its own, so turns executed side
+// by side by one harness process are told apart. Only a process executing a
+// single turn identifies a run by itself. A marker can lag the agent's start
+// by a moment, so the lookup is retried briefly.
 func (h *Home) ancestorRun() string {
 	up := ancestors(os.Getpid(), 64)
 	if len(up) == 0 {
 		return ""
 	}
-	runs, err := h.Runs(500)
-	if err != nil {
-		return ""
-	}
-	byPID := map[int]*Run{}
-	for _, r := range runs {
-		if n := len(r.Turns); n > 0 && r.Turns[n-1].Outcome == "running" && r.Turns[n-1].PID > 0 {
-			byPID[r.Turns[n-1].PID] = r
+	for try := 0; try < 3; try++ {
+		markers := h.activeMarkers()
+		if len(markers) == 0 {
+			return ""
 		}
-	}
-	for _, pid := range up {
-		// A recorded pid could have been reused; a running turn whose
-		// execution lock is held still has its process.
-		if r, ok := byPID[pid]; ok && r.executing() {
-			return r.ID
+		agents := map[int]activeMarker{}
+		executors := map[int][]string{}
+		for _, m := range markers {
+			if m.AgentPID > 0 {
+				agents[m.AgentPID] = m
+			}
+			executors[m.PID] = append(executors[m.PID], m.Run)
 		}
+		// This process may itself be a turn's agent (a definition can run
+		// harness directly); it is never the executor of its own agent.
+		for _, pid := range append([]int{os.Getpid()}, up...) {
+			m, ok := agents[pid]
+			// A matching creation time proves the id was not reused.
+			if ok && (m.AgentStart == 0 || processStart(pid) == m.AgentStart) {
+				return m.Run
+			}
+		}
+		for _, pid := range up {
+			if runs := executors[pid]; len(runs) == 1 {
+				return runs[0]
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	return ""
 }

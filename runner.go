@@ -293,7 +293,15 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 
 	var stdin *os.File
 	if t.Def.Stdin != "none" {
-		if stdin, err = os.Open(v["prompt_file"]); err != nil {
+		input := v["prompt_file"]
+		if t.Def.Stdin == "system+prompt" && t.Profile.System != "" {
+			input = t.Run.Path(fmt.Sprintf("turn-%d.input.md", t.N))
+			text := "<instructions>\n" + t.Profile.System + "\n</instructions>\n\n" + t.Prompt
+			if err := os.WriteFile(input, []byte(text), 0o600); err != nil {
+				return nil, hertasdk.Fail(hertasdk.Permanent, err)
+			}
+		}
+		if stdin, err = os.Open(input); err != nil {
 			return nil, hertasdk.Fail(hertasdk.Permanent, err)
 		}
 		defer stdin.Close()
@@ -302,6 +310,11 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	code, warnings, runErr := runProcess(ctx, procSpec{
 		Argv: argv, Dir: t.Run.Cwd, Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
+		OnStart: func(pid int) {
+			// Record this attempt's agent, so a nested run can find this
+			// turn even when its sibling turns share this process.
+			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
+		},
 	})
 	t.exitCode = code
 	out, _ := os.ReadFile(stdoutPath)
@@ -490,6 +503,11 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(err)
 	}
 	rep.Run = run
+
+	if err := r.home.writeActive(activeMarker{Run: run.ID, Turn: n, PID: os.Getpid()}); err != nil {
+		return fail(err)
+	}
+	defer r.home.clearActive(run.ID)
 
 	res, t, err := r.execute(ctx, run, n, execLock)
 	run, ferr := r.finish(run.ID, n, t, res, err)

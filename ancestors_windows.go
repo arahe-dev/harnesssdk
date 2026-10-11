@@ -52,3 +52,6 @@ func birthOf(pid uint32) int64 {
 	}
 	return created.Nanoseconds()
 }
+
+// processStart is a process's creation time, or 0 if it is gone.
+func processStart(pid int) int64 { return birthOf(uint32(pid)) }

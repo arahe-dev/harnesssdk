@@ -48,7 +48,7 @@ Read this guide, then use the commands below.
 |---|---|
 | `command` | Executable, found on PATH. |
 | `args` | Argument **groups**. A group is passed only if every placeholder in it has a value, so `["--model", "{model}"]` disappears when the profile sets no model. |
-| `stdin` | `"prompt"` (default) writes the prompt to the CLI's stdin; `"none"` gives it no input. |
+| `stdin` | `"prompt"` (default) writes the prompt to the CLI's stdin; `"system+prompt"` writes the profile body first as an `<instructions>` block, for a CLI with no system-prompt option; `"none"` gives it no input. |
 | `env` | Extra environment variables; values may use placeholders. |
 | `session` | `"mint"`: harness picks a UUID per session and passes it through `{session}` / `{new_session}` / `{resume_session}`. Omit it if the CLI cannot take a caller-chosen id, and capture the id from the output instead. |
 | `output` | Where the answer is; see below. |
@@ -244,7 +244,9 @@ Start from one, then check the flags against the installed CLI's `--help`.
 
 **Codex** (0.162.1), JSONL events. Codex may strip its commands'
 environment (`shell_environment_policy`), so harness's variables are set
-through it; `exec resume` continues a session:
+through it; `exec resume` continues a session. Codex has no option that adds
+to its instructions from a file, so the profile body goes at the top of the
+prompt:
 
 ```json
 {"command": "codex",
@@ -253,6 +255,7 @@ through it; `exec resume` continues a session:
           ["-c", "shell_environment_policy.set.HARNESS_LINEAGE={lineage}"],
           ["-c", "shell_environment_policy.set.HARNESS_HOME={harness_home}"],
           ["--skip-git-repo-check"], ["--json"], ["resume", "{resume_session}"], ["-"]],
+ "stdin": "system+prompt",
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"},
    "session": {"where": {"type": "thread.started"}, "field": "thread_id", "pick": "first"},
@@ -263,11 +266,13 @@ through it; `exec resume` continues a session:
 A Codex agent that runs harness needs `sandbox: danger-full-access` (harness
 writes to its data folder, and the agents it starts need the network).
 
-**OpenCode** (1.18.35), JSONL events, session captured from the stream:
+**OpenCode** (1.18.35), JSONL events, session captured from the stream; no
+system-prompt option, so the profile body goes at the top of the prompt:
 
 ```json
 {"command": "opencode",
  "args": [["run"], ["--format", "json"], ["--model", "{model}"], ["--session", "{resume_session}"]],
+ "stdin": "system+prompt",
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "text"}, "field": "part.text", "pick": "join"},
    "session": {"field": "sessionID", "pick": "first"},

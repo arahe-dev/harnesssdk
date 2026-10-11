@@ -28,6 +28,7 @@
 //	gate.go       machine-wide FIFO ledgers for budgets and serialize keys
 //	lineage.go    nested runs: parent and lineage from env or process ancestry
 //	ancestors*.go process ancestry per OS
+//	active.go     the index of running turns and their agents
 //	record.go     run records (runs/<id>/)
 //	runner.go     turns: prepare, execute under the gate and Herta, wait, stop
 //	worker.go     detached workers (harness start, send --detach)

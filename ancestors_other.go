@@ -26,3 +26,6 @@ func ancestors(pid, max int) []int {
 	}
 	return out
 }
+
+// processStart is unknown here: 0 skips the creation-time check.
+func processStart(int) int64 { return 0 }

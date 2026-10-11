@@ -33,3 +33,19 @@ func ancestors(pid, max int) []int {
 	}
 	return out
 }
+
+// processStart is a process's start time in clock ticks since boot (field
+// 22 of /proc/<pid>/stat), or 0 if it is gone.
+func processStart(pid int) int64 {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	s := string(data)
+	f := strings.Fields(s[strings.LastIndexByte(s, ')')+1:])
+	if len(f) < 20 {
+		return 0
+	}
+	t, _ := strconv.ParseInt(f[19], 10, 64)
+	return t
+}

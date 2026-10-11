@@ -25,7 +25,9 @@ type Definition struct {
 	// placeholder in it has a value, so optional flags drop out cleanly.
 	Args [][]string `json:"args"`
 	// Stdin is "prompt" (the default) to write the prompt to the CLI's
-	// stdin, or "none".
+	// stdin; "system+prompt" to write the profile body first, as an
+	// <instructions> block, for a CLI with no system-prompt option; or
+	// "none".
 	Stdin string `json:"stdin,omitempty"`
 	// Env adds environment variables; values may use placeholders and an
 	// empty result leaves the variable unset.
@@ -109,9 +111,9 @@ func (d *Definition) validate() error {
 		}
 	}
 	switch d.Stdin {
-	case "", "prompt", "none":
+	case "", "prompt", "system+prompt", "none":
 	default:
-		return fmt.Errorf("stdin must be \"prompt\" or \"none\", got %q", d.Stdin)
+		return fmt.Errorf("stdin must be \"prompt\", \"system+prompt\" or \"none\", got %q", d.Stdin)
 	}
 	switch d.Session {
 	case "", "mint":
