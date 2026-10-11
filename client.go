@@ -97,31 +97,34 @@ func (c *Client) Start(req Request) (string, error) {
 
 // Send runs a follow-up turn in a run's session and waits for its answer.
 func (c *Client) Send(ctx context.Context, run, prompt string, vars map[string]string) (*Result, error) {
-	n, err := c.prepareSend(run, prompt, vars)
+	if err := checkSend(prompt, vars); err != nil {
+		return nil, err
+	}
+	rep, err := c.runner.Send(ctx, run, prompt, vars)
 	if err != nil {
 		return nil, err
 	}
-	return finished(c.runner.Execute(ctx, run, n))
+	return finished(rep)
 }
 
 // SendStart queues a follow-up turn and runs it in the background. Wait
 // or Result reads its answer.
 func (c *Client) SendStart(run, prompt string, vars map[string]string) error {
-	n, err := c.prepareSend(run, prompt, vars)
+	if err := checkSend(prompt, vars); err != nil {
+		return err
+	}
+	n, err := c.runner.PrepareSend(run, prompt, vars)
 	if err != nil {
 		return err
 	}
 	return c.runner.Detach(run, n)
 }
 
-func (c *Client) prepareSend(run, prompt string, vars map[string]string) (int, error) {
-	if err := checkVars(vars); err != nil {
-		return 0, err
-	}
+func checkSend(prompt string, vars map[string]string) error {
 	if prompt == "" {
-		return 0, errors.New("empty prompt")
+		return errors.New("empty prompt")
 	}
-	return c.runner.PrepareSend(run, prompt, vars)
+	return checkVars(vars)
 }
 
 // ErrRunning is returned with the Result of a turn that has not finished.

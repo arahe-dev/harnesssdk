@@ -21,10 +21,10 @@ import (
 // is recorded in <home>/trust.json, and any change needs trusting again. A
 // file that harness itself writes into a project is trusted as it is saved.
 
-// projectDir returns the .harness folder of the project containing cwd, if
-// any. A data folder (this one, or any with a runs folder, such as the
+// FindProject returns the .harness folder of the project containing cwd,
+// if any. A data folder (this one, or any with a runs folder, such as the
 // default ~/.harness when HARNESS_HOME points elsewhere) is never a project.
-func (h *Home) projectDir(cwd string) (string, bool) {
+func (h *Home) FindProject(cwd string) (string, bool) {
 	if cwd == "" {
 		return "", false
 	}
@@ -45,13 +45,10 @@ func (h *Home) projectDir(cwd string) (string, bool) {
 	}
 }
 
-// FindProject returns the .harness folder of the project containing cwd.
-func (h *Home) FindProject(cwd string) (string, bool) { return h.projectDir(cwd) }
-
 // ProjectDir is where "set --project" writes for cwd: the existing project
 // folder, or a new .harness folder in cwd.
 func (h *Home) ProjectDir(cwd string) (string, error) {
-	if dir, ok := h.projectDir(cwd); ok {
+	if dir, ok := h.FindProject(cwd); ok {
 		return dir, nil
 	}
 	abs, err := filepath.Abs(cwd)
@@ -95,7 +92,7 @@ func (h *Home) trustPath() string { return filepath.Join(h.Dir, "trust.json") }
 
 func (h *Home) readTrust() (trustStore, error) {
 	t := trustStore{}
-	if _, err := readVersioned(h.trustPath(), "projects", &t); err != nil {
+	if err := readVersioned(h.trustPath(), "projects", &t); err != nil {
 		return nil, err
 	}
 	return t, nil

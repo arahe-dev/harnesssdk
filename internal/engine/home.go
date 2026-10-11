@@ -72,7 +72,7 @@ type Item struct {
 // first, which must be trusted, then the global one.
 func (h *Home) locate(kind, name, cwd string) (Item, []byte, error) {
 	file := name + kindExt[kind]
-	if proj, ok := h.projectDir(cwd); ok {
+	if proj, ok := h.FindProject(cwd); ok {
 		path := filepath.Join(proj, kind, file)
 		data, err := readShared(path)
 		if err == nil {
@@ -178,7 +178,7 @@ func (h *Home) store(kind, name string, data []byte, projectDir string) error {
 // Budgets loads the named capacities; a missing file means none.
 func (h *Home) Budgets() (map[string]int64, error) {
 	b := map[string]int64{}
-	if _, err := readVersioned(h.budgetsPath(), "budgets", &b); err != nil {
+	if err := readVersioned(h.budgetsPath(), "budgets", &b); err != nil {
 		return nil, err
 	}
 	for name, c := range b {
@@ -239,7 +239,7 @@ func (h *Home) List(kind, cwd string) ([]Item, error) {
 		}
 		return nil
 	}
-	if proj, ok := h.projectDir(cwd); ok {
+	if proj, ok := h.FindProject(cwd); ok {
 		if err := scan(proj, "project"); err != nil {
 			return nil, err
 		}

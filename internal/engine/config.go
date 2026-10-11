@@ -25,32 +25,32 @@ func checkFormat(what string, v int) error {
 
 // readVersioned reads a file written by writeVersioned, {"format": N,
 // key: payload}, or, as written before versions existed, the payload
-// alone. It reports whether the file exists.
-func readVersioned(path, key string, payload any) (bool, error) {
+// alone. A missing file leaves payload as it is.
+func readVersioned(path, key string, payload any) error {
 	data, err := readShared(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
+		return nil
 	}
 	if err != nil {
-		return true, err
+		return err
 	}
 	name := filepath.Base(path)
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
-		return true, fmt.Errorf("%s: %w", name, err)
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	var v int
 	inner, hasKey := top[key]
 	if raw, ok := top["format"]; ok && hasKey && json.Unmarshal(raw, &v) == nil && len(inner) > 0 && inner[0] == '{' {
 		if err := checkFormat(name, v); err != nil {
-			return true, err
+			return err
 		}
 		data = inner
 	}
 	if err := json.Unmarshal(data, payload); err != nil {
-		return true, fmt.Errorf("%s: %w", name, err)
+		return fmt.Errorf("%s: %w", name, err)
 	}
-	return true, nil
+	return nil
 }
 
 // writeVersioned writes {"format": formatVersion, key: payload}.

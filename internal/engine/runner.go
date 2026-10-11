@@ -66,8 +66,8 @@ const (
 // before it is reported as lost.
 const lostAfter = 2 * time.Minute
 
-// Runner executes turns. One Herta runtime arbitrates the turns of this
-// process; the gate holds the same budgets and serialize keys across every
+// Runner executes turns: Herta applies each profile's contract, and the
+// gate arbitrates budgets, serialize keys and max_running across every
 // harness process on the machine.
 type Runner struct {
 	home *Home
