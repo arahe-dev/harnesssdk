@@ -37,7 +37,7 @@ func TestWorkerDeathEndsAgentTree(t *testing.T) {
 	f := newFixture(t, nil)
 	pidfile := filepath.Join(t.TempDir(), "pid")
 	f.profile("hang", "harness: fake\neffect: pure\nmode: tree\nopts: pidfile="+pidfile)
-	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, nil)
+	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestInvalidProjectPolicyFailsFast(t *testing.T) {
 	defer holder.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	reps, err := f.r.Start(ctx, "unsafe", []string{"x"}, repo, nil, nil)
+	reps, err := f.r.Start(ctx, "unsafe", []string{"x"}, repo, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestDetachedWorkerGetsEnvironment(t *testing.T) {
 	t.Setenv("HARNESS_TEST_SECRET", "s3cret-from-the-shell")
 	f := newFixture(t, nil)
 	f.profile("env", "harness: fake\neffect: pure\nmode: env")
-	runs, err := f.r.Prepare("env", []string{"x"}, f.cwd, nil)
+	runs, err := f.r.Prepare("env", []string{"x"}, f.cwd, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestShutdownWithdrawsGateWaiters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer holder.Release()
-	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, nil)
+	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestShutdownWithdrawsGateWaiters(t *testing.T) {
 func TestLostTurnRemovesEnvironmentFile(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil)
+	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

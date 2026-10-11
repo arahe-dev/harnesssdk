@@ -123,6 +123,35 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCLICompareAndStats(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["echo"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatalf("def set: %d %s", code, errs)
+	}
+	for _, p := range []string{"a", "b"} {
+		profile := "---\nharness: fake\neffect: pure\nmodel: m-" + p + "\n---\nBe brief.\n"
+		if code, _, errs := harnessCLI(t, profile, "profile", "set", p, "--file", "-"); code != 0 {
+			t.Fatalf("profile set %s: %d %s", p, code, errs)
+		}
+	}
+	code, out, errs := harnessCLI(t, "", "compare", "a,b", "--kind", "eval", "hello")
+	if code != 0 || strings.Count(out, "echo: hello") != 2 || !strings.Contains(out, "PROFILE") || !strings.Contains(out, "m-b") {
+		t.Fatalf("compare: %d %s %s", code, out, errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "compare", "a", "hello"); code != 2 {
+		t.Fatalf("compare one profile: %d %s", code, errs)
+	}
+	code, out, _ = harnessCLI(t, "", "stats")
+	if code != 0 || !strings.Contains(out, "m-a") || !strings.Contains(out, "eval") || !strings.Contains(out, "100%") {
+		t.Fatalf("stats: %d %s", code, out)
+	}
+	if code, out, _ := harnessCLI(t, "", "stats", "--json", "--profile", "b"); code != 0 || !strings.Contains(out, `"profile": "b"`) || strings.Contains(out, `"profile": "a"`) {
+		t.Fatalf("stats --json: %d %s", code, out)
+	}
+}
+
 func TestCLIConfigAndGC(t *testing.T) {
 	t.Setenv("HARNESS_HOME", t.TempDir())
 	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "max_depth") || !strings.Contains(out, "retention_days  30") {

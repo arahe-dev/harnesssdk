@@ -10,7 +10,7 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v1.5.0**, with a stable Go API. Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
+> **Status: v1.6.0**, with a stable Go API. Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35 and Codex 0.162.1, including a Codex agent that starts a Pi
 > agent through harness. The test suite passes in CI on Ubuntu and Windows; no
 > real harness CLI has been run on Linux or macOS yet. See
@@ -103,15 +103,15 @@ func main() {
 	defer c.Close(context.Background())
 	res, err := c.Run(ctx, harnesssdk.Request{Profile: "pr-review", Prompt: "Review the diff on this branch."})
 	if err != nil {
-		log.Fatalf("%s: %v", res.Outcome, err) // res is nil only if no run was created
+		log.Fatal(err) // res, unless nil (no run was created), says how the turn ended
 	}
 	fmt.Println(res.Output)
 }
 ```
 
 `Run`, `Start`, `Send`, `SendStart`, `Wait`, `Result`, `Stop`, `Runs`,
-`SetDefinition`, `SetProfile`, `SetBudget`, `Config`, `SetConfig` and `GC`
-mirror the commands. From v1.5.0 the package follows semantic versioning:
+`Compare`, `Stats`, `SetDefinition`, `SetProfile`, `SetBudget`, `Config`,
+`SetConfig` and `GC` mirror the commands. From v1.5.0 the package follows semantic versioning:
 nothing exported is removed or changes meaning within v1. Every file harness
 writes for itself carries a format number; a harness refuses a newer format
 rather than misread it, and reads files from earlier releases as they are.
@@ -124,7 +124,8 @@ rather than misread it, and reads files from earlier releases as they are.
 | **Profile** (`profiles/<name>.md`) | Header: harness, placeholder values, and the Herta policy (`effect`, `retry`, `timeout`, `budget`, `admission`, `serialize`). Body: the system prompt. |
 | **Project** (`.harness/` in a repository) | Definitions and profiles for one project, taking precedence there. Used only once trusted; any change needs trusting again. |
 | **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs (an agent that runs harness itself) know their parent and never deadlock on their ancestors, even under a harness that strips its agents' environment. |
-| **Config** (`config.json`) | Machine-wide limits: `max_depth` (3) for how deep runs nest, `max_running` (16) for turns running at once, `retention_days` (30) before finished runs are removed. `harness config` lists and sets them. |
+| **Config** (`config.json`) | Machine-wide limits: `max_depth` (3) for how deep runs nest, `max_running` (16) for turns running at once, `retention_days` (30) before finished runs are removed, and `repeat_warn` / `repeat_refuse` (3 / 5) for a request that keeps failing the same way. `harness config` lists and sets them. |
+| **Metrics** (`output.metrics` in a definition) | Numbers read from the CLI's own output with every turn: tokens, cost, model calls, tool calls. `harness stats` sums them up per profile and model (and per `--kind` of task) with success rates and times; `harness compare a,b "task"` runs one task on several profiles side by side. The guide's section on choosing a harness and model turns a 2026 study of harness design into starting points to check this way. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,

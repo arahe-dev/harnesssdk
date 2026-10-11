@@ -32,9 +32,9 @@ func BenchmarkExtractJSONL(b *testing.B) {
 	b.SetBytes(int64(len(out)))
 	b.ReportAllocs()
 	for b.Loop() {
-		ans, _, sess, err := d.extract(bytes.NewReader(out))
-		if err != nil || ans != "final answer" || sess != "th-1" {
-			b.Fatal(ans, sess, err)
+		x, err := d.extract(bytes.NewReader(out))
+		if err != nil || x.Answer != "final answer" || x.Session != "th-1" {
+			b.Fatal(x, err)
 		}
 	}
 }

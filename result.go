@@ -49,11 +49,23 @@ type Result struct {
 	Duration time.Duration
 	// StderrTail is the end of the CLI's stderr when the turn failed.
 	StderrTail string
+	Model      string             // the profile's model placeholder, if any
+	Metrics    map[string]float64 // the definition's metrics, such as tokens and cost
+	// Hint is advice for the caller, such as to stop repeating a request
+	// that keeps failing.
+	Hint string
+	// Error says why the turn did not succeed; Run, Send and Wait also
+	// return it as their error.
+	Error string
 }
 
 func resultOf(rep engine.Report) *Result {
 	res := &Result{Turn: rep.Turn, Outcome: Outcome(rep.Outcome), Output: rep.Output,
-		Attempts: rep.Attempts, Duration: rep.Duration, StderrTail: rep.StderrTail}
+		Attempts: rep.Attempts, Duration: rep.Duration, StderrTail: rep.StderrTail,
+		Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint}
+	if rep.Err != nil {
+		res.Error = rep.Err.Error()
+	}
 	if rep.Run != nil {
 		res.Run, res.Profile, res.Harness, res.Session = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session
 	}
@@ -84,6 +96,7 @@ type Run struct {
 	Cwd     string
 	Parent  string // the run whose agent started this one, if any
 	Depth   int    // 0 for a run started outside any run
+	Kind    string // the label given when it started
 	Session string
 	Created time.Time
 	Turns   []Turn
@@ -99,14 +112,18 @@ type Turn struct {
 	Started  time.Time
 	Ended    time.Time
 	Error    string
+	Model    string
+	Metrics  map[string]float64
+	Hint     string
 }
 
 func runOf(r *engine.Run) Run {
 	out := Run{ID: r.ID, Profile: r.Profile, Harness: r.Harness, Cwd: r.Cwd, Parent: r.Parent,
-		Depth: r.Depth, Session: r.Session, Created: r.Created}
+		Depth: r.Depth, Kind: r.Kind, Session: r.Session, Created: r.Created}
 	for _, t := range r.Turns {
 		out.Turns = append(out.Turns, Turn{N: t.N, Outcome: Outcome(t.Outcome), Attempts: t.Attempts,
-			ExitCode: t.ExitCode, Queued: t.Queued, Started: t.Started, Ended: t.Ended, Error: t.Error})
+			ExitCode: t.ExitCode, Queued: t.Queued, Started: t.Started, Ended: t.Ended, Error: t.Error,
+			Model: t.Model, Metrics: t.Metrics, Hint: t.Hint})
 	}
 	return out
 }

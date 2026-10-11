@@ -74,14 +74,19 @@ type Config struct {
 	MaxRunning int `json:"max_running"`
 	// RetentionDays is how long finished runs are kept; 0 keeps them.
 	RetentionDays int `json:"retention_days"`
+	// RepeatWarn and RepeatRefuse are how many times in a row the same
+	// request may fail before the caller is warned, and before it is
+	// refused; 0 turns either off.
+	RepeatWarn   int `json:"repeat_warn"`
+	RepeatRefuse int `json:"repeat_refuse"`
 }
 
 // ConfigKeys are the settable keys, in display order.
-var ConfigKeys = []string{"max_depth", "max_running", "retention_days"}
+var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse"}
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
-	return Config{Format: formatVersion, MaxDepth: 3, MaxRunning: 16, RetentionDays: 30}
+	return Config{Format: formatVersion, MaxDepth: 3, MaxRunning: 16, RetentionDays: 30, RepeatWarn: 3, RepeatRefuse: 5}
 }
 
 func (h *Home) configPath() string { return filepath.Join(h.Dir, "config.json") }
@@ -102,7 +107,7 @@ func (h *Home) Config() (Config, error) {
 	if err := checkFormat("config.json", c.Format); err != nil {
 		return c, err
 	}
-	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 {
+	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 {
 		return c, errors.New("config.json: limits must be ≥ 0")
 	}
 	return c, nil
@@ -132,6 +137,10 @@ func (h *Home) SetConfig(key string, value int) error {
 		c.MaxRunning = value
 	case "retention_days":
 		c.RetentionDays = value
+	case "repeat_warn":
+		c.RepeatWarn = value
+	case "repeat_refuse":
+		c.RepeatRefuse = value
 	}
 	c.Format = formatVersion
 	data, _ := json.MarshalIndent(c, "", "  ")

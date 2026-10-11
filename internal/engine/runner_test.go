@@ -40,6 +40,21 @@ func fakeHarness(args []string) int {
 	in, _ := io.ReadAll(os.Stdin)
 	ms, _ := strconv.Atoi(opts["ms"])
 	switch mode {
+	case "usage":
+		// Two model calls reporting usage, then the answer as the last part
+		// of the final message; with a fresh state file, one call and a
+		// transient failure first.
+		step := `{"type":"step","usage":{"input":100,"cache":20},"cost":0.25}`
+		fmt.Println(step)
+		if opts["state"] != "" {
+			if _, err := os.Stat(opts["state"]); err != nil {
+				os.WriteFile(opts["state"], nil, 0o644)
+				fmt.Fprintln(os.Stderr, "read ECONNRESET")
+				return 1
+			}
+		}
+		fmt.Println(step)
+		fmt.Printf(`{"type":"done","content":[{"type":"thinking"},{"type":"text","text":"answer: %s"}]}`+"\n", strings.TrimSpace(string(in)))
 	case "echo":
 		fmt.Printf("echo: %s\n", in)
 	case "args":
@@ -197,7 +212,7 @@ func (f *fixture) saveProfile(name, header string) {
 
 func (f *fixture) start(ctx context.Context, profile string, tasks ...string) []Report {
 	f.t.Helper()
-	reps, err := f.r.Start(ctx, profile, tasks, f.cwd, nil, nil)
+	reps, err := f.r.Start(ctx, profile, tasks, f.cwd, nil, "", nil)
 	if err != nil {
 		f.t.Fatal(err)
 	}

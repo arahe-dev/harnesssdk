@@ -47,6 +47,7 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 	}
 	sort.Strings(rep.Runs)
 	h.pruneLive(cutoff)
+	h.pruneRepeats()
 	return rep, errors.Join(errs...)
 }
 

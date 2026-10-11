@@ -64,6 +64,8 @@ type Request struct {
 	Cwd string
 	// Vars sets profile placeholders for this run only.
 	Vars map[string]string
+	// Kind labels the run for Stats, such as "review".
+	Kind string
 }
 
 // Run runs one agent and waits for its answer. The error is non-nil
@@ -74,11 +76,30 @@ func (c *Client) Run(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	reps, err := c.runner.Start(ctx, req.Profile, []string{req.Prompt}, cwd, vars, nil)
+	reps, err := c.runner.Start(ctx, req.Profile, []string{req.Prompt}, cwd, vars, req.Kind, nil)
 	if err != nil {
 		return nil, err
 	}
 	return finished(reps[0])
+}
+
+// Compare runs req.Prompt on each profile side by side (req.Profile is
+// ignored) and returns their results in order. The error is non-nil if no
+// run could be created; each result says how its turn ended.
+func (c *Client) Compare(ctx context.Context, profiles []string, req Request) ([]*Result, error) {
+	cwd, vars, err := req.check()
+	if err != nil {
+		return nil, err
+	}
+	reps, err := c.runner.Compare(ctx, profiles, req.Prompt, cwd, vars, req.Kind, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Result, len(reps))
+	for i, rep := range reps {
+		out[i] = resultOf(rep)
+	}
+	return out, nil
 }
 
 // Start starts one agent in the background and returns its run id. The
@@ -88,7 +109,7 @@ func (c *Client) Start(req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	runs, err := c.runner.Prepare(req.Profile, []string{req.Prompt}, cwd, vars)
+	runs, err := c.runner.Prepare(req.Profile, []string{req.Prompt}, cwd, vars, req.Kind)
 	if err != nil {
 		return "", err
 	}
@@ -234,15 +255,21 @@ type Config struct {
 	MaxRunning int
 	// RetentionDays is how long finished runs are kept; 0 keeps them.
 	RetentionDays int
+	// RepeatWarn and RepeatRefuse are how many times in a row the same
+	// request may fail before the caller is warned (Result.Hint), and
+	// before it is refused; 0 turns either off.
+	RepeatWarn, RepeatRefuse int
 }
 
 // Config reads the limits.
 func (c *Client) Config() (Config, error) {
 	cfg, err := c.home.Config()
-	return Config{MaxDepth: cfg.MaxDepth, MaxRunning: cfg.MaxRunning, RetentionDays: cfg.RetentionDays}, err
+	return Config{MaxDepth: cfg.MaxDepth, MaxRunning: cfg.MaxRunning, RetentionDays: cfg.RetentionDays,
+		RepeatWarn: cfg.RepeatWarn, RepeatRefuse: cfg.RepeatRefuse}, err
 }
 
-// SetConfig sets one limit: max_depth, max_running or retention_days.
+// SetConfig sets one limit: max_depth, max_running, retention_days,
+// repeat_warn or repeat_refuse.
 func (c *Client) SetConfig(key string, value int) error { return c.home.SetConfig(key, value) }
 
 // GC removes runs last active before olderThan ago that are not running,
@@ -250,6 +277,53 @@ func (c *Client) SetConfig(key string, value int) error { return c.home.SetConfi
 func (c *Client) GC(olderThan time.Duration, dryRun bool) ([]string, error) {
 	rep, err := c.home.GC(time.Now().Add(-olderThan), dryRun)
 	return rep.Runs, err
+}
+
+// StatsFilter selects the turns Stats counts. The zero filter counts every
+// kept run.
+type StatsFilter struct {
+	Profile string
+	Kind    string
+	Since   time.Time
+}
+
+// Stats is how one profile did on one model, for one kind of run.
+type Stats struct {
+	Profile  string
+	Model    string
+	Kind     string
+	Turns    int
+	Outcomes map[Outcome]int
+	Attempts int
+	Median   time.Duration
+	P90      time.Duration
+	// Metrics are each metric's mean over the turns that reported it.
+	Metrics map[string]float64
+}
+
+// Stats sums up finished turns by profile, model and kind, most used
+// first: how they ended, how long they took, and their metrics.
+func (c *Client) Stats(f StatsFilter) ([]Stats, error) {
+	st, err := c.home.Stats(engine.StatsFilter{Profile: f.Profile, Kind: f.Kind, Since: f.Since})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Stats, len(st))
+	for i, s := range st {
+		o := Stats{Profile: s.Profile, Model: s.Model, Kind: s.Kind, Turns: s.Turns, Attempts: s.Attempts,
+			Median: s.Median, P90: s.P90, Outcomes: map[Outcome]int{}}
+		for k, n := range s.Outcomes {
+			o.Outcomes[Outcome(k)] = n
+		}
+		for k, m := range s.Metrics {
+			if o.Metrics == nil {
+				o.Metrics = map[string]float64{}
+			}
+			o.Metrics[k] = m.Mean()
+		}
+		out[i] = o
+	}
+	return out, nil
 }
 
 func (r Request) check() (string, engine.Vars, error) {

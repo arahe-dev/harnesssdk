@@ -23,7 +23,14 @@ Most requests are one of these:
   (`harness profile set <name> --file -`, add `--project` for one repository),
   check it with `harness run <profile> --dry-run "test"`, then run it.
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
+- **Choose between agents:** `harness stats --kind <label>` shows each
+  profile's success rate, time, tokens and cost so far; `harness compare a,b "task"`
+  runs the same task on several profiles side by side. Label runs with
+  `--kind review` (or similar) so the stats separate kinds of task.
 - **See what is running:** `harness status`.
+
+If harness prints `harness: hint: ...`, act on it: it means, for example,
+that the same request keeps failing and should not be repeated as it is.
 
 Report the agent's answer to the user, and say which profile and run id
 produced it.
