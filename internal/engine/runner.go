@@ -70,11 +70,12 @@ const lostAfter = 2 * time.Minute
 // process; the gate holds the same budgets and serialize keys across every
 // harness process on the machine.
 type Runner struct {
-	home    *Home
-	rt      *hertasdk.Runtime
-	gate    *Gate
-	parent  string   // the harness run whose agent started this process
-	lineage []string // gate tickets held by that run and its ancestors
+	home *Home
+	rt   *hertasdk.Runtime
+	// kin is this process's parent run and lineage, found on first use:
+	// only a new run or an executed turn needs them, so wait, result and
+	// stop never pay for discovery.
+	kin func() Parentage
 
 	mu  sync.Mutex
 	ops map[string]*hertasdk.Operation[*Turn, *Result]
@@ -115,20 +116,52 @@ func newRuntime() *hertasdk.Runtime {
 // started is running it, its parent run and lineage are found from the
 // environment or, when a harness stripped that, from process ancestry.
 func NewRunner(h *Home) (*Runner, error) {
-	p := h.DiscoverParentage()
-	return NewRunnerFor(h, p.Parent, p.Lineage)
+	r := newRunner(h)
+	r.kin = sync.OnceValue(h.DiscoverParentage)
+	return r, nil
 }
 
 // NewRunnerFor builds a runner with an explicit parent run and lineage, for
 // a detached worker that does not inherit its starter's environment.
 func NewRunnerFor(h *Home, parent string, lineage []string) (*Runner, error) {
+	r := newRunner(h)
+	r.kin = func() Parentage { return Parentage{Parent: parent, Lineage: lineage} }
+	return r, nil
+}
+
+func newRunner(h *Home) *Runner {
 	closingCtx, closeFn := context.WithCancel(context.Background())
 	return &Runner{
-		home: h, rt: newRuntime(), gate: h.Gate(lineage), parent: parent, lineage: lineage,
+		home: h, rt: newRuntime(),
 		ops:        map[string]*hertasdk.Operation[*Turn, *Result]{},
 		closingCtx: closingCtx, close: closeFn,
-	}, nil
+	}
 }
+
+// depth is how deeply a run started by this process nests: one level
+// below its parent run. It may not exceed config max_depth.
+func (r *Runner) depth() (int, error) {
+	parent := r.kin().Parent
+	if parent == "" {
+		return 0, nil
+	}
+	depth := 1
+	if pr, err := r.home.LoadRun(parent); err == nil {
+		depth = pr.Depth + 1
+	}
+	cfg, err := r.home.Config()
+	if err != nil {
+		return 0, err
+	}
+	if depth > cfg.MaxDepth {
+		return 0, hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("%w: this run would nest %d deep under run %s, and max_depth is %d; do the work here, or raise it with: harness config set max_depth %d",
+			ErrTooDeep, depth, parent, cfg.MaxDepth, depth))
+	}
+	return depth, nil
+}
+
+// ErrTooDeep refuses a run nested deeper than config max_depth.
+var ErrTooDeep = errors.New("runs nest too deep")
 
 func splitList(s string) []string {
 	var out []string
@@ -384,12 +417,18 @@ func (r *Runner) Prepare(profile string, tasks []string, cwd string, extra Vars)
 	if err != nil {
 		return nil, err
 	}
+	depth, err := r.depth()
+	if err != nil {
+		return nil, err
+	}
+	r.home.AutoGC()
 	var runs []*Run
 	for _, task := range tasks {
-		run, err := r.home.NewRun(p.Name, d.Name, cwd, r.parent)
+		run, err := r.home.NewRun(p.Name, d.Name, cwd, r.kin().Parent)
 		if err != nil {
 			return nil, err
 		}
+		run.Depth = depth
 		if _, err := queue(run, task, request{Extra: extra}); err != nil {
 			return nil, err
 		}
@@ -564,13 +603,26 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if err != nil {
 		return nil, t, err
 	}
+	cfg, err := r.home.Config()
+	if err != nil {
+		return nil, t, err
+	}
 	claims := claimsFor(p, budgets, t)
+	if cfg.MaxRunning > 0 {
+		// A nested run never waits for a slot: its ancestors hold slots
+		// while they wait for it, so waiting could last forever.
+		nested := len(r.kin().Lineage) > 0
+		claims = append(claims, Claim{Name: runningGate, Units: 1, Capacity: int64(cfg.MaxRunning), NoWait: nested})
+	}
 	gctx, gcancel := context.WithCancel(ctx)
 	stopWatch := context.AfterFunc(r.closingCtx, gcancel)
-	ticket, err := r.gate.Acquire(gctx, claims, p.Admission == hertasdk.Reject, run.ID)
+	ticket, err := r.home.Gate(r.kin().Lineage).Acquire(gctx, claims, p.Admission == hertasdk.Reject, run.ID)
 	stopWatch()
 	gcancel()
 	switch {
+	case errors.Is(err, errNoWait):
+		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"all %d turns max_running allows are running, and a nested run does not wait for one; raise it with: harness config set max_running <n>", cfg.MaxRunning))
 	case errors.Is(err, errBusy):
 		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: its budget or key is in use and admission is reject", p.Name))
 	case errors.Is(err, ErrWouldDeadlock):
@@ -581,7 +633,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		return nil, t, err
 	}
 	defer ticket.Release()
-	t.lineage = slices.Clone(r.lineage)
+	t.lineage = slices.Clone(r.kin().Lineage)
 	if ticket.ID != "" {
 		t.lineage = append(t.lineage, ticket.ID)
 	}

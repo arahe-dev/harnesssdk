@@ -41,18 +41,17 @@ func (h *Home) DiscoverParentage() Parentage {
 // ancestorRun returns the running turn's run whose agent is an ancestor of
 // this process. Each turn's agent process is its own, so turns executed side
 // by side by one harness process are told apart. Only a process executing a
-// single turn identifies a run by itself. A marker can lag the agent's start
-// by a moment, so the lookup is retried briefly.
+// single turn identifies a run by itself. A turn's agent is recorded a
+// moment after it starts, so when an ancestor executes several turns and
+// none of their agents is ours yet, the lookup is retried briefly; with no
+// executing ancestor, the answer is immediate.
 func (h *Home) ancestorRun() string {
-	up := ancestors(os.Getpid(), 64)
-	if len(up) == 0 {
+	markers := h.activeMarkers()
+	if len(markers) == 0 {
 		return ""
 	}
-	for try := 0; try < 3; try++ {
-		markers := h.activeMarkers()
-		if len(markers) == 0 {
-			return ""
-		}
+	up := ancestors(os.Getpid(), 64)
+	for try := 0; ; try++ {
 		agents := map[int]activeMarker{}
 		executors := map[int][]string{}
 		for _, m := range markers {
@@ -70,14 +69,21 @@ func (h *Home) ancestorRun() string {
 				return m.Run
 			}
 		}
+		pending := false
 		for _, pid := range up {
-			if runs := executors[pid]; len(runs) == 1 {
+			switch runs := executors[pid]; {
+			case len(runs) == 1:
 				return runs[0]
+			case len(runs) > 1:
+				pending = true
 			}
 		}
+		if !pending || try == 2 {
+			return ""
+		}
 		time.Sleep(200 * time.Millisecond)
+		markers = h.activeMarkers()
 	}
-	return ""
 }
 
 // lineageOf is the lineage recorded by a run's running turn.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,8 +34,10 @@ func TestGateFIFO(t *testing.T) {
 		t.Fatal(err)
 	}
 	granted := make(chan string, 2)
+	var wg sync.WaitGroup
+	defer wg.Wait() // releases finish before the folder is removed
 	for _, label := range []string{"b", "c"} {
-		go func() {
+		wg.Go(func() {
 			tk, err := g.Acquire(context.Background(), []Claim{c}, false, label)
 			if err != nil {
 				t.Error(err)
@@ -43,7 +46,7 @@ func TestGateFIFO(t *testing.T) {
 			granted <- label
 			time.Sleep(30 * time.Millisecond)
 			tk.Release()
-		}()
+		})
 		time.Sleep(50 * time.Millisecond) // b queues before c
 	}
 	select {
@@ -178,7 +181,8 @@ func TestGateStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(gates) != 1 || gates[0].Used != 1 || gates[0].Capacity != 2 || gates[0].Held[0] != "run-1" {
+	if len(gates) != 2 || gates[0].Name != "(max_running)" || gates[0].Capacity != int64(DefaultConfig().MaxRunning) ||
+		gates[1].Used != 1 || gates[1].Capacity != 2 || gates[1].Held[0] != "run-1" {
 		t.Fatalf("%+v", gates)
 	}
 }

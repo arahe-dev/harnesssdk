@@ -36,9 +36,10 @@ func (r *Runner) Detach(id string, n int) error {
 	if err := os.WriteFile(envPath, env, 0o600); err != nil {
 		return err
 	}
+	kin := r.kin()
 	args := []string{WorkerCommand,
 		"--home", r.home.Dir, "--run", id, "--turn", strconv.Itoa(n),
-		"--parent", r.parent, "--lineage", strings.Join(r.lineage, ","),
+		"--parent", kin.Parent, "--lineage", strings.Join(kin.Lineage, ","),
 	}
 	if err := detach(exe, args, run.Cwd); err != nil {
 		os.Remove(envPath) // it holds the caller's secrets: never leave it behind

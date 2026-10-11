@@ -46,7 +46,16 @@ type Claim struct {
 	Name     string
 	Units    int64
 	Capacity int64
+	// NoWait refuses the request at once, with errNoWait, when this claim
+	// does not fit.
+	NoWait bool
 }
+
+// runningGate is the gate name of max_running. No budget can be named so.
+const runningGate = "_running"
+
+// errNoWait refuses a request whose NoWait claim did not fit.
+var errNoWait = errors.New("no units free")
 
 // keyClaim is the gate name for a serialize key: one holder at a time.
 func keyClaim(key string) Claim {
@@ -200,6 +209,10 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 					c.Name, c.Units, c.Capacity, ancestors, ErrWouldDeadlock)
 				return
 			}
+			if c.NoWait && c.Capacity-used < c.Units {
+				verdict = fmt.Errorf("%s: all %d units are in use: %w", c.Name, c.Capacity, errNoWait)
+				return
+			}
 			head := len(st.Queue) > 0 && st.Queue[0].ID == me.ID
 			if c.Capacity-used < c.Units || !(head || nested) {
 				ok = false
@@ -338,6 +351,13 @@ func (h *Home) GateStatus() ([]GateInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := h.Config()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MaxRunning > 0 {
+		budgets[runningGate] = int64(cfg.MaxRunning)
+	}
 	g := h.Gate(nil)
 	names := map[string]bool{}
 	for n := range budgets {
@@ -359,8 +379,11 @@ func (h *Home) GateStatus() ([]GateInfo, error) {
 		}
 	}) {
 		info := GateInfo{Name: n, Capacity: budgets[n]}
-		if strings.HasPrefix(n, "key-") {
+		switch {
+		case strings.HasPrefix(n, "key-"):
 			info.Capacity = 1
+		case n == runningGate:
+			info.Name = "(max_running)"
 		}
 		// Read without the lock: ledgers are replaced whole, and status
 		// must not queue behind the waiters it reports on.

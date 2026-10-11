@@ -69,7 +69,8 @@ type Config struct {
 	// another run is one level deeper than it. 0 allows no nesting.
 	MaxDepth int `json:"max_depth"`
 	// MaxRunning caps the turns executing at once on this machine, across
-	// every profile; 0 means no cap.
+	// every profile; 0 means no cap. A top-level turn waits for a slot; a
+	// nested one fails as throttled instead, as its ancestors hold slots.
 	MaxRunning int `json:"max_running"`
 	// RetentionDays is how long finished runs are kept; 0 keeps them.
 	RetentionDays int `json:"retention_days"`
@@ -80,7 +81,7 @@ var ConfigKeys = []string{"max_depth", "max_running", "retention_days"}
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
-	return Config{Format: formatVersion, MaxDepth: 3, MaxRunning: 8, RetentionDays: 30}
+	return Config{Format: formatVersion, MaxDepth: 3, MaxRunning: 16, RetentionDays: 30}
 }
 
 func (h *Home) configPath() string { return filepath.Join(h.Dir, "config.json") }

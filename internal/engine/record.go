@@ -23,6 +23,7 @@ type Run struct {
 	Harness string       `json:"harness"`
 	Cwd     string       `json:"cwd"`
 	Parent  string       `json:"parent,omitempty"` // the harness run whose agent started this one
+	Depth   int          `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
 	Session string       `json:"session,omitempty"`
 	Created time.Time    `json:"created"`
 	Turns   []TurnRecord `json:"turns"`
