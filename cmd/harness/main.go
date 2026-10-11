@@ -22,7 +22,8 @@ import (
 
 	"github.com/arahe-dev/hertasdk"
 
-	harness "github.com/arahe-dev/harnesssdk"
+	sdk "github.com/arahe-dev/harnesssdk"
+	harness "github.com/arahe-dev/harnesssdk/internal/engine"
 )
 
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.
@@ -92,13 +93,13 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		fmt.Fprint(c.stdout, usage)
 		return 0, nil
 	case "guide":
-		fmt.Fprint(c.stdout, harness.Guide)
+		fmt.Fprint(c.stdout, sdk.Guide)
 		return 0, nil
 	case "skill":
-		fmt.Fprint(c.stdout, harness.Skill)
+		fmt.Fprint(c.stdout, sdk.Skill)
 		return 0, nil
 	case "version":
-		fmt.Fprintln(c.stdout, "harness", harness.Version)
+		fmt.Fprintln(c.stdout, "harness", sdk.Version)
 		return 0, nil
 	}
 	h, err := harness.OpenHome()

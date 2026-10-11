@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/arahe-dev/harnesssdk"
+	harness "github.com/arahe-dev/harnesssdk/internal/engine"
 )
 
 // The test binary doubles as the harness CLI (HARNESS_TEST_CLI=1) and as a
