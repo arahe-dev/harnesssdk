@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.2.0 (2026-10-12)
+
+Nested runs work under any harness, and Codex works end to end.
+
+- **Nested runs find their parent without help.** A harness can strip the
+  environment of its agent's commands (Codex with
+  `shell_environment_policy.inherit = "core"` removes `HARNESS_RUN`), which
+  left a nested run without its parent or its ancestors' tickets. When the
+  variables are missing, harness now walks up its process ancestors to the
+  harness process executing a running turn, and reads that turn's recorded
+  lineage. `harness status`, run inside an agent, says which run it belongs to
+  and whether that came from the environment or from ancestry.
+- **`{lineage}` and `{harness_home}` placeholders**, so a definition can hand
+  harness's variables to a CLI explicitly (the Codex example does).
+- **Turn records keep their lineage**; gate ticket ids start with `t`, so
+  passing one through a TOML or JSON setting never turns it into a number.
+- **Windows: reads no longer fail while a record is being replaced.** A
+  `harness wait` polling a run while its worker updated it could fail with a
+  sharing violation; reads and replacing renames of records now retry through
+  it. A stress test fails without the fix.
+- **`def set` refuses control characters in failure patterns**, the usual
+  result of writing `\b` (a backspace in JSON) for a regex word boundary;
+  such a rule could never match. Three definitions written during v1.1
+  testing had this defect and silently missed HTTP 429.
+- **`"stdin": "system+prompt"`** sends the profile body as an
+  `<instructions>` block ahead of the prompt, for CLIs with no system-prompt
+  option (Codex has none that adds to its instructions from a file; OpenCode
+  has none). Both now get their profile's instructions.
+- **The guide has verified example definitions** for Pi, Claude Code, Codex
+  and OpenCode.
+
+### Review
+
+The Pi `gpt-6.1-sol` reviewer found three defects, fixed before release with
+regression tests: (1) turns executed side by side by one harness process
+share that process, so discovery could hand a nested run a sibling's parent
+and tickets; each turn now records its own agent's root process (with its
+creation time) in an index of active turns, and discovery matches that; (2)
+discovery searched only the 500 newest runs, so an older long-running parent
+could be missed; it now reads only the active index; (3) the Codex and
+OpenCode examples dropped the profile body; see `system+prompt` above.
+Checking (1) also showed that a process that is itself a turn's agent (a
+definition can run harness directly) must count as nested in that turn.
+
+### Verified (Windows 11)
+
+- Codex 0.162.1 (the latest release) on `gpt-6.1-sol` (the top model in the
+  account's Codex model list): a Codex agent started with `harness start`
+  created a Pi profile, ran it through harness, and the Pi run recorded the
+  Codex run as its parent and inherited its gate ticket. `harness send`
+  resumed the Codex session. With the variables deliberately not passed,
+  `harness status` inside Codex found its run through process ancestry.
+- Codex and OpenCode both answered from instructions present only in the
+  profile body, delivered with `system+prompt`.
+- Tests: nested discovery with and without the environment, sibling turns in
+  one process, discovery among 600 newer runs, the new placeholders, ancestry,
+  concurrent record replacement, `system+prompt`, and the pattern check;
+  race-clean.
+
 ## v1.1.0 (2026-10-11)
 
 Removes every v0.1.0 limit that code could remove.

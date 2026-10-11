@@ -20,6 +20,8 @@ type procSpec struct {
 	// (Unix: the guard holds them; Windows ties the tree to this process
 	// with a job object instead).
 	Inherit []*os.File
+	// OnStart, if set, is called with the root process id once it runs.
+	OnStart func(pid int)
 }
 
 // runProcess runs the CLI to completion and returns its exit status. A
@@ -55,6 +57,9 @@ func runProcess(ctx context.Context, s procSpec) (exitCode int, warnings []strin
 	}
 	if warning != "" {
 		warnings = append(warnings, warning)
+	}
+	if s.OnStart != nil {
+		s.OnStart(cmd.Process.Pid)
 	}
 	done := make(chan struct{})
 	go func() {

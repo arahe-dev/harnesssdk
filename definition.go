@@ -25,7 +25,9 @@ type Definition struct {
 	// placeholder in it has a value, so optional flags drop out cleanly.
 	Args [][]string `json:"args"`
 	// Stdin is "prompt" (the default) to write the prompt to the CLI's
-	// stdin, or "none".
+	// stdin; "system+prompt" to write the profile body first, as an
+	// <instructions> block, for a CLI with no system-prompt option; or
+	// "none".
 	Stdin string `json:"stdin,omitempty"`
 	// Env adds environment variables; values may use placeholders and an
 	// empty result leaves the variable unset.
@@ -109,9 +111,9 @@ func (d *Definition) validate() error {
 		}
 	}
 	switch d.Stdin {
-	case "", "prompt", "none":
+	case "", "prompt", "system+prompt", "none":
 	default:
-		return fmt.Errorf("stdin must be \"prompt\" or \"none\", got %q", d.Stdin)
+		return fmt.Errorf("stdin must be \"prompt\", \"system+prompt\" or \"none\", got %q", d.Stdin)
 	}
 	switch d.Session {
 	case "", "mint":
@@ -164,6 +166,13 @@ func (d *Definition) validate() error {
 		f := &d.Failures[i]
 		if _, err := parseOutcome(f.Outcome); err != nil {
 			return fmt.Errorf("failures[%d]: %w", i, err)
+		}
+		// "\b" in JSON is a backspace, not a word boundary: a control
+		// character in a pattern is almost always that mistake, and the rule
+		// would silently never match.
+		if j := strings.IndexFunc(f.Match, func(r rune) bool { return r < 0x20 && r != '\t' }); j >= 0 {
+			return fmt.Errorf("failures[%d].match has a control character (%q) at byte %d; in JSON write \\\\b for a regex word boundary, \\\\d for a digit",
+				i, f.Match[j], j)
 		}
 		re, err := regexp.Compile(f.Match)
 		if err != nil {

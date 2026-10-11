@@ -10,8 +10,9 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v1.1.0.** Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220
-> and OpenCode 1.18.35. The test suite passes in CI on Ubuntu and Windows; no
+> **Status: v1.2.0.** Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
+> OpenCode 1.18.35 and Codex 0.162.1, including a Codex agent that starts a Pi
+> agent through harness. The test suite passes in CI on Ubuntu and Windows; no
 > real harness CLI has been run on Linux or macOS yet. See
 > [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
 
@@ -91,7 +92,7 @@ placeholders, output rules, policy keys, exit codes. Data lives in
 | **Definition** (`harnesses/<name>.json`) | Command, argument groups with placeholders (`{model}`, `{flag?--x}`, `{*extra}`), prompt on stdin, where the answer is (all of stdout, a JSON field, or selectors over a JSONL event stream), session handling, failure rules (regex → transient / throttled / uncertain / permanent). |
 | **Profile** (`profiles/<name>.md`) | Header: harness, placeholder values, and the Herta policy (`effect`, `retry`, `timeout`, `budget`, `admission`, `serialize`). Body: the system prompt. |
 | **Project** (`.harness/` in a repository) | Definitions and profiles for one project, taking precedence there. Used only once trusted; any change needs trusting again. |
-| **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs never deadlock on their ancestors. |
+| **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs (an agent that runs harness itself) know their parent and never deadlock on their ancestors, even under a harness that strips its agents' environment. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,

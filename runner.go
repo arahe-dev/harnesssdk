@@ -26,6 +26,7 @@ type Turn struct {
 	Def     *Definition
 	Extra   Vars // per-invocation values (--set)
 
+	home        string     // the data folder, for {harness_home}
 	lineage     []string   // gate tickets held for this turn and its ancestors
 	inherit     []*os.File // locks the agent CLI inherits (Unix)
 	attempts    int
@@ -110,10 +111,12 @@ func runtimeFor(budgets map[string]int64) (*hertasdk.Runtime, error) {
 	return hertasdk.NewRuntime(specs...)
 }
 
-// NewRunner builds a runner whose parent and lineage come from the
-// environment harness gives the agents it starts.
+// NewRunner builds a runner for this process: if an agent that harness
+// started is running it, its parent run and lineage are found from the
+// environment or, when a harness stripped that, from process ancestry.
 func NewRunner(h *Home) (*Runner, error) {
-	return NewRunnerFor(h, os.Getenv(EnvRun), splitList(os.Getenv(EnvLineage)))
+	p := h.DiscoverParentage()
+	return NewRunnerFor(h, p.Parent, p.Lineage)
 }
 
 // NewRunnerFor builds a runner with an explicit parent run and lineage, for
@@ -233,6 +236,8 @@ func (t *Turn) vars() Vars {
 		v["system_file"] = t.Run.Path("system.md")
 	}
 	v["cwd"], v["run_id"], v["run_dir"] = t.Run.Cwd, t.Run.ID, t.Run.dir
+	v["harness_home"] = t.home
+	v["lineage"] = strings.Join(t.lineage, ",")
 	return v
 }
 
@@ -288,7 +293,15 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 
 	var stdin *os.File
 	if t.Def.Stdin != "none" {
-		if stdin, err = os.Open(v["prompt_file"]); err != nil {
+		input := v["prompt_file"]
+		if t.Def.Stdin == "system+prompt" && t.Profile.System != "" {
+			input = t.Run.Path(fmt.Sprintf("turn-%d.input.md", t.N))
+			text := "<instructions>\n" + t.Profile.System + "\n</instructions>\n\n" + t.Prompt
+			if err := os.WriteFile(input, []byte(text), 0o600); err != nil {
+				return nil, hertasdk.Fail(hertasdk.Permanent, err)
+			}
+		}
+		if stdin, err = os.Open(input); err != nil {
 			return nil, hertasdk.Fail(hertasdk.Permanent, err)
 		}
 		defer stdin.Close()
@@ -297,6 +310,11 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	code, warnings, runErr := runProcess(ctx, procSpec{
 		Argv: argv, Dir: t.Run.Cwd, Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
+		OnStart: func(pid int) {
+			// Record this attempt's agent, so a nested run can find this
+			// turn even when its sibling turns share this process.
+			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
+		},
 	})
 	t.exitCode = code
 	out, _ := os.ReadFile(stdoutPath)
@@ -486,6 +504,11 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	}
 	rep.Run = run
 
+	if err := r.home.writeActive(activeMarker{Run: run.ID, Turn: n, PID: os.Getpid()}); err != nil {
+		return fail(err)
+	}
+	defer r.home.clearActive(run.ID)
+
 	res, t, err := r.execute(ctx, run, n, execLock)
 	run, ferr := r.finish(run.ID, n, t, res, err)
 	if run != nil {
@@ -537,7 +560,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, nil, err
 		}
 	}
-	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra}
+	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir}
 
 	// Validate the policy before waiting anywhere: a project file reaches
 	// here without passing through SaveProfile.
@@ -568,6 +591,14 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	t.lineage = slices.Clone(r.lineage)
 	if ticket.ID != "" {
 		t.lineage = append(t.lineage, ticket.ID)
+	}
+	// Record the lineage, so a nested run that only finds this turn through
+	// process ancestry still learns which tickets its ancestors hold.
+	if _, err := r.home.updateRun(run.ID, func(run *Run) error {
+		run.Turns[n-1].Lineage = t.lineage
+		return nil
+	}); err != nil {
+		return nil, t, err
 	}
 	// On Unix the agent inherits these locks: while any process of its tree
 	// runs, the turn counts as executing and its budget stays held, even if
@@ -789,7 +820,7 @@ func (r *Runner) DryRun(profile, prompt, cwd string, extra Vars) (*Plan, error) 
 		return nil, err
 	}
 	run := &Run{ID: "<run-id>", Cwd: cwd, dir: "<run-dir>"}
-	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra})
+	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
 }
 
 // DryRunSend renders the command a follow-up turn of a run would execute.
@@ -802,7 +833,7 @@ func (r *Runner) DryRunSend(id, prompt string, extra Vars) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra})
+	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
 }
 
 func plan(t *Turn) (*Plan, error) {

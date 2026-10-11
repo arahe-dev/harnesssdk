@@ -38,7 +38,8 @@ type TurnRecord struct {
 	Outcome  string    `json:"outcome"` // queued, running, success, transient, ...
 	Attempts int       `json:"attempts"`
 	ExitCode int       `json:"exit_code"`
-	PID      int       `json:"pid,omitempty"` // the process executing the turn
+	PID      int       `json:"pid,omitempty"`     // the process executing the turn
+	Lineage  []string  `json:"lineage,omitempty"` // gate tickets of this turn and its ancestors
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
 }
@@ -70,7 +71,7 @@ func (h *Home) LoadRun(id string) (*Run, error) {
 		return nil, fmt.Errorf("run id %q is not valid", id)
 	}
 	dir := filepath.Join(h.Dir, "runs", id)
-	data, err := os.ReadFile(filepath.Join(dir, "run.json"))
+	data, err := readShared(filepath.Join(dir, "run.json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("no run %q; list runs with: harness runs", id)
 	}

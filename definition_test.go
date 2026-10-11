@@ -50,6 +50,7 @@ func TestParseDefinitionErrors(t *testing.T) {
 		"bad outcome":     `{"command":"x","output":{"format":"text"},"failures":[{"match":"a","outcome":"fatal"}]}`,
 		"bad regex":       `{"command":"x","output":{"format":"text"},"failures":[{"match":"(","outcome":"permanent"}]}`,
 		"splat env":       `{"command":"x","env":{"A":"{*b}"},"output":{"format":"text"}}`,
+		"json \\b escape": `{"command":"x","output":{"format":"text"},"failures":[{"match":"\b429\b","outcome":"throttled"}]}`,
 	}
 	for name, text := range cases {
 		if _, err := ParseDefinition("x", []byte(text)); err == nil {

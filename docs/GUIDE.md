@@ -48,7 +48,7 @@ Read this guide, then use the commands below.
 |---|---|
 | `command` | Executable, found on PATH. |
 | `args` | Argument **groups**. A group is passed only if every placeholder in it has a value, so `["--model", "{model}"]` disappears when the profile sets no model. |
-| `stdin` | `"prompt"` (default) writes the prompt to the CLI's stdin; `"none"` gives it no input. |
+| `stdin` | `"prompt"` (default) writes the prompt to the CLI's stdin; `"system+prompt"` writes the profile body first as an `<instructions>` block, for a CLI with no system-prompt option; `"none"` gives it no input. |
 | `env` | Extra environment variables; values may use placeholders. |
 | `session` | `"mint"`: harness picks a UUID per session and passes it through `{session}` / `{new_session}` / `{resume_session}`. Omit it if the CLI cannot take a caller-chosen id, and capture the id from the output instead. |
 | `output` | Where the answer is; see below. |
@@ -92,7 +92,14 @@ failed. Example, for `opencode run --format json`:
 Values come from the profile header, from `--set key=value`, and from these
 built-ins: `{prompt}`, `{prompt_file}`, `{system_file}` (the profile body,
 when present), `{session}`, `{new_session}` (first turn only),
-`{resume_session}` (follow-ups only), `{cwd}`, `{run_id}`, `{run_dir}`.
+`{resume_session}` (follow-ups only), `{cwd}`, `{run_id}`, `{run_dir}`,
+`{harness_home}` (the data folder) and `{lineage}` (the gate tickets of this
+turn and its ancestors). The last three exist so a definition can hand
+harness's environment (`HARNESS_RUN`, `HARNESS_HOME`, `HARNESS_LINEAGE`) to a
+CLI that strips it; see the Codex example.
+
+In JSON, a regex word boundary is `\\b`: a plain `\b` is a backspace, and
+`def set` refuses it.
 
 **Keep user text out of arguments.** Send the prompt on stdin (the default)
 or as `{prompt_file}`, and the system prompt as `{system_file}`. On Windows,
@@ -144,9 +151,14 @@ when it fits and nothing is queued ahead of it). A crashed process's units are
 reclaimed automatically. `harness status` shows what is held and queued.
 
 **Nested runs.** An agent that harness started can run harness itself. Its
-runs know their ancestors (through `HARNESS_RUN` and `HARNESS_LINEAGE`): they
-skip the queue for a budget an ancestor holds, and fail at once, rather than
-wait forever, if the budget cannot fit them until those ancestors finish.
+runs know their parent run and their ancestors' tickets: they skip the queue
+for a budget an ancestor holds, and fail at once, rather than wait forever, if
+the budget cannot fit them until those ancestors finish. harness passes
+`HARNESS_RUN`, `HARNESS_LINEAGE` and `HARNESS_HOME` to every agent; when a
+harness strips them from its agent's commands, the nested run walks up its
+process ancestors to the run executing it instead, so this works with no
+setup. `harness status`, run inside an agent, prints the run it belongs to
+and how it was found.
 
 ## Per-project profiles
 
@@ -199,6 +211,73 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
 
 A failed first turn keeps its session: `harness send` can continue it. A
 background turn whose worker died is reported as `uncertain` by `wait`.
+
+## Verified examples
+
+Definitions known to work, with the CLI version they were checked against.
+Start from one, then check the flags against the installed CLI's `--help`.
+
+**Pi** (1.0.4), print mode, answer on stdout:
+
+```json
+{"command": "pi",
+ "args": [["-p"], ["--model", "{model}"], ["--thinking", "{thinking}"], ["--tools", "{tools}"],
+          ["{no_mcp?--no-mcp}"], ["--append-system-prompt", "{system_file}"], ["--session-id", "{session}"]],
+ "session": "mint", "output": {"format": "text"},
+ "failures": [{"match": "(?i)\\b429\\b|rate.?limit|too many requests", "outcome": "throttled"},
+              {"match": "(?i)ECONNRESET|ETIMEDOUT|fetch failed", "outcome": "uncertain"}]}
+```
+
+`--tools` keeps MCP tools; a read-only profile also needs `no_mcp: true`.
+
+**Claude Code** (2.1.220), one JSON result:
+
+```json
+{"command": "claude",
+ "args": [["-p"], ["--output-format", "json"], ["--model", "{model}"], ["--tools", "{tools}"],
+          ["--append-system-prompt-file", "{system_file}"],
+          ["--session-id", "{new_session}"], ["--resume", "{resume_session}"]],
+ "session": "mint",
+ "output": {"format": "json", "field": "result", "error_field": "is_error", "session_field": "session_id"},
+ "failures": [{"match": "(?i)rate.?limit|overloaded|\\b429\\b", "outcome": "throttled"}]}
+```
+
+**Codex** (0.162.1), JSONL events. Codex may strip its commands'
+environment (`shell_environment_policy`), so harness's variables are set
+through it; `exec resume` continues a session. Codex has no option that adds
+to its instructions from a file, so the profile body goes at the top of the
+prompt:
+
+```json
+{"command": "codex",
+ "args": [["exec"], ["-m", "{model}"], ["-c", "model_reasoning_effort={reasoning}"], ["-s", "{sandbox}"],
+          ["-c", "shell_environment_policy.set.HARNESS_RUN={run_id}"],
+          ["-c", "shell_environment_policy.set.HARNESS_LINEAGE={lineage}"],
+          ["-c", "shell_environment_policy.set.HARNESS_HOME={harness_home}"],
+          ["--skip-git-repo-check"], ["--json"], ["resume", "{resume_session}"], ["-"]],
+ "stdin": "system+prompt",
+ "output": {"format": "jsonl",
+   "answer": {"where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"},
+   "session": {"where": {"type": "thread.started"}, "field": "thread_id", "pick": "first"},
+   "error": {"where": {"type": "turn.failed"}, "field": "error.message"}},
+ "failures": [{"match": "(?i)rate.?limit|\\b429\\b|usage limit", "outcome": "throttled"}]}
+```
+
+A Codex agent that runs harness needs `sandbox: danger-full-access` (harness
+writes to its data folder, and the agents it starts need the network).
+
+**OpenCode** (1.18.35), JSONL events, session captured from the stream; no
+system-prompt option, so the profile body goes at the top of the prompt:
+
+```json
+{"command": "opencode",
+ "args": [["run"], ["--format", "json"], ["--model", "{model}"], ["--session", "{resume_session}"]],
+ "stdin": "system+prompt",
+ "output": {"format": "jsonl",
+   "answer": {"where": {"type": "text"}, "field": "part.text", "pick": "join"},
+   "session": {"field": "sessionID", "pick": "first"},
+   "error": {"where": {"type": "error"}}}}
+```
 
 ## Other commands
 
