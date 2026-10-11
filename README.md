@@ -23,11 +23,12 @@ prompts and context. The child runs in its own harness's native one-shot mode
 - **No harness-specific code.** How to call a CLI is a JSON **definition**;
   an agent built on it is a Markdown **profile**. Agents create both by
   running `harness` commands, after reading the CLI's own `--help`.
-- **HertaSDK owns execution policy.** Each profile is a Herta operation with a
-  declared effect, budgets, admission, per-attempt timeout and retry table,
-  checked when the profile is saved: a profile that could replay a
-  half-finished file-editing run is rejected before it ever runs. Budgets and
-  serialize keys hold across every harness process on the machine.
+- **HertaSDK owns the execution contract.** Each profile is a Herta operation
+  with a declared effect, retry table and per-attempt timeout, checked when the
+  profile is saved: a profile that could replay a half-finished file-editing
+  run is rejected before it ever runs. Budgets and serialize keys are
+  arbitrated once, across every harness process on the machine, with Herta's
+  budget rules.
 
 ## Example: a Pi GPT-6.1 Sol reviewer
 

@@ -9,10 +9,11 @@
 // agent built on it: model, tools, system prompt and execution policy. An
 // agent creates both by running the harness command.
 //
-// Execution policy is HertaSDK: each profile becomes a Herta operation with
-// a declared Effect, budgets, admission, per-attempt timeout and retry
-// table, validated when the profile is saved. Budgets and serialize keys
-// hold across every harness process on the machine through the gate.
+// The execution contract is HertaSDK: each profile becomes a Herta
+// operation with a declared Effect, retry table and per-attempt timeout,
+// validated when the profile is saved. Budgets and serialize keys are
+// arbitrated once, across every harness process on the machine, by the
+// gate, which follows Herta's budget rules.
 //
 // harness starts its own executable as a detached worker and, on Unix, as
 // the guard of each agent's process tree; a program embedding Runner must

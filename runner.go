@@ -99,16 +99,16 @@ func (r *Runner) enter() bool {
 	return true
 }
 
-// unclaimed keeps the runtime valid when no budget is defined: Herta needs
-// at least one resource. It is not a valid user name, so it cannot collide.
-const unclaimed = "_unclaimed"
-
-func runtimeFor(budgets map[string]int64) (*hertasdk.Runtime, error) {
-	specs := []hertasdk.ResourceSpec{{Name: unclaimed, Capacity: 1}}
-	for name, c := range budgets {
-		specs = append(specs, hertasdk.ResourceSpec{Name: name, Capacity: c})
+// Herta owns each turn's execution contract: its effect, retry table and
+// per-attempt timeout, and the drain on shutdown. Budgets and serialize keys
+// are arbitrated once, machine-wide, by the gate, so the runtime holds no
+// budget; Herta needs one resource to exist, and no operation claims it.
+func newRuntime() *hertasdk.Runtime {
+	rt, err := hertasdk.NewRuntime(hertasdk.ResourceSpec{Name: "turns", Capacity: 1})
+	if err != nil {
+		panic(err) // a fixed, valid spec
 	}
-	return hertasdk.NewRuntime(specs...)
+	return rt
 }
 
 // NewRunner builds a runner for this process: if an agent that harness
@@ -122,17 +122,9 @@ func NewRunner(h *Home) (*Runner, error) {
 // NewRunnerFor builds a runner with an explicit parent run and lineage, for
 // a detached worker that does not inherit its starter's environment.
 func NewRunnerFor(h *Home, parent string, lineage []string) (*Runner, error) {
-	budgets, err := h.Budgets()
-	if err != nil {
-		return nil, err
-	}
-	rt, err := runtimeFor(budgets)
-	if err != nil {
-		return nil, err
-	}
 	closingCtx, closeFn := context.WithCancel(context.Background())
 	return &Runner{
-		home: h, rt: rt, gate: h.Gate(lineage), parent: parent, lineage: lineage,
+		home: h, rt: newRuntime(), gate: h.Gate(lineage), parent: parent, lineage: lineage,
 		ops:        map[string]*hertasdk.Operation[*Turn, *Result]{},
 		closingCtx: closingCtx, close: closeFn,
 	}, nil
@@ -170,32 +162,29 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 }
 
 func policyFor(p *Profile) hertasdk.Policy[*Turn] {
-	pol := hertasdk.Policy[*Turn]{
-		Effect:    p.Effect,
-		Resources: p.Budget,
-		Admission: p.Admission,
-		Timeout:   p.Timeout,
-		Retry:     p.Retry,
-	}
-	if tmpl := p.Serialize; tmpl != "" {
-		pol.SerializeKey = func(t *Turn) string {
-			k, _ := expandString(tmpl, t.vars())
-			return k
-		}
-	}
-	return pol
+	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: p.Retry}
 }
 
-// checkPolicy builds the profile's Herta operation against the budgets, so
-// an unknown budget or an unsafe retry contract fails when it is saved.
+// checkPolicy validates a profile's contract: Herta checks its effect and
+// retry table (an unsafe retry fails here, not under load), and every budget
+// it claims must exist, once, and fit.
 func checkPolicy(p *Profile, budgets map[string]int64) error {
-	rt, err := runtimeFor(budgets)
-	if err != nil {
-		return err
-	}
 	noop := func(context.Context, *Turn) (*Result, error) { return nil, nil }
-	if _, err := hertasdk.NewOperation(rt, p.Name, noop, policyFor(p)); err != nil {
+	if _, err := hertasdk.NewOperation(newRuntime(), p.Name, noop, policyFor(p)); err != nil {
 		return fmt.Errorf("profile %s: %w", p.Name, err)
+	}
+	seen := map[string]bool{}
+	for _, req := range p.Budget {
+		c, ok := budgets[req.Name]
+		switch {
+		case seen[req.Name]:
+			return fmt.Errorf("profile %s: budget %q is listed twice", p.Name, req.Name)
+		case !ok:
+			return fmt.Errorf("profile %s: budget %q is not defined; set it with: harness budget set %s <capacity>", p.Name, req.Name, req.Name)
+		case req.Units > c:
+			return fmt.Errorf("profile %s: needs %d units of budget %s, whose capacity is %d", p.Name, req.Units, req.Name, c)
+		}
+		seen[req.Name] = true
 	}
 	return nil
 }
@@ -564,14 +553,18 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 
 	// Validate the policy before waiting anywhere: a project file reaches
 	// here without passing through SaveProfile.
+	budgets, err := r.home.Budgets()
+	if err != nil {
+		return nil, t, err
+	}
+	if err := checkPolicy(p, budgets); err != nil {
+		return nil, t, err
+	}
 	op, err := r.op(p)
 	if err != nil {
 		return nil, t, err
 	}
-	claims, err := r.claims(p, t)
-	if err != nil {
-		return nil, t, err
-	}
+	claims := claimsFor(p, budgets, t)
 	gctx, gcancel := context.WithCancel(ctx)
 	stopWatch := context.AfterFunc(r.closingCtx, gcancel)
 	ticket, err := r.gate.Acquire(gctx, claims, p.Admission == hertasdk.Reject, run.ID)
@@ -611,27 +604,19 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	return res, t, err
 }
 
-// claims are the machine-wide gate claims of a turn: its budgets, at their
-// current capacities, and its serialize key.
-func (r *Runner) claims(p *Profile, t *Turn) ([]Claim, error) {
-	budgets, err := r.home.Budgets()
-	if err != nil {
-		return nil, err
-	}
+// claimsFor are the gate claims of a turn: its budgets, at their current
+// capacities (checkPolicy has verified them), and its serialize key.
+func claimsFor(p *Profile, budgets map[string]int64, t *Turn) []Claim {
 	var claims []Claim
 	for _, req := range p.Budget {
-		c, ok := budgets[req.Name]
-		if !ok {
-			return nil, fmt.Errorf("profile %s: budget %q is not defined; set it with: harness budget set %s <capacity>", p.Name, req.Name, req.Name)
-		}
-		claims = append(claims, Claim{Name: req.Name, Units: req.Units, Capacity: c})
+		claims = append(claims, Claim{Name: req.Name, Units: req.Units, Capacity: budgets[req.Name]})
 	}
 	if p.Serialize != "" {
 		if k, _ := expandString(p.Serialize, t.vars()); k != "" {
 			claims = append(claims, keyClaim(k))
 		}
 	}
-	return claims, nil
+	return claims
 }
 
 // finish records a turn's outcome. The answer is saved before the record,
