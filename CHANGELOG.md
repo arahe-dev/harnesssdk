@@ -1,5 +1,106 @@
 # Changelog
 
+## v1.1.0 (2026-10-11)
+
+Removes every v0.1.0 limit that code could remove.
+
+- **Budgets and serialize keys hold across every harness process** on the
+  machine: a FIFO ledger per name in `<home>/gate/`, with Herta's budget
+  rules (granted when it fits and nothing is queued ahead), reject admission,
+  all-or-nothing grants for requests that name several budgets, and crash
+  safety (each ticket's owner holds a lock file; a dead owner's units are
+  reclaimed by the next reader). `harness status` shows holders and waiters.
+- **Nested runs cannot deadlock on their ancestors.** Runs pass
+  `HARNESS_RUN`, `HARNESS_LINEAGE` and `HARNESS_HOME` to the agents they start;
+  a nested run skips the queue for a budget its ancestors hold, and fails at
+  once if it could only fit after they finish. Runs record their parent.
+- **Detached runs:** `harness start` and `send --detach` return at once while a
+  background worker executes the turn; `wait [--timeout]`, `result` and `stop`
+  work from any later command (exit 7: still running). On Windows the worker
+  breaks away from the starting command's Job Object, or is started through
+  WMI's `Win32_Process.Create` when the job forbids breakaway, so a shell tool
+  that kills its job does not kill the worker. A turn whose worker died is
+  reported as `uncertain`, a turn whose worker never started as `transient`.
+- **Per-project profiles and definitions** in a `.harness` folder, taking
+  precedence in that project, with hash-pinned trust: a project file is used
+  only after `harness trust --approve`, and any change needs trusting again.
+  Files written with `--project` are trusted as they are saved. A data folder
+  is never mistaken for a project.
+- **JSONL output rules:** `answer`, `session` and `error` selectors (`where`,
+  `field`, `pick`) for CLIs that stream events, such as `opencode run --format json`.
+- **Windows without a Job Object:** the process tree is tracked by parent
+  process ids while the CLI runs, holding a handle to each process found, so
+  cancelling kills it and a CLI's leftovers die when it exits (best effort:
+  see the review notes below).
+- Exit code 7 (still running); `run`/`send` prepare a turn and then execute it,
+  so the same turn can run in process or in a worker.
+
+### Verified (Windows 11)
+
+- Tests: race-clean; new tests for the gate (FIFO, reject, cancel, dead
+  tickets, nesting), three detached workers sharing a budget of 1 across
+  processes, stop, lost-worker detection, project trust, JSONL against a real
+  OpenCode event stream, leftover-process cleanup, and the Job Object
+  fallback. A Unix-only test sends SIGTERM to the CLI and checks the tree dies;
+  it runs in CI on Ubuntu.
+- Live: `harness start` on a Claude Haiku profile returned in 0.8 s from a
+  shell that forbids Job Object breakaway; the WMI-started worker finished the
+  turn and `harness wait` collected it from a later command. Two detached
+  Claude runs with a budget of 1 ran one after the other, with `harness status`
+  showing one holding and one waiting. An OpenCode profile defined only in a
+  project answered through the JSONL rules and resumed its captured session.
+  An untrusted project profile was refused.
+
+### Review
+
+The Pi `gpt-6.1-sol` reviewer, started with `harness start` and collected with
+`harness wait`, reviewed this release and found eight defects, all fixed
+before release, each with a regression test checked to fail when its fix is
+reverted (pid reuse excepted: it cannot be triggered on demand):
+
+1. A nested run could deadlock across two budgets through an unrelated
+   waiter holding one of them. The gate now grants a request's claims all at
+   once or holds nothing, and nested runs skip the queues.
+2. A dying worker released its budget while its agent kept running. On Unix
+   the CLI now runs under a guard (the harness binary again, leading the
+   agent's process group and holding the turn's locks) that kills the whole
+   group when the harness process dies, however it dies; on Windows the job's
+   kill-on-close ends the tree.
+3. The Windows fallback missed a grandchild whose intermediate parent had
+   exited; descendants are now tracked while the CLI runs.
+4. The fallback could kill a process that reused a descendant's pid; a child
+   must be born between its parent and the snapshot, and the kill re-checks
+   the creation time on the handle it terminates.
+5. A trusted project profile with an invalid policy could wait at the gate
+   forever; the policy is validated before waiting, and duplicate claims are
+   refused.
+6. `wait` and `stop` could switch to a later turn; they now pin theirs.
+7. A worker started through WMI lost the caller's environment (API keys,
+   PATH additions); it is handed over in a private file the worker deletes.
+8. `Shutdown` did not withdraw turns waiting at the gate; it now does, and
+   drains the rest.
+
+A second pass over the fixes found four gaps, also fixed: the first fix for
+(2) used Linux's parent-death signal, which reaches only the CLI and not its
+children (replaced by the guard above); the Windows fallback now holds a
+handle to every process it tracks, which stops Windows from reusing their ids,
+so a dead tracked parent can be walked safely; a 200 ms tracking interval can
+still miss a helper that starts a child and exits within it, so the fallback
+is documented as best effort; and the environment file handed to a worker,
+which holds the caller's secrets, is now removed when detaching fails or when
+a turn whose worker never started is reaped.
+
+Programs that embed `Runner` must route harness's hidden subcommands (the
+detached worker and the Unix guard) by calling `harnesssdk.Subcommand()` first
+in `main`.
+
+### Fixed during development
+
+- Project discovery treated the default `~/.harness` as a project for any
+  folder under the home directory when `HARNESS_HOME` pointed elsewhere; a
+  test run wrote a profile into the real data folder (removed). Data folders
+  are now recognised by their `runs` folder.
+
 ## v0.1.0 (2026-10-11)
 
 First version. One `harness` CLI that runs agents in other harnesses through

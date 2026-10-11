@@ -28,6 +28,8 @@ type Profile struct {
 	Serialize   string // key template; runs sharing a key run one at a time
 	Vars        Vars
 	System      string
+	Scope       string // project or global, once loaded
+	Path        string
 
 	header []headerLine // kept in order so Set preserves the file
 }

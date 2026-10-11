@@ -17,9 +17,12 @@ const (
 	lockfileExclusiveLock   = 0x00000002
 )
 
-// lockFile takes an exclusive lock on path without waiting. The operating
-// system releases it if the process dies.
-func lockFile(path string) (unlock func(), err error) {
+// lockOpen takes an exclusive lock on path without waiting and returns the
+// locked file; closing it releases the lock. The operating system releases
+// it if the process dies. (A Windows lock belongs to the locking process, so
+// it is not inherited; the job object ties the agent's life to its worker
+// instead.)
+func lockOpen(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -30,5 +33,5 @@ func lockFile(path string) (unlock func(), err error) {
 		f.Close()
 		return nil, errBusy
 	}
-	return func() { f.Close() }, nil
+	return f, nil
 }

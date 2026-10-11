@@ -21,6 +21,7 @@ type Run struct {
 	Profile string       `json:"profile"`
 	Harness string       `json:"harness"`
 	Cwd     string       `json:"cwd"`
+	Parent  string       `json:"parent,omitempty"` // the harness run whose agent started this one
 	Session string       `json:"session,omitempty"`
 	Created time.Time    `json:"created"`
 	Turns   []TurnRecord `json:"turns"`
@@ -31,17 +32,22 @@ type Run struct {
 // TurnRecord is how one turn went.
 type TurnRecord struct {
 	N        int       `json:"n"`
-	Started  time.Time `json:"started"`
+	Queued   time.Time `json:"queued,omitzero"`
+	Started  time.Time `json:"started,omitzero"`
 	Ended    time.Time `json:"ended,omitzero"`
-	Outcome  string    `json:"outcome"` // running, success, transient, ...
+	Outcome  string    `json:"outcome"` // queued, running, success, transient, ...
 	Attempts int       `json:"attempts"`
 	ExitCode int       `json:"exit_code"`
+	PID      int       `json:"pid,omitempty"` // the process executing the turn
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
 }
 
+// finished reports whether the turn has a final outcome.
+func (t TurnRecord) finished() bool { return t.Outcome != "queued" && t.Outcome != "running" }
+
 // NewRun creates a run directory with a fresh, time-ordered id.
-func (h *Home) NewRun(profile, harness, cwd string) (*Run, error) {
+func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
 	for range 8 {
 		id := time.Now().Format("060102-150405") + "-" + randHex(2)
 		dir := filepath.Join(h.Dir, "runs", id)
@@ -52,7 +58,7 @@ func (h *Home) NewRun(profile, harness, cwd string) (*Run, error) {
 		if err != nil {
 			return nil, err
 		}
-		r := &Run{ID: id, Profile: profile, Harness: harness, Cwd: cwd, Created: time.Now().UTC(), dir: dir}
+		r := &Run{ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
 		return r, r.Save()
 	}
 	return nil, errors.New("could not allocate a run id")
@@ -102,6 +108,37 @@ func (h *Home) Runs(limit int) ([]*Run, error) {
 		}
 	}
 	return runs, nil
+}
+
+// updateRun changes a run record under its state lock, after rereading it,
+// and saves it if change succeeds.
+func (h *Home) updateRun(id string, change func(*Run) error) (*Run, error) {
+	run, err := h.LoadRun(id)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := lockFileWait(run.Path("state.lock"), 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("run %s: %w", id, err)
+	}
+	defer unlock()
+	if run, err = h.LoadRun(id); err != nil {
+		return nil, err
+	}
+	if err := change(run); err != nil {
+		return run, err
+	}
+	return run, run.Save()
+}
+
+// executing reports whether a process holds the run's execution lock.
+func (r *Run) executing() bool {
+	unlock, err := lockFile(r.Path("exec.lock"))
+	if err != nil {
+		return errors.Is(err, errBusy)
+	}
+	unlock()
+	return false
 }
 
 // Save writes run.json.

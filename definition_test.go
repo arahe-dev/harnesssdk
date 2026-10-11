@@ -82,3 +82,58 @@ func TestExtractJSON(t *testing.T) {
 		t.Fatalf("array index: %q", ans)
 	}
 }
+
+// The event stream of opencode run --format json, as captured from
+// OpenCode 1.18.35 on 2026-10-11.
+const opencodeEvents = `{"type":"step_start","timestamp":1791724338031,"sessionID":"ses_ed4e8557fffeMwuZjsS6XPzGJk","part":{"type":"step-start"}}
+{"type":"text","timestamp":1791724338108,"sessionID":"ses_ed4e8557fffeMwuZjsS6XPzGJk","part":{"type":"text","text":"O"}}
+not json: a banner line
+{"type":"text","timestamp":1791724338109,"sessionID":"ses_ed4e8557fffeMwuZjsS6XPzGJk","part":{"type":"text","text":"K"}}
+{"type":"step_finish","timestamp":1791724338517,"sessionID":"ses_ed4e8557fffeMwuZjsS6XPzGJk","part":{"reason":"stop","type":"step-finish"}}
+`
+
+func TestExtractJSONL(t *testing.T) {
+	d, err := ParseDefinition("opencode", []byte(`{
+		"command": "opencode",
+		"args": [["run"], ["--format", "json"]],
+		"output": {
+			"format": "jsonl",
+			"answer": {"where": {"type": "text"}, "field": "part.text", "pick": "join"},
+			"session": {"where": {"type": "step_start"}, "field": "sessionID", "pick": "first"},
+			"error": {"where": {"type": "error"}}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans, failed, session, err := d.extract([]byte(opencodeEvents))
+	if err != nil || ans != "OK" || failed || session != "ses_ed4e8557fffeMwuZjsS6XPzGJk" {
+		t.Fatalf("got %q %v %q %v", ans, failed, session, err)
+	}
+	_, failed, _, _ = d.extract([]byte(opencodeEvents + `{"type":"error","error":{"message":"boom"}}` + "\n"))
+	if !failed {
+		t.Fatal("an error event should mark failure")
+	}
+	if _, _, _, err := d.extract([]byte(`{"type":"step_start"}`)); err == nil {
+		t.Fatal("no answer event should be an error")
+	}
+	d.Output.Answer.Pick = "last"
+	if ans, _, _, _ := d.extract([]byte(opencodeEvents)); ans != "K" {
+		t.Fatalf("pick last: %q", ans)
+	}
+}
+
+func TestJSONLValidation(t *testing.T) {
+	for name, out := range map[string]string{
+		"no answer":          `{"format":"jsonl"}`,
+		"answer no field":    `{"format":"jsonl","answer":{"where":{"type":"text"}}}`,
+		"json field":         `{"format":"jsonl","field":"x","answer":{"field":"a"}}`,
+		"bad pick":           `{"format":"jsonl","answer":{"field":"a","pick":"middle"}}`,
+		"join without pick":  `{"format":"jsonl","answer":{"field":"a","join":","}}`,
+		"selector with json": `{"format":"json","field":"a","answer":{"field":"a"}}`,
+	} {
+		if _, err := ParseDefinition("x", []byte(`{"command":"x","output":`+out+`}`)); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}

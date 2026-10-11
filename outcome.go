@@ -17,6 +17,7 @@ const (
 	ExitTransient = 4
 	ExitThrottled = 5
 	ExitUncertain = 6
+	ExitRunning   = 7 // harness wait or result: the turn has not finished
 	ExitCancelled = 130
 )
 

@@ -18,6 +18,9 @@ import (
 // The test binary doubles as a fake harness CLI: with HARNESS_FAKE=1 it runs
 // fakeHarness instead of the tests, so end-to-end tests spend no tokens.
 func TestMain(m *testing.M) {
+	if code, ok := Subcommand(); ok {
+		os.Exit(code)
+	}
 	if os.Getenv("HARNESS_FAKE") == "1" {
 		os.Exit(fakeHarness(os.Args[1:]))
 	}
@@ -70,6 +73,29 @@ func fakeHarness(args []string) int {
 	case "sleep":
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		fmt.Println("slept")
+	case "sleeppid":
+		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(os.Getpid())), 0o644)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		fmt.Println("slept")
+	case "env":
+		fmt.Println(os.Getenv("HARNESS_TEST_SECRET"))
+	case "chain":
+		// A helper that starts a long-lived grandchild and exits soon after.
+		exe, _ := os.Executable()
+		exec.Command(exe, "helper", "pidfile="+opts["pidfile"]).Start()
+		time.Sleep(60 * time.Second)
+	case "helper":
+		exe, _ := os.Executable()
+		child := exec.Command(exe, "sleep", "ms=60000")
+		child.Start()
+		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(child.Process.Pid)), 0o644)
+		time.Sleep(600 * time.Millisecond)
+	case "orphan":
+		exe, _ := os.Executable()
+		child := exec.Command(exe, "sleep", "ms=60000")
+		child.Start()
+		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(child.Process.Pid)), 0o644)
+		fmt.Println("spawned")
 	case "tree":
 		exe, _ := os.Executable()
 		child := exec.Command(exe, "sleep", "ms=60000")
@@ -128,7 +154,7 @@ func (f *fixture) def(name string, d Definition) {
 	d.Command = exe
 	d.Env = map[string]string{"HARNESS_FAKE": "1"}
 	data, _ := json.Marshal(d)
-	if _, err := f.home.SaveDefinition(name, data); err != nil {
+	if _, err := f.home.SaveDefinition(name, data, ""); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -150,7 +176,7 @@ func (f *fixture) saveProfile(name, header string) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := f.home.SaveProfile(p); err != nil {
+	if err := f.home.SaveProfile(p, "", f.cwd); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -345,21 +371,20 @@ func peakOverlap(t *testing.T, dir string) int {
 	return peak
 }
 
-func TestBusyRunRefusesSecondTurn(t *testing.T) {
+func TestUnfinishedTurnRefusesAnother(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "echo", "hi")[0]
-	unlock, err := lockFile(rep.Run.Path("lock"))
-	if err != nil {
+	if _, err := f.r.PrepareSend(rep.Run.ID, "queued, never executed", nil); err != nil {
 		t.Fatal(err)
 	}
-	defer unlock()
-	rep2, err := f.r.Send(context.Background(), rep.Run.ID, "again", nil)
-	if err != nil {
-		t.Fatal(err)
+	_, err := f.r.PrepareSend(rep.Run.ID, "again", nil)
+	if err == nil || OutcomeName(err) != "throttled" || !strings.Contains(err.Error(), "busy with turn 2") {
+		t.Fatalf("want a throttled busy error, got %v", err)
 	}
-	if rep2.Err == nil || !strings.Contains(rep2.Err.Error(), "busy") || rep2.Outcome != "throttled" {
-		t.Fatalf("want a throttled busy error, got %+v", rep2)
+	run, _ := f.home.LoadRun(rep.Run.ID)
+	if len(run.Turns) != 2 {
+		t.Fatalf("turns: %d", len(run.Turns))
 	}
 }
 
@@ -381,7 +406,7 @@ func TestDryRun(t *testing.T) {
 func TestSaveProfileNeedsDefinition(t *testing.T) {
 	f := newFixture(t, nil)
 	p, _ := ParseProfile("x", []byte("---\nharness: missing\neffect: pure\n---\n"))
-	if err := f.home.SaveProfile(p); err == nil || !strings.Contains(err.Error(), "harness def set missing") {
+	if err := f.home.SaveProfile(p, "", f.cwd); err == nil || !strings.Contains(err.Error(), "harness def set missing") {
 		t.Fatalf("got %v", err)
 	}
 }
