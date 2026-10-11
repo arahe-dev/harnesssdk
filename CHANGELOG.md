@@ -1,5 +1,75 @@
 # Changelog
 
+## v1.5.0 (2026-10-12)
+
+A stable Go API, machine-wide limits, retention, versioned files, and the
+five issues from the v1.2 product audit.
+
+- **Stable Go API.** The root package `harnesssdk` is now a small client
+  over the same engine and data folder as the command: `Open`, then `Run`,
+  `Start`, `Send`, `SendStart`, `Wait`, `Result`, `Stop`, `Runs`,
+  `SetDefinition`, `SetProfile`, `SetBudget`, `Config`, `SetConfig`, `GC`,
+  with its own `Result`, `Run`, `Turn` and `Outcome` types. It follows
+  semantic versioning from this release; the implementation moved to
+  `internal/engine` and may change in any release.
+- **Versioned files.** Run records, budgets, trust, gate ledgers, the active
+  index, definitions and the new `config.json` carry a format number. A
+  harness refuses a newer format with "upgrade harness" rather than misread
+  it; files from earlier releases read as format 1 and are upgraded when
+  next written.
+- **Limits** (`harness config`, `harness config set <key> <n>`):
+  `max_depth` (3) refuses runs nested deeper (exit 3, with the command to
+  raise it); `max_running` (16) caps turns running at once on the machine
+  through the gate. A top-level turn waits for a slot; a nested one fails at
+  once as throttled, since its ancestors hold slots while they wait for it.
+  Runs record their `depth`.
+- **Retention.** Finished runs, with their prompts and answers, are removed
+  `retention_days` (30) after their last turn: by `harness gc [--days n]
+  [--dry-run]`, and by harness itself at most once a day as runs start. A
+  run that is executing, or was sent a turn since the cutoff, is kept.
+- **No discovery where it is not needed.** `wait`, `result` and `stop` no
+  longer look for a parent run, and discovery retries only while an
+  executing ancestor's agent is not yet recorded. `harness result` while a
+  run is active: 1.1 s before, 0.04 s now.
+- **The gate waits through contention.** A ledger kept locked by other
+  processes for more than two seconds was a permanent failure; it is now
+  part of waiting. A pass that changes nothing no longer rewrites the
+  ledger, and `harness status` reads ledgers without locking them.
+
+### Optimizations
+
+Measured with the benchmarks in `internal/engine/bench_test.go` (Windows
+11, Go 1.26):
+
+| | before | after |
+|---|---|---|
+| Extract the answer from a 5 MB Codex JSONL stream | 62 ms, 25 MB, 597k allocs | 10 ms, 68 KB, 61 allocs |
+| Walk process ancestry (Windows) | 10 ms | 19 µs |
+| A waiting turn, per second | 5 locked ledger passes (340 µs each) | 10 stats (22 µs) + 1 pass |
+| Grant noticed after a release | ≤ 200 ms | ≤ 100 ms |
+| `wait`, per poll | parse the record every 300 ms | stat every 100 ms, parse on change |
+| Check one active turn | 170 µs, 23 KB | 90 µs, 0.8 KB |
+
+JSONL extraction now reads one event at a time, so memory no longer grows
+with the stream, and skips decoding lines whose text cannot match a
+selector (a value spelled with a `\u` escape is still decoded).
+
+### Removed
+
+- Budgets and keys are arbitrated once, by the gate; the per-process Herta
+  budget that duplicated it is gone.
+- `Home.FindProject`'s private twin, and an unused return value.
+
+### Verified (Windows 11)
+
+- Unit and end-to-end tests, `-race`, `go vet` and staticcheck on Windows,
+  Linux and macOS targets.
+- Live: Claude Haiku (`run`, and `start` then `wait`); a Codex 0.162 agent
+  on `gpt-6.1-sol` that ran a nested Pi agent through harness (recorded with
+  `parent` and `depth: 1`); three Pi reviewers on a `pi=2` budget ran two
+  at a time, the third starting as a slot freed; a simulated run nested
+  below `max_depth` was refused with exit 3.
+
 ## v1.2.0 (2026-10-12)
 
 Nested runs work under any harness, and Codex works end to end.
