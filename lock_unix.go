@@ -7,9 +7,12 @@ import (
 	"syscall"
 )
 
-// lockFile takes an exclusive lock on path without waiting. The operating
-// system releases it if the process dies.
-func lockFile(path string) (unlock func(), err error) {
+// lockOpen takes an exclusive lock on path without waiting and returns the
+// locked file; closing it releases the lock. The lock belongs to the open
+// file, so a child that inherits the file keeps it held: the agent CLI
+// inherits its turn's locks, and they stay held while any process of its
+// tree is alive. The operating system releases it when the last holder dies.
+func lockOpen(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -18,5 +21,5 @@ func lockFile(path string) (unlock func(), err error) {
 		f.Close()
 		return nil, errBusy
 	}
-	return func() { f.Close() }, nil
+	return f, nil
 }

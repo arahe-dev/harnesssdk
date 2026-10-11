@@ -20,18 +20,25 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/arahe-dev/hertasdk"
+
 	harness "github.com/arahe-dev/harnesssdk"
 )
 
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.
 
-  harness guide                          the manual: read this first
-  harness run <profile> [prompt | -]     run an agent; flags: --task --file --cwd --set --json --dry-run
-  harness send <run-id> [prompt | -]     follow up in the same session; flags: --file --set --json --dry-run
-  harness runs | show <run-id>           past runs
-  harness profile set|show|list|rm       agents (Markdown with a header)
-  harness def set|show|list|rm           harness definitions (JSON)
-  harness budget set|list|rm             shared capacity limits
+  harness guide                            the manual: read this first
+  harness run <profile> [prompt | -]       run an agent and wait; --task --file --cwd --set --json --dry-run
+  harness start <profile> [prompt | -]     start an agent in the background (same flags); prints run ids
+  harness send <run-id> [prompt | -]       follow up in the same session; --file --set --json --dry-run --detach
+  harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running)
+  harness result <run-id>                  print a run's last turn without waiting
+  harness stop <run-id>                    stop a run's turn
+  harness runs | show <run-id> | status    past runs; budgets and keys in use
+  harness profile set|show|list|rm         agents (Markdown with a header); --project for this project
+  harness def set|show|list|rm             harness definitions (JSON); --project for this project
+  harness trust [--approve]                review, then trust, this project's .harness files
+  harness budget set|list|rm               capacity limits shared by every harness process
   harness home | skill | version
 `
 
@@ -41,6 +48,9 @@ type errUsage struct{ error }
 func usageErr(format string, a ...any) error { return errUsage{fmt.Errorf(format, a...)} }
 
 func main() {
+	if code, ok := harness.Subcommand(); ok {
+		os.Exit(code)
+	}
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -54,10 +64,20 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		if code == 0 {
-			code = harness.ExitUsage
+			code = exitFor(err)
 		}
 	}
 	return code
+}
+
+// exitFor is the exit code of a command that failed before any turn ran:
+// the outcome's code when the error carries one (a busy run is throttled),
+// otherwise a usage error.
+func exitFor(err error) int {
+	if _, ok := errors.AsType[*hertasdk.Failure](err); ok {
+		return harness.ExitCode(harness.OutcomeName(err))
+	}
+	return harness.ExitUsage
 }
 
 type cli struct {
@@ -96,14 +116,26 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return 0, c.profile(args)
 	case "budget":
 		return 0, c.budget(args)
+	case "trust":
+		return 0, c.trust(args)
 	case "run":
-		return c.runCmd(args)
+		return c.runCmd(args, false)
+	case "start":
+		return c.runCmd(args, true)
 	case "send":
 		return c.send(args)
+	case "wait":
+		return c.wait(args, false)
+	case "result":
+		return c.wait(args, true)
+	case "stop":
+		return c.stop(args)
 	case "runs":
 		return 0, c.runs(args)
 	case "show":
 		return 0, c.show(args)
+	case "status":
+		return 0, c.status()
 	}
 	return harness.ExitUsage, usageErr("unknown command %q; see: harness help", cmd)
 }
@@ -147,30 +179,76 @@ func (c *cli) read(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// folder resolves --cwd: an existing folder, absolute; default the current.
+func folder(dir string) (string, error) {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+		return "", usageErr("--cwd %s is not a folder", abs)
+	}
+	return abs, nil
+}
+
+// scopeFlags are the --project and --cwd flags of def and profile.
+type scopeFlags struct {
+	project bool
+	cwd     string
+}
+
+func (s *scopeFlags) register(fs *flag.FlagSet) {
+	fs.BoolVar(&s.project, "project", false, "write to the project's .harness folder instead of the global one")
+	fs.StringVar(&s.cwd, "cwd", "", "folder whose project to use (default: current)")
+}
+
+// projectDir is the folder to write to: a project's .harness, or "" for
+// global.
+func (c *cli) projectDir(s scopeFlags) (string, string, error) {
+	cwd, err := folder(s.cwd)
+	if err != nil {
+		return "", "", err
+	}
+	if !s.project {
+		return "", cwd, nil
+	}
+	dir, err := c.home.ProjectDir(cwd)
+	return dir, cwd, err
+}
+
 func (c *cli) def(args []string) error {
 	if len(args) == 0 {
 		return usageErr("def needs set, show, list or rm")
 	}
 	fs := c.flags("def " + args[0])
 	file := fs.String("file", "", "definition JSON file, or - for stdin")
+	var sc scopeFlags
+	sc.register(fs)
 	pos, err := parse(fs, args[1:])
+	if err != nil {
+		return err
+	}
+	proj, cwd, err := c.projectDir(sc)
 	if err != nil {
 		return err
 	}
 	switch args[0] {
 	case "list":
-		names, err := c.home.List("harnesses")
+		items, err := c.home.List("harnesses", cwd)
 		if err != nil {
 			return err
 		}
 		w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
-		for _, n := range names {
-			d, err := c.home.Definition(n)
+		for _, it := range items {
+			d, err := c.home.Definition(it.Name, cwd)
 			if err != nil {
-				fmt.Fprintf(w, "%s\t(invalid: %v)\n", n, err)
+				fmt.Fprintf(w, "%s\t%s\t(%v)\n", it.Name, it.Scope, err)
 				continue
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\n", n, d.Command, d.Description)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", it.Name, it.Scope, d.Command, d.Description)
 		}
 		return w.Flush()
 	case "set", "show", "rm":
@@ -190,21 +268,29 @@ func (c *cli) def(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := c.home.SaveDefinition(name, data); err != nil {
+		if _, err := c.home.SaveDefinition(name, data, proj); err != nil {
 			return errUsage{err}
 		}
-		fmt.Fprintf(c.stdout, "saved harness %s\n", name)
+		fmt.Fprintf(c.stdout, "saved harness %s (%s)\n", name, scopeOf(proj))
 		return nil
 	case "show":
-		d, err := c.home.Definition(name)
+		d, err := c.home.Definition(name, cwd)
 		if err != nil {
 			return errUsage{err}
 		}
 		data, _ := json.MarshalIndent(d, "", "  ")
 		fmt.Fprintln(c.stdout, string(data))
+		fmt.Fprintf(c.stderr, "harness: %s definition %s\n", d.Scope, d.Path)
 		return nil
 	}
-	return c.home.Remove("harnesses", name)
+	return c.home.Remove("harnesses", name, proj)
+}
+
+func scopeOf(projectDir string) string {
+	if projectDir == "" {
+		return "global"
+	}
+	return "project " + projectDir
 }
 
 func (c *cli) profile(args []string) error {
@@ -213,24 +299,30 @@ func (c *cli) profile(args []string) error {
 	}
 	fs := c.flags("profile " + args[0])
 	file := fs.String("file", "", "profile Markdown file, or - for stdin")
+	var sc scopeFlags
+	sc.register(fs)
 	pos, err := parse(fs, args[1:])
+	if err != nil {
+		return err
+	}
+	proj, cwd, err := c.projectDir(sc)
 	if err != nil {
 		return err
 	}
 	switch args[0] {
 	case "list":
-		names, err := c.home.List("profiles")
+		items, err := c.home.List("profiles", cwd)
 		if err != nil {
 			return err
 		}
 		w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
-		for _, n := range names {
-			p, err := c.home.Profile(n)
+		for _, it := range items {
+			p, err := c.home.Profile(it.Name, cwd)
 			if err != nil {
-				fmt.Fprintf(w, "%s\t(invalid: %v)\n", n, err)
+				fmt.Fprintf(w, "%s\t%s\t(%v)\n", it.Name, it.Scope, err)
 				continue
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", n, p.Harness, p.Vars["model"], p.Description)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", it.Name, it.Scope, p.Harness, p.Vars["model"], p.Description)
 		}
 		return w.Flush()
 	case "set", "show", "rm":
@@ -243,14 +335,15 @@ func (c *cli) profile(args []string) error {
 	name, pairs := pos[0], pos[1:]
 	switch args[0] {
 	case "show":
-		p, err := c.home.Profile(name)
+		p, err := c.home.Profile(name, cwd)
 		if err != nil {
 			return errUsage{err}
 		}
 		c.stdout.Write(p.Bytes())
+		fmt.Fprintf(c.stderr, "harness: %s profile %s\n", p.Scope, p.Path)
 		return nil
 	case "rm":
-		return c.home.Remove("profiles", name)
+		return c.home.Remove("profiles", name, proj)
 	}
 	var p *harness.Profile
 	switch {
@@ -268,9 +361,13 @@ func (c *cli) profile(args []string) error {
 			}
 		}
 	case len(pairs) > 0:
-		cur, err := c.home.Profile(name)
+		cur, err := c.home.Profile(name, cwd)
 		if err != nil {
 			return errUsage{err}
+		}
+		if cur.Scope == "project" && !sc.project {
+			// Edit the profile where it was found.
+			proj = filepath.Dir(filepath.Dir(cur.Path))
 		}
 		if p, err = cur.Set(pairs); err != nil {
 			return errUsage{err}
@@ -278,17 +375,58 @@ func (c *cli) profile(args []string) error {
 	default:
 		return usageErr("profile set needs --file <path|-> or key=value pairs")
 	}
-	if err := c.home.SaveProfile(p); err != nil {
+	if err := c.home.SaveProfile(p, proj, cwd); err != nil {
 		return errUsage{err}
 	}
-	fmt.Fprintf(c.stdout, "saved profile %s (harness %s)\n", name, p.Harness)
+	fmt.Fprintf(c.stdout, "saved profile %s (harness %s, %s)\n", name, p.Harness, scopeOf(proj))
 	r, err := harness.NewRunner(c.home)
 	if err != nil {
 		return err
 	}
-	cwd, _ := os.Getwd()
 	if plan, err := r.DryRun(name, "<prompt>", cwd, nil); err == nil {
 		c.printPlan(plan)
+	}
+	return nil
+}
+
+func (c *cli) trust(args []string) error {
+	fs := c.flags("trust")
+	approve := fs.Bool("approve", false, "trust the current content of every project file")
+	cwdFlag := fs.String("cwd", "", "folder whose project to trust (default: current)")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	cwd, err := folder(*cwdFlag)
+	if err != nil {
+		return err
+	}
+	proj, ok := c.home.FindProject(cwd)
+	if !ok {
+		return usageErr("no project .harness folder at or above %s", cwd)
+	}
+	var entries []harness.TrustEntry
+	if *approve {
+		entries, err = c.home.ApproveProject(proj)
+	} else {
+		entries, err = c.home.TrustStatus(proj)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stdout, "project %s\n", proj)
+	pending := 0
+	for _, e := range entries {
+		state := e.State
+		if *approve {
+			state = "trusted"
+		}
+		if state != "trusted" {
+			pending++
+		}
+		fmt.Fprintf(c.stdout, "  %-8s %s\n", state, e.Path)
+	}
+	if pending > 0 {
+		fmt.Fprintf(c.stdout, "%d file(s) are not trusted. Read them (a definition is a command line; a profile picks tools and flags), then run: harness trust --approve\n", pending)
 	}
 	return nil
 }
@@ -326,7 +464,7 @@ func (c *cli) budget(args []string) error {
 	return usageErr("unknown budget command %q", args[0])
 }
 
-// turnFlags are shared by run and send.
+// turnFlags are shared by run, start and send.
 type turnFlags struct {
 	files, sets multi
 	asJSON, dry bool
@@ -385,19 +523,21 @@ func attach(text string, files []string) (string, error) {
 	return b.String(), nil
 }
 
-func (c *cli) runCmd(args []string) (int, error) {
-	fs := c.flags("run")
+// runCmd is run (wait for the answers) and start (detach and return).
+func (c *cli) runCmd(args []string, detach bool) (int, error) {
+	name := map[bool]string{false: "run", true: "start"}[detach]
+	fs := c.flags(name)
 	var tf turnFlags
 	tf.register(fs)
 	var tasks multi
 	fs.Var(&tasks, "task", "start a separate run for this task (repeatable)")
-	cwd := fs.String("cwd", "", "working folder for the agent (default: current)")
+	cwdFlag := fs.String("cwd", "", "working folder for the agent (default: current)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
 	}
 	if len(pos) == 0 {
-		return harness.ExitUsage, usageErr("run needs a profile name")
+		return harness.ExitUsage, usageErr("%s needs a profile name", name)
 	}
 	profile, words := pos[0], pos[1:]
 	if len(tasks) > 0 && len(words) > 0 {
@@ -428,15 +568,9 @@ func (c *cli) runCmd(args []string) (int, error) {
 	if err != nil {
 		return harness.ExitUsage, err
 	}
-	dir := *cwd
-	if dir == "" {
-		dir, _ = os.Getwd()
-	}
-	if dir, err = filepath.Abs(dir); err != nil {
+	dir, err := folder(*cwdFlag)
+	if err != nil {
 		return harness.ExitUsage, err
-	}
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		return harness.ExitUsage, usageErr("--cwd %s is not a folder", dir)
 	}
 	r, err := harness.NewRunner(c.home)
 	if err != nil {
@@ -450,6 +584,20 @@ func (c *cli) runCmd(args []string) (int, error) {
 		c.printPlan(plan)
 		return 0, nil
 	}
+	if detach {
+		runs, err := r.Prepare(profile, prompts, dir, extra)
+		if err != nil {
+			return exitFor(err), err
+		}
+		for _, run := range runs {
+			if err := r.Detach(run.ID, 1); err != nil {
+				return harness.ExitUsage, err
+			}
+			fmt.Fprintf(c.stderr, "harness: %s started in the background (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
+		}
+		c.printStarted(runs, 1, tf.asJSON)
+		return 0, nil
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	reports, err := r.Start(ctx, profile, prompts, dir, extra, func(run *harness.Run) {
@@ -457,15 +605,38 @@ func (c *cli) runCmd(args []string) (int, error) {
 	})
 	c.drain(r)
 	if err != nil {
-		return harness.ExitUsage, errUsage{err}
+		return exitFor(err), err
 	}
 	return c.report(reports, tf.asJSON, len(tasks) > 0), nil
+}
+
+func (c *cli) printStarted(runs []*harness.Run, turn int, asJSON bool) {
+	if !asJSON {
+		for _, run := range runs {
+			fmt.Fprintln(c.stdout, run.ID)
+		}
+		return
+	}
+	type started struct {
+		Run     string `json:"run"`
+		Turn    int    `json:"turn"`
+		Profile string `json:"profile"`
+		Harness string `json:"harness"`
+		Outcome string `json:"outcome"`
+	}
+	var out []started
+	for _, run := range runs {
+		out = append(out, started{run.ID, turn, run.Profile, run.Harness, "queued"})
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Fprintln(c.stdout, string(data))
 }
 
 func (c *cli) send(args []string) (int, error) {
 	fs := c.flags("send")
 	var tf turnFlags
 	tf.register(fs)
+	detach := fs.Bool("detach", false, "run the turn in the background and return its run id")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -473,6 +644,7 @@ func (c *cli) send(args []string) (int, error) {
 	if len(pos) < 2 {
 		return harness.ExitUsage, usageErr("send needs <run-id> and a prompt")
 	}
+	id := pos[0]
 	prompt, err := c.prompt(pos[1:], tf.files)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -486,21 +658,108 @@ func (c *cli) send(args []string) (int, error) {
 		return harness.ExitUsage, err
 	}
 	if tf.dry {
-		plan, err := r.DryRunSend(pos[0], prompt, extra)
+		plan, err := r.DryRunSend(id, prompt, extra)
 		if err != nil {
 			return harness.ExitUsage, errUsage{err}
 		}
 		c.printPlan(plan)
 		return 0, nil
 	}
+	n, err := r.PrepareSend(id, prompt, extra)
+	if err != nil {
+		return exitFor(err), err
+	}
+	if *detach {
+		if err := r.Detach(id, n); err != nil {
+			return harness.ExitUsage, err
+		}
+		run, err := c.home.LoadRun(id)
+		if err != nil {
+			return harness.ExitUsage, err
+		}
+		fmt.Fprintf(c.stderr, "harness: %s turn %d started in the background\n", id, n)
+		c.printStarted([]*harness.Run{run}, n, tf.asJSON)
+		return 0, nil
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rep, err := r.Send(ctx, pos[0], prompt, extra)
+	rep := r.Execute(ctx, id, n)
 	c.drain(r)
+	return c.report([]harness.Report{rep}, tf.asJSON, false), nil
+}
+
+// wait is wait (block until the turn ends or --timeout) and result (now).
+func (c *cli) wait(args []string, now bool) (int, error) {
+	name := map[bool]string{false: "wait", true: "result"}[now]
+	fs := c.flags(name)
+	asJSON := fs.Bool("json", false, "print a JSON result")
+	var timeout time.Duration
+	if !now {
+		fs.DurationVar(&timeout, "timeout", 0, "give up after this long, leaving the run going (0: wait until it ends)")
+	}
+	pos, err := parse(fs, args)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	if len(pos) != 1 {
+		return harness.ExitUsage, usageErr("%s needs <run-id>", name)
+	}
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	switch {
+	case now:
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	case timeout > 0:
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, finished, err := r.Wait(ctx, pos[0])
 	if err != nil {
 		return harness.ExitUsage, errUsage{err}
 	}
-	return c.report([]harness.Report{rep}, tf.asJSON, false), nil
+	if !finished {
+		rep.Outcome = rep.Run.Turns[rep.Turn-1].Outcome
+		if *asJSON {
+			c.report([]harness.Report{rep}, true, false)
+		} else {
+			fmt.Fprintf(c.stderr, "harness: %s turn %d is still %s; wait again with: harness wait %s\n", rep.Run.ID, rep.Turn, rep.Outcome, rep.Run.ID)
+		}
+		return harness.ExitRunning, nil
+	}
+	return c.report([]harness.Report{rep}, *asJSON, false), nil
+}
+
+func (c *cli) stop(args []string) (int, error) {
+	if len(args) != 1 {
+		return harness.ExitUsage, usageErr("stop needs <run-id>")
+	}
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	n, err := r.Stop(args[0])
+	if err != nil {
+		return harness.ExitUsage, errUsage{err}
+	}
+	fmt.Fprintf(c.stderr, "harness: asked %s turn %d to stop\n", args[0], n)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rep, finished, err := r.WaitTurn(ctx, args[0], n)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	if !finished {
+		fmt.Fprintf(c.stderr, "harness: %s has not stopped yet; check with: harness wait %s\n", args[0], args[0])
+		return harness.ExitRunning, nil
+	}
+	return c.report([]harness.Report{rep}, false, false), nil
 }
 
 func (c *cli) drain(r *harness.Runner) {
@@ -542,7 +801,7 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 			js = append(js, j)
 			continue
 		}
-		c.status(rep)
+		c.status1(rep)
 		if many {
 			fmt.Fprintf(c.stdout, "=== %s · %s\n", rep.Run.ID, rep.Outcome)
 		}
@@ -562,7 +821,7 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 	return code
 }
 
-func (c *cli) status(rep harness.Report) {
+func (c *cli) status1(rep harness.Report) {
 	id := "?"
 	if rep.Run != nil {
 		id = rep.Run.ID
@@ -588,6 +847,9 @@ func (c *cli) printPlan(p *harness.Plan) {
 		if a == "" || strings.ContainsAny(a, " \t\"'") {
 			quoted[i] = strconv.Quote(a)
 		}
+	}
+	if p.Profile != nil && p.Def != nil {
+		fmt.Fprintf(c.stdout, "profile: %s (%s)\nharness: %s (%s)\n", p.Profile.Path, p.Profile.Scope, p.Def.Path, p.Def.Scope)
 	}
 	fmt.Fprintf(c.stdout, "command: %s\n", strings.Join(quoted, " "))
 	if p.Stdin {
@@ -632,9 +894,12 @@ func (c *cli) show(args []string) error {
 	}
 	fmt.Fprintf(c.stdout, "run:     %s\nprofile: %s (harness %s)\ncwd:     %s\nsession: %s\ndir:     %s\n",
 		r.ID, r.Profile, r.Harness, r.Cwd, r.Session, r.Dir())
+	if r.Parent != "" {
+		fmt.Fprintf(c.stdout, "parent:  %s\n", r.Parent)
+	}
 	for _, t := range r.Turns {
 		dur := "-"
-		if !t.Ended.IsZero() {
+		if !t.Ended.IsZero() && !t.Started.IsZero() {
 			dur = t.Ended.Sub(t.Started).Round(time.Second).String()
 		}
 		fmt.Fprintf(c.stdout, "turn %d:  %s · %d attempt(s) · exit %d · %s\n", t.N, t.Outcome, t.Attempts, t.ExitCode, dur)
@@ -652,10 +917,46 @@ func (c *cli) show(args []string) error {
 	return nil
 }
 
+func (c *cli) status() error {
+	gates, err := c.home.GateStatus()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "BUDGET\tIN USE\tHELD BY\tWAITING")
+	for _, g := range gates {
+		fmt.Fprintf(w, "%s\t%d/%d\t%s\t%s\n", g.Name, g.Used, g.Capacity, dash(g.Held), dash(g.Queued))
+	}
+	w.Flush()
+	runs, err := c.home.Runs(200)
+	if err != nil {
+		return err
+	}
+	var active []*harness.Run
+	for _, r := range runs {
+		if n := len(r.Turns); n > 0 && (r.Turns[n-1].Outcome == "queued" || r.Turns[n-1].Outcome == "running") {
+			active = append(active, r)
+		}
+	}
+	fmt.Fprintf(c.stdout, "\n%d active run(s)\n", len(active))
+	for _, r := range active {
+		t := r.Turns[len(r.Turns)-1]
+		fmt.Fprintf(c.stdout, "  %s  %s  turn %d %s  %s\n", r.ID, r.Profile, t.N, t.Outcome, r.Cwd)
+	}
+	return nil
+}
+
+func dash(s []string) string {
+	if len(s) == 0 {
+		return "-"
+	}
+	return strings.Join(s, ", ")
+}
+
 func lastLines(s string, n int) string {
 	var keep []string
 	for _, l := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
-		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "== attempt") {
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "== ") {
 			keep = append(keep, l)
 		}
 	}

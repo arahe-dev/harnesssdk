@@ -17,6 +17,8 @@ import (
 //	harnesses/<name>.json   harness definitions
 //	profiles/<name>.md      profiles
 //	budgets.json            named capacities, {"pi": 2}
+//	gate/<name>/            machine-wide ledgers for budgets and keys
+//	trust.json              trusted project files
 //	runs/<id>/              one directory per run
 type Home struct {
 	Dir string
@@ -56,60 +58,98 @@ func NewHome(dir string) (*Home, error) {
 	return &Home{Dir: dir}, nil
 }
 
-func (h *Home) defPath(name string) string {
-	return filepath.Join(h.Dir, "harnesses", name+".json")
-}
-
-func (h *Home) profilePath(name string) string {
-	return filepath.Join(h.Dir, "profiles", name+".md")
-}
-
 func (h *Home) budgetsPath() string { return filepath.Join(h.Dir, "budgets.json") }
 
-// Definition loads a harness definition.
-func (h *Home) Definition(name string) (*Definition, error) {
+var kindExt = map[string]string{"harnesses": ".json", "profiles": ".md"}
+
+// Item is a stored definition or profile and where it came from.
+type Item struct {
+	Name  string
+	Scope string // project or global
+	Path  string
+}
+
+// locate finds a definition or profile for a run in cwd: a project file
+// first, which must be trusted, then the global one.
+func (h *Home) locate(kind, name, cwd string) (Item, []byte, error) {
+	file := name + kindExt[kind]
+	if proj, ok := h.projectDir(cwd); ok {
+		path := filepath.Join(proj, kind, file)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			if err := h.checkTrust(proj, kind+"/"+file, data); err != nil {
+				return Item{}, nil, err
+			}
+			return Item{Name: name, Scope: "project", Path: path}, data, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return Item{}, nil, err
+		}
+	}
+	path := filepath.Join(h.Dir, kind, file)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Item{}, nil, err
+	}
+	return Item{Name: name, Scope: "global", Path: path}, data, nil
+}
+
+// Definition loads the harness definition a run in cwd would use.
+func (h *Home) Definition(name, cwd string) (*Definition, error) {
 	if !validName(name) {
 		return nil, fmt.Errorf("harness name %q is not valid", name)
 	}
-	data, err := os.ReadFile(h.defPath(name))
+	it, data, err := h.locate("harnesses", name, cwd)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("no harness %q; define it with: harness def set %s --file <path|->", name, name)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return ParseDefinition(name, data)
-}
-
-// SaveDefinition validates and stores a definition.
-func (h *Home) SaveDefinition(name string, data []byte) (*Definition, error) {
 	d, err := ParseDefinition(name, data)
 	if err != nil {
 		return nil, err
 	}
-	return d, writeFileAtomic(h.defPath(name), data)
+	d.Scope, d.Path = it.Scope, it.Path
+	return d, nil
 }
 
-// Profile loads a profile.
-func (h *Home) Profile(name string) (*Profile, error) {
+// SaveDefinition validates and stores a definition, globally or in a
+// project's .harness folder (which also trusts the new content).
+func (h *Home) SaveDefinition(name string, data []byte, projectDir string) (*Definition, error) {
+	d, err := ParseDefinition(name, data)
+	if err != nil {
+		return nil, err
+	}
+	return d, h.store("harnesses", name, data, projectDir)
+}
+
+// Profile loads the profile a run in cwd would use.
+func (h *Home) Profile(name, cwd string) (*Profile, error) {
 	if !validName(name) {
 		return nil, fmt.Errorf("profile name %q is not valid", name)
 	}
-	data, err := os.ReadFile(h.profilePath(name))
+	it, data, err := h.locate("profiles", name, cwd)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("no profile %q; create it with: harness profile set %s --file <path|->", name, name)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return ParseProfile(name, data)
+	p, err := ParseProfile(name, data)
+	if err != nil {
+		return nil, err
+	}
+	p.Scope, p.Path = it.Scope, it.Path
+	return p, nil
 }
 
-// SaveProfile stores a profile after checking it against its harness and
-// the budgets: the Herta policy is built here, so an unsafe contract is
-// rejected when the profile is saved, not when it runs.
-func (h *Home) SaveProfile(p *Profile) error {
-	if _, err := h.Definition(p.Harness); err != nil {
+// SaveProfile stores a profile after checking it against the definition a
+// run in cwd would use and the budgets: the Herta policy is built here, so
+// an unsafe contract is rejected when the profile is saved, not when it
+// runs.
+func (h *Home) SaveProfile(p *Profile, projectDir, cwd string) error {
+	if _, err := h.Definition(p.Harness, cwd); err != nil {
 		return err
 	}
 	budgets, err := h.Budgets()
@@ -119,7 +159,21 @@ func (h *Home) SaveProfile(p *Profile) error {
 	if err := checkPolicy(p, budgets); err != nil {
 		return err
 	}
-	return writeFileAtomic(h.profilePath(p.Name), p.Bytes())
+	return h.store("profiles", p.Name, p.Bytes(), projectDir)
+}
+
+func (h *Home) store(kind, name string, data []byte, projectDir string) error {
+	file := name + kindExt[kind]
+	if projectDir == "" {
+		return writeFileAtomic(filepath.Join(h.Dir, kind, file), data)
+	}
+	if err := os.MkdirAll(filepath.Join(projectDir, kind), 0o755); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(projectDir, kind, file), data); err != nil {
+		return err
+	}
+	return h.trustFile(projectDir, kind+"/"+file, data)
 }
 
 // Budgets loads the named capacities; a missing file means none.
@@ -171,31 +225,52 @@ func (h *Home) SetBudget(name string, capacity int64) error {
 	return writeFileAtomic(h.budgetsPath(), append(data, '\n'))
 }
 
-// List returns the names stored in a kind's directory ("harnesses" or
-// "profiles").
-func (h *Home) List(kind string) ([]string, error) {
-	ext := map[string]string{"harnesses": ".json", "profiles": ".md"}[kind]
-	entries, err := os.ReadDir(filepath.Join(h.Dir, kind))
-	if err != nil {
-		return nil, err
+// List returns the definitions or profiles a run in cwd can see: the
+// project's, then the global ones they do not shadow.
+func (h *Home) List(kind, cwd string) ([]Item, error) {
+	var items []Item
+	seen := map[string]bool{}
+	scan := func(dir, scope string) error {
+		entries, err := os.ReadDir(filepath.Join(dir, kind))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			n, ok := strings.CutSuffix(e.Name(), kindExt[kind])
+			if !ok || e.IsDir() || seen[n] {
+				continue
+			}
+			seen[n] = true
+			items = append(items, Item{Name: n, Scope: scope, Path: filepath.Join(dir, kind, e.Name())})
+		}
+		return nil
 	}
-	var names []string
-	for _, e := range entries {
-		if n, ok := strings.CutSuffix(e.Name(), ext); ok && !e.IsDir() {
-			names = append(names, n)
+	if proj, ok := h.projectDir(cwd); ok {
+		if err := scan(proj, "project"); err != nil {
+			return nil, err
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	if err := scan(h.Dir, "global"); err != nil {
+		return nil, err
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
 }
 
-// Remove deletes a stored definition or profile.
-func (h *Home) Remove(kind, name string) error {
-	path := map[string]string{"harnesses": h.defPath(name), "profiles": h.profilePath(name)}[kind]
-	if path == "" || !validName(name) {
+// Remove deletes a definition or profile, globally or from a project.
+func (h *Home) Remove(kind, name, projectDir string) error {
+	ext, ok := kindExt[kind]
+	if !ok || !validName(name) {
 		return fmt.Errorf("cannot remove %s %q", kind, name)
 	}
-	return os.Remove(path)
+	dir := h.Dir
+	if projectDir != "" {
+		dir = projectDir
+	}
+	return os.Remove(filepath.Join(dir, kind, name+ext))
 }
 
 // writeFileAtomic writes through a temporary file and a rename, so a

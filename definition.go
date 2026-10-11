@@ -16,6 +16,8 @@ import (
 // binary knows nothing about any particular harness.
 type Definition struct {
 	Name        string `json:"-"`
+	Scope       string `json:"-"` // project or global
+	Path        string `json:"-"`
 	Description string `json:"description,omitempty"`
 	// Command is the executable, resolved on PATH.
 	Command string `json:"command"`
@@ -40,7 +42,8 @@ type Definition struct {
 
 // OutputRule locates the final answer in the CLI's stdout.
 type OutputRule struct {
-	// Format is "text" (all of stdout) or "json" (one JSON document).
+	// Format is "text" (all of stdout), "json" (one JSON document) or
+	// "jsonl" (one JSON event per line).
 	Format string `json:"format"`
 	// Field is the dotted path to the answer in a JSON document.
 	Field string `json:"field,omitempty"`
@@ -48,6 +51,21 @@ type OutputRule struct {
 	ErrorField string `json:"error_field,omitempty"`
 	// SessionField captures the session id from the document.
 	SessionField string `json:"session_field,omitempty"`
+	// Answer, Session and Error pick values out of a JSONL event stream.
+	// Answer is required for jsonl; any Error match marks the run failed.
+	Answer  *Selector `json:"answer,omitempty"`
+	Session *Selector `json:"session,omitempty"`
+	Error   *Selector `json:"error,omitempty"`
+}
+
+// Selector picks a field from the events of a JSONL stream that match
+// Where (dotted path to required string value).
+type Selector struct {
+	Where map[string]string `json:"where,omitempty"`
+	Field string            `json:"field,omitempty"`
+	// Pick is "last" (default), "first" or "join" (all matches, joined).
+	Pick string `json:"pick,omitempty"`
+	Join string `json:"join,omitempty"`
 }
 
 // FailureRule maps a pattern in a failed run's output to an outcome.
@@ -112,17 +130,35 @@ func (d *Definition) validate() error {
 			return fmt.Errorf("env %s: {*%s} is only for args", k, pieces[0].name)
 		}
 	}
-	switch d.Output.Format {
+	o := d.Output
+	jsonFields := o.Field != "" || o.ErrorField != "" || o.SessionField != ""
+	selectors := o.Answer != nil || o.Session != nil || o.Error != nil
+	switch o.Format {
 	case "text":
-		if d.Output.Field != "" || d.Output.ErrorField != "" || d.Output.SessionField != "" {
-			return errors.New("output fields need \"format\": \"json\"")
+		if jsonFields || selectors {
+			return errors.New("text output takes no fields or selectors")
 		}
 	case "json":
-		if d.Output.Field == "" {
+		if o.Field == "" {
 			return errors.New("output.field is required for json output")
 		}
+		if selectors {
+			return errors.New("answer, session and error selectors are for jsonl output")
+		}
+	case "jsonl":
+		if o.Answer == nil {
+			return errors.New("output.answer is required for jsonl output")
+		}
+		if jsonFields {
+			return errors.New("field, error_field and session_field are for json output; jsonl uses answer, session and error")
+		}
+		for name, sel := range map[string]*Selector{"answer": o.Answer, "session": o.Session, "error": o.Error} {
+			if err := sel.validate(name != "error"); err != nil {
+				return fmt.Errorf("output.%s: %w", name, err)
+			}
+		}
 	default:
-		return fmt.Errorf("output.format must be \"text\" or \"json\", got %q", d.Output.Format)
+		return fmt.Errorf("output.format must be \"text\", \"json\" or \"jsonl\", got %q", o.Format)
 	}
 	for i := range d.Failures {
 		f := &d.Failures[i]
@@ -189,10 +225,31 @@ func (d *Definition) classify(text string) hertasdk.Outcome {
 	return hertasdk.Permanent
 }
 
+func (s *Selector) validate(needField bool) error {
+	if s == nil {
+		return nil
+	}
+	if needField && s.Field == "" {
+		return errors.New("field is required")
+	}
+	switch s.Pick {
+	case "", "last", "first", "join":
+	default:
+		return fmt.Errorf("pick must be last, first or join, got %q", s.Pick)
+	}
+	if s.Join != "" && s.Pick != "join" {
+		return errors.New("join needs \"pick\": \"join\"")
+	}
+	return nil
+}
+
 // extract finds the answer, the failure flag and the session id in stdout.
 func (d *Definition) extract(stdout []byte) (answer string, failed bool, session string, err error) {
-	if d.Output.Format == "text" {
+	switch d.Output.Format {
+	case "text":
 		return strings.TrimRight(string(stdout), "\r\n"), false, "", nil
+	case "jsonl":
+		return d.extractEvents(stdout)
 	}
 	var doc any
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &doc); err != nil {
@@ -215,6 +272,74 @@ func (d *Definition) extract(stdout []byte) (answer string, failed bool, session
 		return "", failed, session, fmt.Errorf("output has no field %q", d.Output.Field)
 	}
 	return scalar(ans), failed, session, nil
+}
+
+// extractEvents applies the jsonl selectors. Lines that are not JSON are
+// skipped: some CLIs print banners on stdout.
+func (d *Definition) extractEvents(stdout []byte) (answer string, failed bool, session string, err error) {
+	var events []any
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		var ev any
+		if json.Unmarshal(bytes.TrimSpace(line), &ev) == nil {
+			events = append(events, ev)
+		}
+	}
+	o := d.Output
+	if o.Error != nil {
+		if vals, matched := o.Error.pick(events); matched > 0 && (o.Error.Field == "" || len(vals) > 0) {
+			failed = true
+		}
+	}
+	if o.Session != nil {
+		if vals, _ := o.Session.pick(events); len(vals) > 0 {
+			session = vals[0]
+		}
+	}
+	vals, _ := o.Answer.pick(events)
+	if len(vals) == 0 {
+		return "", failed, session, fmt.Errorf("no event matched output.answer in %d events", len(events))
+	}
+	return vals[0], failed, session, nil
+}
+
+// pick returns the selected value (one element, or none) and how many
+// events matched Where.
+func (s *Selector) pick(events []any) (vals []string, matched int) {
+	var all []string
+	for _, ev := range events {
+		if !s.matches(ev) {
+			continue
+		}
+		matched++
+		if s.Field == "" {
+			continue
+		}
+		if v, ok := lookup(ev, s.Field); ok {
+			if str := scalar(v); str != "" {
+				all = append(all, str)
+			}
+		}
+	}
+	if len(all) == 0 {
+		return nil, matched
+	}
+	switch s.Pick {
+	case "first":
+		return all[:1], matched
+	case "join":
+		return []string{strings.Join(all, s.Join)}, matched
+	}
+	return all[len(all)-1:], matched
+}
+
+func (s *Selector) matches(ev any) bool {
+	for path, want := range s.Where {
+		v, ok := lookup(ev, path)
+		if !ok || scalar(v) != want {
+			return false
+		}
+	}
+	return true
 }
 
 // lookup follows a dotted path through objects and array indexes.

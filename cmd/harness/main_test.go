@@ -5,11 +5,50 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	harness "github.com/arahe-dev/harnesssdk"
 )
+
+// The test binary doubles as the harness CLI (HARNESS_TEST_CLI=1) and as a
+// fake agent CLI (HARNESS_TEST_FAKE=1) for subprocess tests.
+func TestMain(m *testing.M) {
+	if code, ok := harness.Subcommand(); ok {
+		os.Exit(code)
+	}
+	switch {
+	case os.Getenv("HARNESS_TEST_FAKE") == "1":
+		os.Exit(fakeAgent(os.Args[1:]))
+	case os.Getenv("HARNESS_TEST_CLI") == "1":
+		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	os.Exit(m.Run())
+}
+
+// fakeAgent "tree <pidfile>" starts a sleeping grandchild, records its pid
+// and sleeps.
+func fakeAgent(args []string) int {
+	if len(args) == 1 && args[0] == "echo" {
+		in, _ := io.ReadAll(os.Stdin)
+		os.Stdout.Write(append([]byte("echo: "), in...))
+		return 0
+	}
+	if len(args) == 2 && args[0] == "tree" {
+		exe, _ := os.Executable()
+		child := exec.Command(exe, "sleep")
+		child.Env = append(os.Environ(), "HARNESS_TEST_FAKE=1")
+		child.Start()
+		os.WriteFile(args[1], []byte(strconv.Itoa(child.Process.Pid)), 0o600)
+	}
+	time.Sleep(60 * time.Second)
+	return 0
+}
 
 func harnessCLI(t *testing.T, stdin string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
@@ -81,5 +120,39 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 	if code, _, _ := harnessCLI(t, "", "nonsense"); code != 2 {
 		t.Fatalf("unknown command: %d", code)
+	}
+}
+
+func TestCLIBackgroundAndProject(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["echo"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	repo := t.TempDir()
+	profile := "---\nharness: fake\neffect: pure\n---\n"
+	if code, out, errs := harnessCLI(t, profile, "profile", "set", "p", "--project", "--cwd", repo, "--file", "-"); code != 0 || !strings.Contains(out, "project") {
+		t.Fatalf("%d %s %s", code, out, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "trust", "--cwd", repo); code != 0 || !strings.Contains(out, "trusted  profiles/p.md") {
+		t.Fatalf("trust: %d %s", code, out)
+	}
+	code, out, errs := harnessCLI(t, "", "start", "p", "--cwd", repo, "hello")
+	id := strings.TrimSpace(out)
+	if code != 0 || id == "" {
+		t.Fatalf("start: %d %q %s", code, out, errs)
+	}
+	if code, out, errs := harnessCLI(t, "", "wait", id, "--timeout", "60s"); code != 0 || strings.TrimSpace(out) != "echo: hello" {
+		t.Fatalf("wait: %d %q %s", code, out, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "result", id, "--json"); code != 0 || !strings.Contains(out, `"output": "echo: hello"`) {
+		t.Fatalf("result: %d %s", code, out)
+	}
+	if code, out, _ := harnessCLI(t, "", "status"); code != 0 || !strings.Contains(out, "0 active run(s)") {
+		t.Fatalf("status: %d %s", code, out)
+	}
+	if code, _, errs := harnessCLI(t, "", "stop", id); code != 2 || !strings.Contains(errs, "no unfinished turn") {
+		t.Fatalf("stop: %d %s", code, errs)
 	}
 }

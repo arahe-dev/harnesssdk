@@ -15,13 +15,15 @@ Most requests are one of these:
 
 - **Run an existing agent:** `harness profile list`, then
   `harness run <profile> "task"` (add `--file <path>` for context such as a
-  diff). Runs can take minutes: run the command in the background if your
-  shell tool has a timeout.
+  diff). For anything that may take minutes, use `harness start <profile> "task"`
+  instead: it returns a run id at once; collect the answer with
+  `harness wait <run-id> --timeout 5m` (exit 7 means still running: wait again).
 - **Set up a new agent:** read the target CLI's `--help`, write the definition
   if it is missing (`harness def set <name> --file -`), then the profile
-  (`harness profile set <name> --file -`), check it with
-  `harness run <profile> --dry-run "test"`, then run it.
+  (`harness profile set <name> --file -`, add `--project` for one repository),
+  check it with `harness run <profile> --dry-run "test"`, then run it.
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
+- **See what is running:** `harness status`.
 
 Report the agent's answer to the user, and say which profile and run id
 produced it.

@@ -11,18 +11,27 @@
 //
 // Execution policy is HertaSDK: each profile becomes a Herta operation with
 // a declared Effect, budgets, admission, per-attempt timeout and retry
-// table, validated when the profile is saved. Fan-out within one process is
-// arbitrated by one Herta runtime.
+// table, validated when the profile is saved. Budgets and serialize keys
+// hold across every harness process on the machine through the gate.
+//
+// harness starts its own executable as a detached worker and, on Unix, as
+// the guard of each agent's process tree; a program embedding Runner must
+// call Subcommand first in main.
 //
 // Layout:
 //
 //	template.go   argument templates: {name}, {name?text}, {*name}
-//	definition.go harness definitions: args, output, failure rules
+//	definition.go harness definitions: args, output (text, json, jsonl), failure rules
 //	profile.go    profiles and their Herta policy fields
-//	home.go       the data directory (~/.harness)
+//	home.go       the data directory (~/.harness) and lookups
+//	project.go    per-project .harness folders and trust
+//	gate.go       machine-wide FIFO ledgers for budgets and serialize keys
 //	record.go     run records (runs/<id>/)
-//	runner.go     turns as Herta operations; start, send, dry run
-//	process*.go   one CLI invocation; process-tree kill (job object, group)
-//	lock*.go      cross-process run locks
+//	runner.go     turns: prepare, execute under the gate and Herta, wait, stop
+//	worker.go     detached workers (harness start, send --detach)
+//	detach*.go    starting a worker that outlives its starter
+//	process*.go   one CLI invocation; process-tree containment (job object;
+//	              on Unix a guard leading the process group)
+//	lock*.go      cross-process file locks
 //	guide.go      the embedded agent guide and skill
 package harnesssdk

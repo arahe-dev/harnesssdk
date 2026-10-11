@@ -5,13 +5,15 @@ own headless CLIs, with HertaSDK as the execution policy.**
 
 A Claude Code agent can hand a review to a Pi agent on GPT-6.1 Sol, a Codex
 agent can delegate to Claude, and so on, without leaving its own harness.
-Delegation is one shell command, `harness run <profile> "task"`, so the parent
-keeps its own loop, tools, prompts and context. The child runs in its own
-harness's native one-shot mode (`pi -p`, `claude -p`, `codex exec`, ...).
+Delegation is one shell command, `harness run <profile> "task"` (or
+`harness start` for long tasks), so the parent keeps its own loop, tools,
+prompts and context. The child runs in its own harness's native one-shot mode
+(`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v0.1.0.** Used on Windows 11 with Pi 1.0.4 and Claude Code
-> 2.1.220. The test suite passes in CI on Ubuntu and Windows; no real harness
-> CLI has been run on Linux or macOS yet. See [What v0 does not do](#what-v0-does-not-do).
+> **Status: v1.1.0.** Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220
+> and OpenCode 1.18.35. The test suite passes in CI on Ubuntu and Windows; no
+> real harness CLI has been run on Linux or macOS yet. See
+> [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
 
 ## One layer, nothing hardcoded
 
@@ -23,7 +25,8 @@ harness's native one-shot mode (`pi -p`, `claude -p`, `codex exec`, ...).
 - **HertaSDK owns execution policy.** Each profile is a Herta operation with a
   declared effect, budgets, admission, per-attempt timeout and retry table,
   checked when the profile is saved: a profile that could replay a
-  half-finished file-editing run is rejected before it ever runs.
+  half-finished file-editing run is rejected before it ever runs. Budgets and
+  serialize keys hold across every harness process on the machine.
 
 ## Example: a Pi GPT-6.1 Sol reviewer
 
@@ -61,11 +64,12 @@ You are a senior code reviewer. Find correctness bugs, security issues and
 missing tests. Rank findings by severity with file:line. No style nits.
 EOF
 git diff main > /tmp/change.diff
-harness run review "Review this change." --file /tmp/change.diff
+harness start review "Review this change." --file /tmp/change.diff   # prints a run id
+harness wait <run-id> --timeout 5m                                   # exit 7: still running
 harness send <run-id> "Which finding would you fix first, and how?"
 ```
 
-The second time, it is just the last two lines.
+The second time, it is just the last three lines.
 
 ## Install
 
@@ -77,41 +81,51 @@ harness skill > ~/.agents/skills/harness/SKILL.md                # Codex, Pi
 ```
 
 `harness guide` is the full manual: definition and profile formats,
-placeholders, policy keys, exit codes. Data lives in `~/.harness`
-(`HARNESS_HOME` overrides it).
+placeholders, output rules, policy keys, exit codes. Data lives in
+`~/.harness` (`HARNESS_HOME` overrides it).
 
 ## Concepts
 
 | | |
 |---|---|
-| **Definition** (`harnesses/<name>.json`) | Command, argument groups with placeholders (`{model}`, `{flag?--x}`, `{*extra}`), prompt on stdin, where the answer is (all of stdout, or a JSON field), session handling, failure rules (regex → transient / throttled / uncertain / permanent). |
+| **Definition** (`harnesses/<name>.json`) | Command, argument groups with placeholders (`{model}`, `{flag?--x}`, `{*extra}`), prompt on stdin, where the answer is (all of stdout, a JSON field, or selectors over a JSONL event stream), session handling, failure rules (regex → transient / throttled / uncertain / permanent). |
 | **Profile** (`profiles/<name>.md`) | Header: harness, placeholder values, and the Herta policy (`effect`, `retry`, `timeout`, `budget`, `admission`, `serialize`). Body: the system prompt. |
-| **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`. Turns in one `harness` process are admitted against it by one Herta runtime. |
-| **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `harness send` continues it in the same harness session. |
+| **Project** (`.harness/` in a repository) | Definitions and profiles for one project, taking precedence there. Used only once trusted; any change needs trusting again. |
+| **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs never deadlock on their ancestors. |
+| **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,
-4 transient, 5 throttled, 6 uncertain, 130 cancelled (2 for usage errors).
-A timeout kills the whole process tree (a Job Object on Windows, a process
-group on Unix) and is `uncertain`: the agent may already have done work.
+4 transient, 5 throttled, 6 uncertain, 7 still running, 130 cancelled (2 for
+usage errors). A timeout kills the whole process tree (a Job Object on
+Windows, falling back to a parent-pid walk; a process group on Unix) and is
+`uncertain`: the agent may already have done work.
 
-## What v0 does not do
+## Limits
 
-- **Budgets hold within one `harness` process**, e.g. one `run` with several
-  `--task`s. Separate concurrent invocations do not yet share a limit
-  (planned: OS lock-file slots, plus run lineage to avoid nested deadlock).
-- **No detached runs.** `harness run` blocks until the agent finishes. In
-  Claude Code, run it as a background command; parents whose shell tools
-  time out need a future `start`/`wait`.
-- **Global profiles only**; per-project profiles and a trust step for
-  project-defined commands are planned.
-- **No JSONL output rules yet**, so CLIs that only stream events (OpenCode
-  `--format json`, `codex exec --json`) need a text or single-JSON mode.
+- **No real harness CLI has run on Linux or macOS yet.** The full test suite,
+  including process-group kill and SIGTERM handling, passes in CI on Ubuntu.
+- **Budgets are per machine**, not across machines: HertaSDK, and harness on
+  top of it, stay local by design.
+- **Pi on some networks** ends long runs with `fetch failed`; the turn is
+  `uncertain`, and `harness send` resumes the same session.
+- On Windows, background workers are started outside the starting command's
+  Job Object (by breaking away, or through WMI when the job forbids that), so
+  they survive a shell tool that kills its job; this needs PowerShell.
+- On Windows, if the agent cannot be put in a Job Object, its process tree is
+  tracked by parent process ids instead: best effort, since a process that
+  starts a child and exits within 200 ms can hide that child. The attempt's
+  log says when this happens.
+- A process that leaves its process group or job on purpose (a daemon that
+  calls `setsid`) is outside the tree and is not stopped with it.
+- Programs that embed the Go package must call `harnesssdk.Subcommand()`
+  first in `main`: harness starts its own executable as a detached worker and,
+  on Unix, as the guard of each agent's process tree.
 
 ## What HarnessSDK is not
 
 Not an orchestrator or planner (the parent agent plans), not a wire protocol,
-not a daemon, not a workflow engine, not a sandbox: a child agent runs with
-the permissions its harness gives it.
+not a daemon (a background worker lives for one turn), not a workflow engine,
+not a sandbox: a child agent runs with the permissions its harness gives it.
 
 ## Development
 
