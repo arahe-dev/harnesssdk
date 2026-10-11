@@ -1,11 +1,14 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -258,15 +261,19 @@ func (s *Selector) validate(needField bool) error {
 }
 
 // extract finds the answer, the failure flag and the session id in stdout.
-func (d *Definition) extract(stdout []byte) (answer string, failed bool, session string, err error) {
-	switch d.Output.Format {
-	case "text":
-		return strings.TrimRight(string(stdout), "\r\n"), false, "", nil
-	case "jsonl":
+func (d *Definition) extract(stdout io.Reader) (answer string, failed bool, session string, err error) {
+	if d.Output.Format == "jsonl" {
 		return d.extractEvents(stdout)
 	}
+	data, err := io.ReadAll(stdout)
+	if err != nil {
+		return "", false, "", err
+	}
+	if d.Output.Format == "text" {
+		return strings.TrimRight(string(data), "\r\n"), false, "", nil
+	}
 	var doc any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout), &doc); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(data), &doc); err != nil {
 		return "", false, "", fmt.Errorf("output is not one JSON document: %w", err)
 	}
 	// The failure flag and session are read first: a failure document often
@@ -288,62 +295,127 @@ func (d *Definition) extract(stdout []byte) (answer string, failed bool, session
 	return scalar(ans), failed, session, nil
 }
 
-// extractEvents applies the jsonl selectors. Lines that are not JSON are
-// skipped: some CLIs print banners on stdout.
-func (d *Definition) extractEvents(stdout []byte) (answer string, failed bool, session string, err error) {
-	var events []any
-	for _, line := range bytes.Split(stdout, []byte("\n")) {
-		var ev any
-		if json.Unmarshal(bytes.TrimSpace(line), &ev) == nil {
-			events = append(events, ev)
-		}
-	}
+// extractEvents applies the jsonl selectors to one event at a time, so a
+// long stream is never held in memory. Lines that are not JSON are skipped:
+// some CLIs print banners on stdout.
+func (d *Definition) extractEvents(stdout io.Reader) (answer string, failed bool, session string, err error) {
 	o := d.Output
-	if o.Error != nil {
-		if vals, matched := o.Error.pick(events); matched > 0 && (o.Error.Field == "" || len(vals) > 0) {
-			failed = true
+	errs, sess, ans := newCollector(o.Error), newCollector(o.Session), newCollector(o.Answer)
+	cs := []*collector{errs, sess, ans}
+	events := 0
+	br := bufio.NewReaderSize(stdout, 64<<10)
+	for {
+		// A line is read in place; only one longer than the buffer is
+		// copied. Decoding copies what it keeps.
+		line, rerr := br.ReadSlice('\n')
+		if rerr == bufio.ErrBufferFull {
+			long := slices.Clone(line)
+			for rerr == bufio.ErrBufferFull {
+				line, rerr = br.ReadSlice('\n')
+				long = append(long, line...)
+			}
+			line = long
+		}
+		if line = bytes.TrimSpace(line); len(line) > 0 && (errs.mayMatch(line) || sess.mayMatch(line) || ans.mayMatch(line)) {
+			var ev any
+			if json.Unmarshal(line, &ev) == nil {
+				events++
+				for _, c := range cs {
+					c.add(ev)
+				}
+			}
+		} else if len(line) > 0 && line[0] == '{' {
+			events++ // an event no selector can match
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", false, "", rerr
 		}
 	}
-	if o.Session != nil {
-		if vals, _ := o.Session.pick(events); len(vals) > 0 {
-			session = vals[0]
-		}
+	if _, ok := errs.value(); errs.matched > 0 && (o.Error.Field == "" || ok) {
+		failed = true
 	}
-	vals, _ := o.Answer.pick(events)
-	if len(vals) == 0 {
-		return "", failed, session, fmt.Errorf("no event matched output.answer in %d events", len(events))
+	session, _ = sess.value()
+	answer, ok := ans.value()
+	if !ok {
+		return "", failed, session, fmt.Errorf("no event matched output.answer in %d events", events)
 	}
-	return vals[0], failed, session, nil
+	return answer, failed, session, nil
 }
 
-// pick returns the selected value (one element, or none) and how many
-// events matched Where.
-func (s *Selector) pick(events []any) (vals []string, matched int) {
-	var all []string
-	for _, ev := range events {
-		if !s.matches(ev) {
-			continue
+// collector applies one selector to a stream of events.
+type collector struct {
+	s       *Selector
+	matched int
+	vals    []string // every value for pick join; otherwise the chosen one
+	// literal holds Where values that can be found in a raw line before it
+	// is decoded; see mayMatch.
+	literal [][]byte
+}
+
+func newCollector(s *Selector) *collector {
+	c := &collector{s: s}
+	if s == nil {
+		return c
+	}
+	for _, want := range s.Where {
+		if _, err := strconv.ParseFloat(want, 64); err == nil || want == "" || strings.ContainsAny(want, "\"\\/") {
+			continue // a number may be spelled many ways; these may be escaped
 		}
-		matched++
-		if s.Field == "" {
-			continue
-		}
-		if v, ok := lookup(ev, s.Field); ok {
-			if str := scalar(v); str != "" {
-				all = append(all, str)
-			}
+		c.literal = append(c.literal, []byte(want))
+	}
+	return c
+}
+
+// mayMatch reports whether a raw line can match, without decoding it. A
+// JSON string spells a value without quote, backslash or slash literally,
+// unless it uses a \u escape, so a line with neither cannot match.
+func (c *collector) mayMatch(line []byte) bool {
+	if c.s == nil {
+		return false
+	}
+	for _, want := range c.literal {
+		if !bytes.Contains(line, want) {
+			return bytes.Contains(line, []byte(`\u`))
 		}
 	}
-	if len(all) == 0 {
-		return nil, matched
+	return true
+}
+
+func (c *collector) add(ev any) {
+	if c.s == nil || !c.s.matches(ev) {
+		return
 	}
-	switch s.Pick {
-	case "first":
-		return all[:1], matched
-	case "join":
-		return []string{strings.Join(all, s.Join)}, matched
+	c.matched++
+	if c.s.Field == "" {
+		return
 	}
-	return all[len(all)-1:], matched
+	v, ok := lookup(ev, c.s.Field)
+	if !ok {
+		return
+	}
+	str := scalar(v)
+	switch {
+	case str == "", c.s.Pick == "first" && len(c.vals) > 0:
+	case c.s.Pick == "join":
+		c.vals = append(c.vals, str)
+	default:
+		c.vals = append(c.vals[:0], str)
+	}
+}
+
+// value is the selected value: the last match by default, the first, or
+// all of them joined.
+func (c *collector) value() (string, bool) {
+	if len(c.vals) == 0 {
+		return "", false
+	}
+	if c.s.Pick == "join" {
+		return strings.Join(c.vals, c.s.Join), true
+	}
+	return c.vals[0], true
 }
 
 func (s *Selector) matches(ev any) bool {

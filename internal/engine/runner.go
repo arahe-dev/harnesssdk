@@ -339,7 +339,6 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		},
 	})
 	t.exitCode = code
-	out, _ := os.ReadFile(stdoutPath)
 	t.stderrTail = readTail(stderrPath, mark, 8<<10)
 	for _, w := range warnings {
 		fmt.Fprintf(stderr, "== harness warning: %s\n", w)
@@ -354,7 +353,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	if runErr != nil {
 		return nil, hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("start %s: %w", t.Def.Name, runErr))
 	}
-	answer, failed, session, xerr := t.Def.extract(out)
+	answer, failed, session, xerr := extractFile(t.Def, stdoutPath)
 	if code == 0 && xerr == nil && !failed {
 		if session == "" {
 			session = v["session"]
@@ -373,7 +372,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	default:
 		cause = fmt.Errorf("%s reported an error: %s", t.Def.Name, firstLine(answer))
 	}
-	evidence := t.stderrTail + "\n" + string(lastBytes(out, 8<<10))
+	evidence := t.stderrTail + "\n" + readTail(stdoutPath, 0, 8<<10)
 	return nil, hertasdk.Fail(t.Def.classify(evidence), cause)
 }
 
@@ -909,11 +908,13 @@ func readTail(path string, from, n int64) string {
 	return string(b[:m])
 }
 
-func lastBytes(b []byte, n int) []byte {
-	if len(b) > n {
-		return b[len(b)-n:]
+func extractFile(d *Definition, path string) (answer string, failed bool, session string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, "", err
 	}
-	return b
+	defer f.Close()
+	return d.extract(f)
 }
 
 func lastLine(s string) string {

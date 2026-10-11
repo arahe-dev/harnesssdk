@@ -2,6 +2,7 @@ package engine
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/arahe-dev/hertasdk"
@@ -64,22 +65,22 @@ func TestParseDefinitionErrors(t *testing.T) {
 
 func TestExtractJSON(t *testing.T) {
 	d := &Definition{Output: OutputRule{Format: "json", Field: "result", ErrorField: "is_error", SessionField: "meta.session"}}
-	ans, failed, session, err := d.extract([]byte(`{"result":"done","is_error":false,"meta":{"session":"s-1"}}`))
+	ans, failed, session, err := d.extract(strings.NewReader(`{"result":"done","is_error":false,"meta":{"session":"s-1"}}`))
 	if err != nil || ans != "done" || failed || session != "s-1" {
 		t.Fatalf("got %q %v %q %v", ans, failed, session, err)
 	}
-	_, failed, _, _ = d.extract([]byte(`{"result":"x","is_error":true}`))
+	_, failed, _, _ = d.extract(strings.NewReader(`{"result":"x","is_error":true}`))
 	if !failed {
 		t.Fatal("error_field true should mark failure")
 	}
-	if _, _, _, err := d.extract([]byte(`not json`)); err == nil {
+	if _, _, _, err := d.extract(strings.NewReader(`not json`)); err == nil {
 		t.Fatal("want error for non-JSON output")
 	}
-	if _, _, _, err := d.extract([]byte(`{"other":1}`)); err == nil {
+	if _, _, _, err := d.extract(strings.NewReader(`{"other":1}`)); err == nil {
 		t.Fatal("want error for a missing field")
 	}
 	d.Output.Field = "items.1"
-	if ans, _, _, _ := d.extract([]byte(`{"items":["a","b"]}`)); ans != "b" {
+	if ans, _, _, _ := d.extract(strings.NewReader(`{"items":["a","b"]}`)); ans != "b" {
 		t.Fatalf("array index: %q", ans)
 	}
 }
@@ -107,20 +108,39 @@ func TestExtractJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ans, failed, session, err := d.extract([]byte(opencodeEvents))
+	ans, failed, session, err := d.extract(strings.NewReader(opencodeEvents))
 	if err != nil || ans != "OK" || failed || session != "ses_ed4e8557fffeMwuZjsS6XPzGJk" {
 		t.Fatalf("got %q %v %q %v", ans, failed, session, err)
 	}
-	_, failed, _, _ = d.extract([]byte(opencodeEvents + `{"type":"error","error":{"message":"boom"}}` + "\n"))
+	_, failed, _, _ = d.extract(strings.NewReader(opencodeEvents + `{"type":"error","error":{"message":"boom"}}` + "\n"))
 	if !failed {
 		t.Fatal("an error event should mark failure")
 	}
-	if _, _, _, err := d.extract([]byte(`{"type":"step_start"}`)); err == nil {
+	if _, _, _, err := d.extract(strings.NewReader(`{"type":"step_start"}`)); err == nil {
 		t.Fatal("no answer event should be an error")
 	}
 	d.Output.Answer.Pick = "last"
-	if ans, _, _, _ := d.extract([]byte(opencodeEvents)); ans != "K" {
+	if ans, _, _, _ := d.extract(strings.NewReader(opencodeEvents)); ans != "K" {
 		t.Fatalf("pick last: %q", ans)
+	}
+}
+
+// Lines are filtered before decoding; values a line spells differently
+// must still match.
+func TestExtractJSONLSpellings(t *testing.T) {
+	d := &Definition{Output: OutputRule{Format: "jsonl",
+		Answer: &Selector{Where: map[string]string{"type": "text", "n": "100"}, Field: "v", Pick: "join", Join: "|"}}}
+	stream := `banner line, not JSON` + "\n" +
+		`{"type":"text","n":100,"v":"plain"}` + "\n" +
+		`{"type":"text","n":1e2,"v":"escaped"}` + "\n" +
+		`{"type":"other","n":100,"v":"no"}` + "\n" +
+		`{"type":"text","n":100,"v":"` + strings.Repeat("x", 200<<10) + `"}` // longer than the read buffer, no newline
+	ans, _, _, err := d.extract(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts := strings.Split(ans, "|"); len(parts) != 3 || parts[0] != "plain" || parts[1] != "escaped" || len(parts[2]) != 200<<10 {
+		t.Fatalf("got %d parts: %.40q", len(parts), ans)
 	}
 }
 
