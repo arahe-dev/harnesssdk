@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ type Turn struct {
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
+	hint        string             // the repeat guard's advice, once noted
+	noted       bool               // the outcome was counted while the turn was admitted
 	argv        []string
 	exitCode    int
 	lastSession string
@@ -409,7 +412,11 @@ func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
 type request struct {
 	Resume bool   `json:"resume"`
 	Extra  Vars   `json:"extra,omitempty"`
-	Repeat string `json:"repeat,omitempty"` // the request's fingerprint
+	Repeat string `json:"repeat,omitempty"` // the request's fingerprint when queued
+	// Caller is "run:<parent>" or "send:<run>": with the profile and
+	// definition loaded when the turn executes, it gives the fingerprint
+	// of what actually runs.
+	Caller string `json:"caller,omitempty"`
 }
 
 // queue appends a queued turn with its prompt and request. The caller owns
@@ -483,9 +490,16 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	return nr, nil
 }
 
-// testHookCreate, when set, runs before each run is created; an error
-// fails that creation.
-var testHookCreate func() error
+// testHookCreate, when set, runs at each stage of creating a run
+// ("record", "queue", "save"); an error fails that stage.
+var testHookCreate func(stage string) error
+
+func createStage(stage string) error {
+	if testHookCreate != nil {
+		return testHookCreate(stage)
+	}
+	return nil
+}
 
 // create records the runs, all of them or none: a failure removes the
 // runs already created.
@@ -497,18 +511,19 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 		}
 	}()
 	for i, task := range nr.tasks {
-		if testHookCreate != nil {
-			if err = testHookCreate(); err != nil {
-				return runs, err
-			}
-		}
 		var run *Run
 		if run, err = r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
 			return runs, err
 		}
 		runs = append(runs, run)
 		run.Depth, run.Kind = nr.depth, nr.kind
-		if _, err = queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i]}); err != nil {
+		if err = createStage("queue"); err != nil {
+			return runs, err
+		}
+		if _, err = queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i], Caller: "run:" + nr.parent}); err != nil {
+			return runs, err
+		}
+		if err = createStage("save"); err != nil {
 			return runs, err
 		}
 		if err = run.Save(); err != nil {
@@ -527,6 +542,16 @@ func removeRuns(runs []*Run) {
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
+	// A lost last turn is recorded as ended on its own first, so its end
+	// is kept (and counted once) even if this follow-up is refused below.
+	if _, err := r.home.updateRun(id, func(run *Run) error {
+		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() && !r.reapLost(run) {
+			return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
 		p, d, err := r.load(run.Profile, run.Cwd)
@@ -542,14 +567,12 @@ func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 				id, run.Harness, p.Name, p.Harness)
 		}
 		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() {
-			if !r.reapLost(run) {
-				return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
-			}
+			return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
 		}
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp})
+		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp, Caller: "send:" + id})
 		return err
 	})
 	return n, err
@@ -580,7 +603,11 @@ func (r *Runner) reapLost(run *Run) bool {
 	// guard like any other.
 	var req request
 	if data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", rec.N))); err == nil && json.Unmarshal(data, &req) == nil {
-		rec.Hint = r.home.noteRepeat(req.Repeat, rec.Outcome)
+		fp := rec.Repeat // what executed; a turn that never did is the request as queued
+		if fp == "" {
+			fp = req.Repeat
+		}
+		rec.Hint = r.home.noteRepeat(fp, turnID(run.ID, rec.N), rec.Outcome)
 	}
 	return true
 }
@@ -633,8 +660,9 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 
 	res, t, err := r.execute(ctx, run, n, execLock)
 	if t != nil && t.repeat != "" {
-		if !errors.Is(err, ErrRepeated) { // a refusal is not another failure
-			rep.Hint = r.home.noteRepeat(t.repeat, OutcomeName(err))
+		rep.Hint = t.hint
+		if !t.noted && !errors.Is(err, ErrRepeated) { // a refusal is not another failure
+			rep.Hint = r.home.noteRepeat(t.repeat, turnID(id, n), OutcomeName(err))
 		}
 	}
 	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
@@ -659,7 +687,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 // execute loads the turn's profile and request, passes the gate, and runs
 // the Herta operation. A stop file for the turn cancels it; Shutdown
 // withdraws it while it waits at the gate.
-func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (*Result, *Turn, error) {
+func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (res *Result, t *Turn, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go watchStop(ctx, run.Path(fmt.Sprintf("stop-%d", n)), cancel)
@@ -688,7 +716,12 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, nil, err
 		}
 	}
-	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	// The repeat guard follows what runs: the profile and definition as
+	// loaded now, which may have been edited since the turn was queued.
+	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
+		t.repeat = requestFingerprint(kind, caller, p, d, run.Cwd, t.Prompt, req.Extra)
+	}
 
 	// Validate the policy before waiting anywhere: a project file reaches
 	// here without passing through SaveProfile.
@@ -707,9 +740,9 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if err != nil {
 		return nil, t, err
 	}
-	// Checked again here: turns queued before the request reached the
-	// limit are refused too.
-	if err := r.home.checkRepeat(req.Repeat); err != nil {
+	// Checked again here, and after admission below: turns queued before
+	// the request reached the limit are refused too.
+	if err := r.home.checkRepeat(t.repeat); err != nil {
 		return nil, t, err
 	}
 	claims := claimsFor(p, budgets, t)
@@ -738,6 +771,17 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		return nil, t, err
 	}
 	defer ticket.Release()
+	// Deferred after the release, so it runs first: the outcome is counted
+	// while the turn still holds its budget, before a waiting turn of the
+	// same request is admitted and checks it.
+	defer func() {
+		if !errors.Is(err, ErrRepeated) {
+			t.hint, t.noted = r.home.noteRepeat(t.repeat, turnID(run.ID, n), OutcomeName(err)), true
+		}
+	}()
+	if err := r.home.checkRepeat(t.repeat); err != nil {
+		return nil, t, err
+	}
 	t.lineage = slices.Clone(r.kin().Lineage)
 	if ticket.ID != "" {
 		t.lineage = append(t.lineage, ticket.ID)
@@ -745,7 +789,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// Record the lineage, so a nested run that only finds this turn through
 	// process ancestry still learns which tickets its ancestors hold.
 	if _, err := r.home.updateRun(run.ID, func(run *Run) error {
-		run.Turns[n-1].Lineage = t.lineage
+		run.Turns[n-1].Lineage, run.Turns[n-1].Repeat = t.lineage, t.repeat
 		return nil
 	}); err != nil {
 		return nil, t, err
@@ -757,9 +801,11 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if ticket.Live != nil {
 		t.inherit = append(t.inherit, ticket.Live)
 	}
-	res, err := op.Do(ctx, t)
+	res, err = op.Do(ctx, t)
 	return res, t, err
 }
+
+func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
 // claimsFor are the gate claims of a turn: its budgets, at their current
 // capacities (checkPolicy has verified them), and its serialize key.

@@ -45,8 +45,9 @@ type TurnRecord struct {
 	Lineage  []string  `json:"lineage,omitempty"` // gate tickets of this turn and its ancestors
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
-	Model    string    `json:"model,omitempty"` // the model placeholder's value
-	Hint     string    `json:"hint,omitempty"`  // advice for the caller, such as the repeat guard's
+	Model    string    `json:"model,omitempty"`  // the model placeholder's value
+	Hint     string    `json:"hint,omitempty"`   // advice for the caller, such as the repeat guard's
+	Repeat   string    `json:"repeat,omitempty"` // the fingerprint of the request as it executed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -67,7 +68,15 @@ func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
 			return nil, err
 		}
 		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
-		return r, r.Save()
+		if err := createStage("record"); err != nil {
+			os.RemoveAll(dir)
+			return nil, err
+		}
+		if err := r.Save(); err != nil {
+			os.RemoveAll(dir) // never leave a folder without its record
+			return nil, err
+		}
+		return r, nil
 	}
 	return nil, errors.New("could not allocate a run id")
 }

@@ -62,3 +62,14 @@ func TestMetricsValue(t *testing.T) {
 		t.Fatal("names that break the encoding were kept")
 	}
 }
+
+func TestMetricsSignedZero(t *testing.T) {
+	var a, b Metrics
+	if err := json.Unmarshal([]byte(`{"cost_usd":-0}`), &a); err != nil {
+		t.Fatal(err)
+	}
+	json.Unmarshal([]byte(`{"cost_usd":0}`), &b)
+	if a != b {
+		t.Fatalf("%q != %q", a.String(), b.String())
+	}
+}

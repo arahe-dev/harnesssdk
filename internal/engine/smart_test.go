@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,10 +109,10 @@ func TestRepeatGuard(t *testing.T) {
 	// A success clears the count.
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
 	fp := runFingerprint(t, f, "ok", "x")
-	for range 2 {
-		f.home.noteRepeat(fp, "permanent")
+	for i := range 2 {
+		f.home.noteRepeat(fp, fmt.Sprint("r/", i), "permanent")
 	}
-	if h := f.home.noteRepeat(fp, "throttled"); h != "" || len(f.home.failures(fp)) != 2 {
+	if h := f.home.noteRepeat(fp, "r/9", "throttled"); h != "" || len(f.home.failures(fp)) != 2 {
 		t.Fatal("a throttled turn counted")
 	}
 	f.start(context.Background(), "ok", "x")

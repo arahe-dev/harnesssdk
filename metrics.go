@@ -23,7 +23,11 @@ func metricsOf(m map[string]float64) Metrics {
 		if k == "" || strings.ContainsAny(k, "=\n") {
 			continue // not a metric name a definition can declare
 		}
-		b.WriteString(k + "=" + strconv.FormatFloat(m[k], 'g', -1, 64) + "\n")
+		v := m[k]
+		if v == 0 {
+			v = 0 // -0 and 0 are equal numbers: write them alike
+		}
+		b.WriteString(k + "=" + strconv.FormatFloat(v, 'g', -1, 64) + "\n")
 	}
 	return Metrics{enc: b.String()}
 }

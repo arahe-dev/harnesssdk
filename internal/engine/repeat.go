@@ -36,8 +36,15 @@ var ErrRepeated = errors.New("this exact request keeps failing")
 var now = time.Now
 
 type repeatRecord struct {
-	Format   int         `json:"format"`
-	Failures []time.Time `json:"failures"` // consecutive, oldest first
+	Format   int             `json:"format"`
+	Failures []repeatFailure `json:"failures"` // consecutive, oldest first
+}
+
+// A failure names its turn, so one turn is counted once however often its
+// end is observed.
+type repeatFailure struct {
+	At   time.Time `json:"at"`
+	Turn string    `json:"turn"` // <run>/<n>
 }
 
 // fingerprint identifies a request.
@@ -77,14 +84,14 @@ func (h *Home) repeatPath(fp string) string { return filepath.Join(h.repeatDir()
 func (h *Home) repeatLock() string { return filepath.Join(h.Dir, "repeats.lock") }
 
 // failures are a request's consecutive failures within the window.
-func (h *Home) failures(fp string) []time.Time {
+func (h *Home) failures(fp string) []repeatFailure {
 	var rec repeatRecord
 	data, err := readShared(h.repeatPath(fp))
 	if err != nil || json.Unmarshal(data, &rec) != nil || checkFormat("repeat record", rec.Format) != nil {
 		return nil // missing, or from an older harness that counted differently: start over
 	}
 	cutoff := now().Add(-repeatWindow)
-	return slices.DeleteFunc(rec.Failures, func(t time.Time) bool { return t.Before(cutoff) })
+	return slices.DeleteFunc(rec.Failures, func(f repeatFailure) bool { return f.At.Before(cutoff) })
 }
 
 // checkRepeat refuses a request that has failed repeat_refuse times in a
@@ -108,8 +115,9 @@ func (h *Home) checkRepeat(fp string) error {
 }
 
 // noteRepeat counts a finished turn of a request and returns a hint for the
-// caller once the request has failed repeat_warn times in a row.
-func (h *Home) noteRepeat(fp, outcome string) string {
+// caller once the request has failed repeat_warn times in a row. Counting
+// the same turn again changes nothing.
+func (h *Home) noteRepeat(fp, turn, outcome string) string {
 	cfg, err := h.Config()
 	if fp == "" || err != nil || cfg.RepeatWarn == 0 && cfg.RepeatRefuse == 0 {
 		return ""
@@ -130,7 +138,10 @@ func (h *Home) noteRepeat(fp, outcome string) string {
 		os.Remove(h.repeatPath(fp))
 		return ""
 	}
-	fails := append(h.failures(fp), now().UTC())
+	fails := h.failures(fp)
+	if !slices.ContainsFunc(fails, func(f repeatFailure) bool { return f.Turn == turn }) {
+		fails = append(fails, repeatFailure{At: now().UTC(), Turn: turn})
+	}
 	data, _ := json.Marshal(repeatRecord{Format: formatVersion, Failures: fails})
 	if writeFileAtomic(h.repeatPath(fp), data) != nil || cfg.RepeatWarn == 0 || len(fails) < cfg.RepeatWarn {
 		return ""

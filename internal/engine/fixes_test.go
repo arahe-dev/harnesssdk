@@ -103,8 +103,8 @@ func TestQueuedTurnRefusedAtExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	fp := runFingerprint(t, f, "ok", "x")
-	for range 2 {
-		f.home.noteRepeat(fp, "permanent")
+	for i := range 2 {
+		f.home.noteRepeat(fp, fmt.Sprint("other/", i), "permanent")
 	}
 	rep := f.r.Execute(context.Background(), runs[0].ID, 1)
 	if !errors.Is(rep.Err, ErrRepeated) || rep.Outcome != "permanent" {
@@ -123,7 +123,7 @@ func TestRepeatWindowSlides(t *testing.T) {
 	defer func() { now = time.Now }()
 	for _, at := range []time.Duration{0, 50 * time.Minute, 100 * time.Minute} {
 		now = func() time.Time { return start.Add(at) }
-		h.noteRepeat("fp", "permanent")
+		h.noteRepeat("fp", at.String(), "permanent")
 	}
 	if n := len(h.failures("fp")); n != 2 {
 		t.Fatalf("failures within the hour: %d, want 2", n)
@@ -132,7 +132,7 @@ func TestRepeatWindowSlides(t *testing.T) {
 		t.Fatalf("refused with two failures in the hour: %v", err)
 	}
 	now = func() time.Time { return start.Add(4 * time.Hour) }
-	h.noteRepeat("other", "permanent")
+	h.noteRepeat("other", "r/1", "permanent")
 	h.pruneRepeats()
 	if _, err := os.Stat(h.repeatPath("fp")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("expired record kept")
@@ -184,19 +184,25 @@ func TestCompareIsAllOrNothing(t *testing.T) {
 		t.Fatal("compare with an unsafe policy accepted")
 	}
 	f.profile("b", "harness: fake\neffect: pure\nmode: echo")
-	calls := 0
-	testHookCreate = func() error {
-		if calls++; calls == 2 {
-			return fmt.Errorf("disk full")
-		}
-		return nil
-	}
 	defer func() { testHookCreate = nil }()
-	if _, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, nil, "", nil); err == nil {
-		t.Fatal("failed creation reported success")
-	}
-	if entries, _ := os.ReadDir(filepath.Join(f.home.Dir, "runs")); len(entries) != 0 {
-		t.Fatalf("%d runs left behind", len(entries))
+	// Fail each stage of creating the second run, after the first run is
+	// complete: the record's own save, the queued turn, the final save.
+	for _, stage := range []string{"record", "queue", "save"} {
+		seen := 0
+		testHookCreate = func(s string) error {
+			if s == stage {
+				if seen++; seen == 2 {
+					return fmt.Errorf("disk full at %s", s)
+				}
+			}
+			return nil
+		}
+		if _, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, nil, "", nil); err == nil {
+			t.Fatalf("%s: failed creation reported success", stage)
+		}
+		if entries, _ := os.ReadDir(filepath.Join(f.home.Dir, "runs")); len(entries) != 0 {
+			t.Fatalf("%s: %d runs left behind", stage, len(entries))
+		}
 	}
 }
 
@@ -222,5 +228,116 @@ func TestStatsAcrossZones(t *testing.T) {
 	r.Save()
 	if st, _ := h.Stats(StatsFilter{Since: time.Now().Add(-time.Hour)}); len(st) != 0 {
 		t.Fatalf("old run counted: %+v", st)
+	}
+}
+
+// Round two of the review.
+
+// A turn queued under one profile and executed after the profile was
+// edited is checked and counted as what it runs.
+func TestQueuedTurnFollowsEditedProfile(t *testing.T) {
+	f := newFixture(t, nil)
+	f.home.SetConfig("repeat_refuse", 2)
+	f.profile("p", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=a")
+	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := runFingerprint(t, f, "p", "x")
+	for i := range 2 {
+		f.home.noteRepeat(before, fmt.Sprint("other/", i), "permanent")
+	}
+	f.profile("p", "harness: fake\neffect: pure\nmode: echo") // the fix
+	after := runFingerprint(t, f, "p", "x")
+	rep := f.r.Execute(context.Background(), runs[0].ID, 1)
+	if rep.Err != nil {
+		t.Fatalf("edited profile refused under its old identity: %v", rep.Err)
+	}
+	f.profile("p", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=b")
+	runs, _ = f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
+	f.r.Execute(context.Background(), runs[0].ID, 1)
+	third := runFingerprint(t, f, "p", "x")
+	if len(f.home.failures(before)) != 2 || len(f.home.failures(after)) != 0 || len(f.home.failures(third)) != 1 {
+		t.Fatalf("failures: before %d, after %d, third %d", len(f.home.failures(before)), len(f.home.failures(after)), len(f.home.failures(third)))
+	}
+	if run, _ := f.home.LoadRun(runs[0].ID); run.Turns[0].Repeat != third {
+		t.Fatal("the executed fingerprint was not recorded")
+	}
+}
+
+// Two identical turns behind a budget of one: the first fails and is
+// counted before it releases the budget, so the second, admitted after it,
+// is refused.
+func TestRepeatCheckedAfterAdmission(t *testing.T) {
+	f := newFixture(t, map[string]int64{"b": 1})
+	f.home.SetConfig("repeat_refuse", 1)
+	f.profile("bad", "harness: fake\neffect: pure\nbudget: b=1\nmode: fail\nopts: code=3 msg=boom")
+	reps := f.start(context.Background(), "bad", "same", "same")
+	refused := 0
+	for _, rep := range reps {
+		if errors.Is(rep.Err, ErrRepeated) {
+			refused++
+		} else if rep.Outcome != "permanent" {
+			t.Fatalf("%s %v", rep.Outcome, rep.Err)
+		}
+	}
+	if refused != 1 || len(f.home.failures(runFingerprint(t, f, "bad", "same"))) != 1 {
+		t.Fatalf("refused %d, failures %d", refused, len(f.home.failures(runFingerprint(t, f, "bad", "same"))))
+	}
+}
+
+// A lost turn is counted once, however often it is observed, even when the
+// follow-up that found it is refused.
+func TestLostTurnCountedOnce(t *testing.T) {
+	f := newFixture(t, nil)
+	f.def("nosession", Definition{Args: [][]string{{"echo"}}, Output: OutputRule{Format: "text"}})
+	f.profile("ns", "harness: nosession\neffect: pure")
+	for _, lost := range []func(*TurnRecord){
+		func(r *TurnRecord) { r.Outcome = "running" },                           // its worker died
+		func(r *TurnRecord) { r.Queued = time.Now().Add(-2 * lostAfter).UTC() }, // no worker started
+	} {
+		runs, err := f.r.Prepare("ns", []string{"x"}, f.cwd, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.home.updateRun(runs[0].ID, func(run *Run) error {
+			lost(&run.Turns[0])
+			return nil
+		})
+		for range 3 { // refused each time: the run has no session
+			if _, err := f.r.PrepareSend(runs[0].ID, "more", nil); err == nil || !strings.Contains(err.Error(), "no session") {
+				t.Fatalf("send: %v", err)
+			}
+			f.r.WaitTurn(context.Background(), runs[0].ID, 1)
+		}
+		run, _ := f.home.LoadRun(runs[0].ID)
+		if !run.Turns[0].finished() {
+			t.Fatalf("lost turn not recorded as ended: %s", run.Turns[0].Outcome)
+		}
+	}
+	if n := len(f.home.failures(runFingerprint(t, f, "ns", "x"))); n != 2 {
+		t.Fatalf("two lost turns counted %d times", n)
+	}
+}
+
+// Counting from many processes at once, with cleanup running, loses
+// nothing: one lock guards every record.
+func TestRepeatCountingIsAtomic(t *testing.T) {
+	h := newGateHome(t)
+	h.SetConfig("repeat_refuse", 0)
+	h.SetConfig("repeat_warn", 1)
+	done := make(chan bool)
+	for i := range 20 {
+		go func() {
+			h.noteRepeat("fp", fmt.Sprint("r/", i), "permanent")
+			h.pruneRepeats()
+			done <- true
+		}()
+	}
+	for range 20 {
+		<-done
+	}
+	if n := len(h.failures("fp")); n != 20 {
+		t.Fatalf("counted %d of 20 failures", n)
 	}
 }

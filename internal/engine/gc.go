@@ -57,6 +57,21 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 // turn or executed meanwhile.
 func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) {
 	dir := filepath.Join(h.Dir, "runs", id)
+	// A folder without a record is what an interrupted removal leaves, or
+	// a run being created right now: only one untouched since the cutoff
+	// is removed. Nothing executes without a record, so it takes no locks,
+	// which would also touch the folder and make it look new.
+	if _, err := os.Stat(filepath.Join(dir, "run.json")); err != nil {
+		fi, err := os.Stat(dir)
+		if err != nil || !fi.ModTime().Before(cutoff) {
+			return -1, nil
+		}
+		size, _, err := dirSize(dir)
+		if err != nil || dryRun {
+			return size, err
+		}
+		return size, os.RemoveAll(dir)
+	}
 	exec, err := lockOpen(filepath.Join(dir, "exec.lock"))
 	if err != nil {
 		return -1, nil // executing
@@ -68,28 +83,16 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	}
 	locks := []string{"exec.lock", "state.lock"}
 	release := func() { state.Close(); exec.Close() }
-	// A folder without a record is what an interrupted removal leaves; a
-	// record this harness cannot read is left alone.
-	if _, err := os.Stat(filepath.Join(dir, "run.json")); err == nil {
-		if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) {
-			release()
-			return -1, nil
-		}
-	}
-	var size int64
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	// Under the locks, the record decides; one this harness cannot read is
+	// left alone.
+	if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) {
 		release()
-		return -1, err
+		return -1, nil
 	}
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil {
-			size += info.Size()
-		}
-	}
-	if dryRun {
+	size, entries, err := dirSize(dir)
+	if err != nil || dryRun {
 		release()
-		return size, nil
+		return size, err
 	}
 	// The record goes first: from then on the run does not exist. The lock
 	// files, open here, go last (Windows cannot delete an open file).
@@ -106,6 +109,21 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	release()
 	errs = append(errs, os.RemoveAll(dir))
 	return size, errors.Join(errs...)
+}
+
+// dirSize adds up the sizes of a run folder's files.
+func dirSize(dir string) (int64, []os.DirEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return -1, nil, err
+	}
+	var size int64
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil {
+			size += info.Size()
+		}
+	}
+	return size, entries, nil
 }
 
 // lastActive is when the run was created or a turn last queued, started or

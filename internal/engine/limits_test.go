@@ -132,6 +132,10 @@ func TestGC(t *testing.T) {
 	defer lk.Close()
 	leftover := oldRun(t, h, 40, "eeee") // an interrupted removal
 	os.Remove(leftover.Path("run.json"))
+	old := time.Now().AddDate(0, 0, -40)
+	os.Chtimes(leftover.Dir(), old, old)
+	creating := oldRun(t, h, 40, "ffff") // a folder being created right now
+	os.Remove(creating.Path("run.json"))
 
 	cutoff := time.Now().AddDate(0, 0, -30)
 	rep, err := h.GC(cutoff, true)
@@ -157,6 +161,9 @@ func TestGC(t *testing.T) {
 		if _, err := h.LoadRun(r.ID); err != nil {
 			t.Errorf("%s removed: %v", r.ID, err)
 		}
+	}
+	if _, err := os.Stat(creating.Dir()); err != nil {
+		t.Error("a folder being created was removed")
 	}
 }
 
