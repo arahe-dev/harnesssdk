@@ -57,17 +57,25 @@ type Result struct {
 	// Error says why the turn did not succeed; Run, Send and Wait also
 	// return it as their error.
 	Error string
+	// Check is the check the turn ran and Checked whether it passed or
+	// failed; a failed check fails the turn but keeps its Output.
+	Check, Checked string
+	// Branch is a worktree run's branch, and Changes its changes after
+	// the turn ("2 files changed, 10 insertions(+)").
+	Branch, Changes string
 }
 
 func resultOf(rep engine.Report) *Result {
 	res := &Result{Turn: rep.Turn, Outcome: Outcome(rep.Outcome), Output: rep.Output,
 		Attempts: rep.Attempts, Duration: rep.Duration, StderrTail: rep.StderrTail,
-		Model: rep.Model, Metrics: metricsOf(rep.Metrics), Hint: rep.Hint}
+		Model: rep.Model, Metrics: metricsOf(rep.Metrics), Hint: rep.Hint,
+		Check: rep.Check, Checked: rep.Checked, Changes: rep.Changes}
 	if rep.Err != nil {
 		res.Error = rep.Err.Error()
 	}
 	if rep.Run != nil {
 		res.Run, res.Profile, res.Harness, res.Session = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session
+		res.Branch = rep.Run.Branch
 	}
 	return res
 }
@@ -97,9 +105,12 @@ type Run struct {
 	Parent  string // the run whose agent started this one, if any
 	Depth   int    // 0 for a run started outside any run
 	Kind    string // the label given when it started
-	Session string
-	Created time.Time
-	Turns   []Turn
+	// Worktree and Branch are where a run started with Worktree works;
+	// Cwd is the folder it was started from.
+	Worktree, Branch string
+	Session          string
+	Created          time.Time
+	Turns            []Turn
 }
 
 // Turn is the record of one turn.
@@ -115,15 +126,18 @@ type Turn struct {
 	Model    string
 	Metrics  Metrics
 	Hint     string
+	Check    string
+	Checked  string
+	Changes  string
 }
 
 func runOf(r *engine.Run) Run {
 	out := Run{ID: r.ID, Profile: r.Profile, Harness: r.Harness, Cwd: r.Cwd, Parent: r.Parent,
-		Depth: r.Depth, Kind: r.Kind, Session: r.Session, Created: r.Created}
+		Depth: r.Depth, Kind: r.Kind, Session: r.Session, Created: r.Created, Worktree: r.Worktree, Branch: r.Branch}
 	for _, t := range r.Turns {
 		out.Turns = append(out.Turns, Turn{N: t.N, Outcome: Outcome(t.Outcome), Attempts: t.Attempts,
 			ExitCode: t.ExitCode, Queued: t.Queued, Started: t.Started, Ended: t.Ended, Error: t.Error,
-			Model: t.Model, Metrics: metricsOf(t.Metrics), Hint: t.Hint})
+			Model: t.Model, Metrics: metricsOf(t.Metrics), Hint: t.Hint, Check: t.Check, Checked: t.Checked, Changes: t.Changes})
 	}
 	return out
 }

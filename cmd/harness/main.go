@@ -29,20 +29,20 @@ import (
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.
 
   harness guide                            the manual: read this first
-  harness run <profile> [prompt | -]       run an agent and wait; --task --file --cwd --set --kind --json --dry-run
+  harness run <profile> [prompt | -]       run an agent and wait; --task --file --cwd --set --kind --check --worktree --json --dry-run
   harness start <profile> [prompt | -]     start an agent in the background (same flags); prints run ids
-  harness compare <p1>,<p2>[,...] [prompt] run one task on several profiles side by side; --file --cwd --set --kind --json
+  harness compare <p1>,<p2>[,...] [prompt] run one task on several profiles side by side; --file --cwd --set --kind --check --worktree --json
   harness stats [--profile p] [--kind k]   how each profile's turns ended and what they cost; --days --json
-  harness send <run-id> [prompt | -]       follow up in the same session; --file --set --json --dry-run --detach
+  harness send <run-id> [prompt | -]       follow up in the same session; --file --set --check --json --dry-run --detach
   harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running)
   harness result <run-id>                  print a run's last turn without waiting
   harness stop <run-id>                    stop a run's turn
   harness runs | show <run-id> | status    past runs; budgets and keys in use
   harness profile set|show|list|rm         agents (Markdown with a header); --project for this project
-  harness def set|show|list|rm             harness definitions (JSON); --project for this project
+  harness def set|show|list|rm|check       harness definitions (JSON); --project; check: CLI, version, --profile live turn
   harness trust [--approve]                review, then trust, this project's .harness files
   harness budget set|list|rm               capacity limits shared by every harness process
-  harness config [set <key> <n>]           limits: nesting, running turns, retention, repeated failures
+  harness config [set <key> <n>]           limits: nesting, running turns, waits, queues, spend, retention, repeats
   harness gc [--days n] [--dry-run]        remove finished runs older than retention_days
   harness home | skill | version
 `
@@ -238,6 +238,7 @@ func (c *cli) def(args []string) error {
 	}
 	fs := c.flags("def " + args[0])
 	file := fs.String("file", "", "definition JSON file, or - for stdin")
+	profile := fs.String("profile", "", "def check: also run one short live turn on this profile (spends tokens)")
 	var sc scopeFlags
 	sc.register(fs)
 	pos, err := parse(fs, args[1:])
@@ -264,7 +265,7 @@ func (c *cli) def(args []string) error {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", it.Name, it.Scope, d.Command, d.Description)
 		}
 		return w.Flush()
-	case "set", "show", "rm":
+	case "set", "show", "rm", "check":
 	default:
 		return usageErr("unknown def command %q", args[0])
 	}
@@ -273,6 +274,8 @@ func (c *cli) def(args []string) error {
 	}
 	name := pos[0]
 	switch args[0] {
+	case "check":
+		return c.defCheck(name, cwd, *profile)
 	case "set":
 		if *file == "" {
 			return usageErr("def set needs --file <path> or --file - (JSON on stdin)")
@@ -297,6 +300,47 @@ func (c *cli) def(args []string) error {
 		return nil
 	}
 	return c.home.Remove("harnesses", name, proj)
+}
+
+// defCheck finds a definition's CLI and its version and, with a profile,
+// runs one short live turn to see the answer and metrics come out.
+func (c *cli) defCheck(name, cwd, profile string) error {
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	dc, err := r.CheckDefinition(ctx, name, cwd, profile)
+	c.drain(r)
+	if dc != nil && dc.Path != "" {
+		fmt.Fprintf(c.stdout, "harness %s: %s\n", name, dc.Path)
+	}
+	if dc != nil && dc.Version != "" {
+		fmt.Fprintf(c.stdout, "version:   %s\n", dc.Version)
+	}
+	if err != nil {
+		return err
+	}
+	if dc.Live == nil {
+		return nil
+	}
+	rep := *dc.Live
+	slices.Sort(dc.Metrics)
+	fmt.Fprintf(c.stdout, "live turn: %s (profile %s, run %s) in %s%s\n", rep.Outcome, profile, runID(rep), rep.Duration.Round(time.Second), spend(rep.Metrics))
+	fmt.Fprintf(c.stdout, "answer:    %s\nmetrics:   %s\n", map[bool]string{true: "as asked", false: "NOT as asked"}[dc.Answered], dash(dc.Metrics))
+	if !dc.Answered {
+		return fmt.Errorf("the live turn did not answer as asked (%v): %q; see: harness show %s", rep.Err, firstLine(rep.Output), runID(rep))
+	}
+	return nil
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 func scopeOf(projectDir string) string {
@@ -490,6 +534,9 @@ func (c *cli) config(args []string) error {
 		fmt.Fprintf(w, "retention_days\t%d\tdays finished runs are kept (0: forever)\n", cfg.RetentionDays)
 		fmt.Fprintf(w, "repeat_warn\t%d\twarn after the same request fails this many times in a row (0: never)\n", cfg.RepeatWarn)
 		fmt.Fprintf(w, "repeat_refuse\t%d\trefuse it after this many (0: never)\n", cfg.RepeatRefuse)
+		fmt.Fprintf(w, "max_wait_minutes\t%d\thow long a turn waits for its budgets, unless its profile sets max_wait (0: no limit)\n", cfg.MaxWaitMinutes)
+		fmt.Fprintf(w, "max_queue\t%d\tturns that may wait for one budget, key or slot (0: no limit)\n", cfg.MaxQueue)
+		fmt.Fprintf(w, "spend_limit_usd\t%d\tdollars all turns may spend in 24 hours, as the CLIs report it (0: no limit)\n", cfg.SpendLimitUSD)
 		return w.Flush()
 	case args[0] == "set" && len(args) == 3:
 		n, err := strconv.Atoi(args[2])
@@ -616,6 +663,8 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	fs.Var(&tasks, "task", "start a separate run for this task (repeatable)")
 	cwdFlag := fs.String("cwd", "", "working folder for the agent (default: current)")
 	kind := fs.String("kind", "", "label the run for harness stats, such as review")
+	check := fs.String("check", "", "a command line the turn must pass in the agent's folder, such as \"go test ./...\"")
+	worktree := fs.Bool("worktree", false, "run the agent in a git worktree of its own, on branch harness/<run>")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -669,7 +718,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 		return 0, nil
 	}
 	if detach {
-		runs, err := r.Prepare(profile, prompts, dir, extra, *kind)
+		runs, err := r.Prepare(profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree})
 		if err != nil {
 			return exitFor(err), err
 		}
@@ -684,7 +733,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	reports, err := r.Start(ctx, profile, prompts, dir, extra, *kind, func(run *harness.Run) {
+	reports, err := r.Start(ctx, profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree}, func(run *harness.Run) {
 		fmt.Fprintf(c.stderr, "harness: %s started (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
 	})
 	c.drain(r)
@@ -721,6 +770,7 @@ func (c *cli) send(args []string) (int, error) {
 	var tf turnFlags
 	tf.register(fs)
 	detach := fs.Bool("detach", false, "run the turn in the background and return its run id")
+	check := fs.String("check", "", "a command line the turn must pass in the agent's folder")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -749,7 +799,7 @@ func (c *cli) send(args []string) (int, error) {
 		c.printPlan(plan)
 		return 0, nil
 	}
-	n, err := r.PrepareSend(id, prompt, extra)
+	n, err := r.PrepareSend(id, prompt, harness.TurnOptions{Extra: extra, Check: *check})
 	if err != nil {
 		return exitFor(err), err
 	}
@@ -868,6 +918,10 @@ type jsonReport struct {
 	Output     string             `json:"output"`
 	Error      string             `json:"error,omitempty"`
 	Hint       string             `json:"hint,omitempty"`
+	Check      string             `json:"check,omitempty"`
+	Checked    string             `json:"checked,omitempty"` // passed or failed
+	Branch     string             `json:"branch,omitempty"`  // a worktree run's branch
+	Changes    string             `json:"changes,omitempty"`
 }
 
 // report prints the answers and returns the most severe exit code.
@@ -879,9 +933,11 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 		code = worse(code, ec)
 		if asJSON {
 			j := jsonReport{Turn: rep.Turn, Outcome: rep.Outcome, ExitCode: ec, Attempts: rep.Attempts,
-				DurationMS: rep.Duration.Milliseconds(), Output: rep.Output, Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint}
+				DurationMS: rep.Duration.Milliseconds(), Output: rep.Output, Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint,
+				Check: rep.Check, Checked: rep.Checked, Changes: rep.Changes}
 			if rep.Run != nil {
 				j.Run, j.Profile, j.Harness, j.Session, j.Kind = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session, rep.Run.Kind
+				j.Branch = rep.Run.Branch
 			}
 			if rep.Err != nil {
 				j.Error = rep.Err.Error()
@@ -916,6 +972,12 @@ func (c *cli) status1(rep harness.Report) {
 	}
 	fmt.Fprintf(c.stderr, "harness: %s %s · turn %d · %d attempt(s) · %s%s\n",
 		id, rep.Outcome, rep.Turn, rep.Attempts, rep.Duration.Round(time.Second), spend(rep.Metrics))
+	if rep.Checked != "" {
+		fmt.Fprintf(c.stderr, "harness: check %s: %s\n", rep.Checked, rep.Check)
+	}
+	if rep.Run != nil && rep.Run.Branch != "" {
+		fmt.Fprintf(c.stderr, "harness: branch %s: %s (worktree %s)\n", rep.Run.Branch, or(rep.Changes, "-"), rep.Run.Worktree)
+	}
 	if rep.Hint != "" {
 		fmt.Fprintf(c.stderr, "harness: hint: %s\n", rep.Hint)
 	}
@@ -991,6 +1053,9 @@ func (c *cli) show(args []string) error {
 	if r.Kind != "" {
 		fmt.Fprintf(c.stdout, "kind:    %s\n", r.Kind)
 	}
+	if r.Worktree != "" {
+		fmt.Fprintf(c.stdout, "branch:  %s (worktree %s, from %.12s)\n", r.Branch, r.Worktree, r.Base)
+	}
 	for _, t := range r.Turns {
 		dur := "-"
 		if !t.Ended.IsZero() && !t.Started.IsZero() {
@@ -1006,6 +1071,12 @@ func (c *cli) show(args []string) error {
 		}
 		if t.Hint != "" {
 			fmt.Fprintf(c.stdout, "         hint: %s\n", t.Hint)
+		}
+		if t.Checked != "" {
+			fmt.Fprintf(c.stdout, "         check %s: %s\n", t.Checked, t.Check)
+		}
+		if t.Changes != "" {
+			fmt.Fprintf(c.stdout, "         changes: %s\n", t.Changes)
 		}
 	}
 	if n := len(r.Turns); n > 0 {
@@ -1058,6 +1129,8 @@ func (c *cli) compare(args []string) (int, error) {
 	tf.register(fs)
 	cwdFlag := fs.String("cwd", "", "working folder for the agents (default: current)")
 	kind := fs.String("kind", "", "label the runs for harness stats, such as review")
+	check := fs.String("check", "", "a command line each agent's turn must pass in its folder")
+	worktree := fs.Bool("worktree", false, "give each agent a git worktree of its own, so agents that edit files can be compared")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -1095,7 +1168,7 @@ func (c *cli) compare(args []string) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	reps, err := r.Compare(ctx, profiles, prompt, dir, extra, *kind, func(run *harness.Run) {
+	reps, err := r.Compare(ctx, profiles, prompt, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree}, func(run *harness.Run) {
 		fmt.Fprintf(c.stderr, "harness: %s started (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
 	})
 	c.drain(r)
@@ -1106,11 +1179,11 @@ func (c *cli) compare(args []string) (int, error) {
 	if !tf.asJSON {
 		fmt.Fprintln(c.stdout)
 		w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "PROFILE\tMODEL\tOUTCOME\tTIME\tTRIES\tIN\tOUT\tCOST")
+		fmt.Fprintln(w, "PROFILE\tMODEL\tOUTCOME\tCHECK\tTIME\tTRIES\tIN\tOUT\tCOST\tCHANGES")
 		for _, rep := range reps {
 			m := rep.Metrics
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", runProfile(rep), or(rep.Model, "-"), rep.Outcome,
-				rep.Duration.Round(time.Second), rep.Attempts, tokens(m, "input_tokens"), tokens(m, "output_tokens"), money(m, "cost_usd"))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n", runProfile(rep), or(rep.Model, "-"), rep.Outcome, or(rep.Checked, "-"),
+				rep.Duration.Round(time.Second), rep.Attempts, tokens(m, "input_tokens"), tokens(m, "output_tokens"), money(m, "cost_usd"), or(rep.Changes, "-"))
 		}
 		w.Flush()
 	}
@@ -1148,7 +1221,7 @@ func (c *cli) stats(args []string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PROFILE\tMODEL\tKIND\tTURNS\tOK\tP50\tP90\tTRIES\tIN\tOUT\tCOST\tCOST/OK\tFAILED")
+	fmt.Fprintln(w, "PROFILE\tMODEL\tKIND\tTURNS\tOK\tCHECKS\tP50\tP90\tTRIES\tIN\tOUT\tCOST\tCOST/OK\tFAILED")
 	for _, s := range st {
 		ok := s.Outcomes["success"]
 		mean := map[string]float64{}
@@ -1161,13 +1234,17 @@ func (c *cli) stats(args []string) error {
 				failed = append(failed, fmt.Sprintf("%s %d", o, s.Outcomes[o]))
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d%%\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n",
-			s.Profile, or(s.Model, "-"), or(s.Kind, "-"), s.Turns, 100*ok/s.Turns,
+		checks := "-"
+		if s.Checks > 0 {
+			checks = fmt.Sprintf("%d/%d", s.Passed, s.Checks)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d%%\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n",
+			s.Profile, or(s.Model, "-"), or(s.Kind, "-"), s.Turns, 100*ok/s.Turns, checks,
 			s.Median.Round(time.Second), s.P90.Round(time.Second), float64(s.Attempts)/float64(s.Turns),
 			tokens(mean, "input_tokens"), tokens(mean, "output_tokens"), money(mean, "cost_usd"), costPerSuccess(s), dash(failed))
 	}
 	fmt.Fprintln(w, "\nIN, OUT and COST are means per turn, over the turns whose harness reports them;")
-	fmt.Fprintln(w, "COST/OK is shown only when every turn reported its cost.")
+	fmt.Fprintln(w, "COST/OK is shown only when every turn reported its cost; CHECKS are passed/run.")
 	return w.Flush()
 }
 

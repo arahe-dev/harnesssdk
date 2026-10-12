@@ -66,7 +66,7 @@ func TestRunAndSend(t *testing.T) {
 	if err != nil || res.Outcome != Success || res.Output != "answer: hello" || res.Session == "" || res.Turn != 1 {
 		t.Fatalf("run: %+v %v", res, err)
 	}
-	again, err := c.Send(ctx, res.Run, "again", nil)
+	again, err := c.Send(ctx, res.Run, FollowUp{Prompt: "again"})
 	if err != nil || again.Turn != 2 || again.Session != res.Session || again.Output != "answer: again" {
 		t.Fatalf("send: %+v %v", again, err)
 	}
@@ -105,7 +105,7 @@ func TestStartAndWait(t *testing.T) {
 	if err != nil || res.Output != "answer: later" {
 		t.Fatalf("wait: %+v %v", res, err)
 	}
-	if err := c.SendStart(id, "more", nil); err != nil {
+	if err := c.SendStart(id, FollowUp{Prompt: "more"}); err != nil {
 		t.Fatal(err)
 	}
 	res, err = c.Result(id)
