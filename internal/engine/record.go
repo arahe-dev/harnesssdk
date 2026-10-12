@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,17 +18,24 @@ import (
 // harness session and turns. It lives in runs/<id>/ with the prompts,
 // answers and raw output of every turn.
 type Run struct {
-	Format  int          `json:"format"`
-	ID      string       `json:"id"`
-	Profile string       `json:"profile"`
-	Harness string       `json:"harness"`
-	Cwd     string       `json:"cwd"`
-	Parent  string       `json:"parent,omitempty"` // the harness run whose agent started this one
-	Depth   int          `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
-	Kind    string       `json:"kind,omitempty"`   // a label for grouping stats, such as review
-	Session string       `json:"session,omitempty"`
-	Created time.Time    `json:"created"`
-	Turns   []TurnRecord `json:"turns"`
+	Format  int    `json:"format"`
+	ID      string `json:"id"`
+	Profile string `json:"profile"`
+	Harness string `json:"harness"`
+	Cwd     string `json:"cwd"`
+	Parent  string `json:"parent,omitempty"` // the harness run whose agent started this one
+	Depth   int    `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
+	Kind    string `json:"kind,omitempty"`   // a label for grouping stats, such as review
+	// Worktree is the git worktree a run started with --worktree works in,
+	// on its own Branch; Workdir is the agent's folder inside it, the
+	// counterpart of Cwd, whose project and profiles still apply.
+	Worktree string       `json:"worktree,omitempty"`
+	Branch   string       `json:"branch,omitempty"`
+	Base     string       `json:"base,omitempty"` // the commit the branch was made from
+	Workdir  string       `json:"workdir,omitempty"`
+	Session  string       `json:"session,omitempty"`
+	Created  time.Time    `json:"created"`
+	Turns    []TurnRecord `json:"turns"`
 
 	dir string
 }
@@ -49,6 +57,9 @@ type TurnRecord struct {
 	Hint     string    `json:"hint,omitempty"`    // advice for the caller, such as the repeat guard's
 	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
 	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
+	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
+	Check    string    `json:"check,omitempty"`   // the check command it ran
+	Checked  string    `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -82,20 +93,25 @@ type stagedRun struct {
 	home  *Home
 	final string
 	lock  *os.File
+	ctx   context.Context // the creation's, for its waits
 }
 
 // creationLock coordinates creation locks; see above.
-func (h *Home) creationLock() (unlock func(), err error) {
-	return lockFileWait(filepath.Join(h.Dir, "create.lock"), 10*time.Second)
+func (h *Home) creationLock(ctx context.Context) (unlock func(), err error) {
+	f, err := lockWaitCtx(ctx, filepath.Join(h.Dir, "create.lock"), 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return func() { f.Close() }, nil
 }
 
 // stageRun prepares a new run, with its record, under a staging name.
-func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error) {
+func (h *Home) stageRun(ctx context.Context, profile, harness, cwd, parent string) (*stagedRun, error) {
 	runs := filepath.Join(h.Dir, "runs")
 	for range 8 {
 		id := runID()
 		stage := filepath.Join(runs, stagePrefix+id)
-		unlock, err := h.creationLock()
+		unlock, err := h.creationLock(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -121,8 +137,8 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 			}
 			return nil, err
 		}
-		s := &stagedRun{Run: &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
-			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock}
+		s := &stagedRun{Run: &Run{Format: runFormat, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
+			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock, ctx: ctx}
 		if err := createStage("record"); err != nil {
 			s.abort()
 			return nil, err
@@ -138,25 +154,32 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 
 // publish renames the prepared run into runs/. It cannot replace a run:
 // a published run is never empty, and a rename replaces only an empty
-// folder on Unix and none on Windows. On failure the run is removed.
+// folder on Unix and none on Windows. On failure the run is removed. The
+// creation lock stays held until release.
 func (s *stagedRun) publish() error {
 	if err := os.Rename(s.dir, s.final); err != nil {
 		s.abort()
 		return err
 	}
 	s.dir = s.final
-	s.release()
 	return nil
 }
 
-// abort removes the prepared run.
+// abort removes the prepared run, with the worktree and branch made for it.
 func (s *stagedRun) abort() {
+	if err := removeWorktree(context.Background(), s.Run, true); err != nil {
+		s.release() // the staged run stays, the record of what to undo, for gc
+		return
+	}
 	os.RemoveAll(s.dir)
 	s.release()
 }
 
+// release lets go of the creation lock. Its file is removed under the
+// coordinating lock, unless the creation was cancelled waiting for it: the
+// file then stays, for gc to remove.
 func (s *stagedRun) release() {
-	unlock, err := s.home.creationLock()
+	unlock, err := s.home.creationLock(s.ctx)
 	s.lock.Close()
 	if err != nil {
 		return // the lock file stays; gc removes it once it can
@@ -167,11 +190,15 @@ func (s *stagedRun) release() {
 
 // NewRun creates a run with no turn yet.
 func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
-	s, err := h.stageRun(profile, harness, cwd, parent)
+	s, err := h.stageRun(context.Background(), profile, harness, cwd, parent)
 	if err != nil {
 		return nil, err
 	}
-	return s.Run, s.publish()
+	if err := s.publish(); err != nil {
+		return nil, err
+	}
+	s.release()
+	return s.Run, nil
 }
 
 // idSlack bounds how far a run id's time can be from when the run was
@@ -203,7 +230,7 @@ func (h *Home) LoadRun(id string) (*Run, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("run %s: %w", id, err)
 	}
-	if err := checkFormat("run "+id, r.Format); err != nil {
+	if err := checkFormatUpTo("run "+id, r.Format, runFormat); err != nil {
 		return nil, err
 	}
 	r.dir = dir
@@ -271,11 +298,27 @@ func executingAt(dir string) bool {
 
 // Save writes run.json.
 func (r *Run) Save() error {
+	// A v1 record counts its turns' costs itself, and a v2 one does not:
+	// before it is saved as v2, they move to the spending ledger.
+	if r.Format != 0 && r.Format < runFormat {
+		if err := moveV1Spend(filepath.Dir(filepath.Dir(r.dir)), r); err != nil {
+			return fmt.Errorf("run %s: moving its turns' costs to the spending ledger: %w", r.ID, err)
+		}
+	}
+	r.Format = runFormat // a record this harness saves may hold what v1 would misread
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(r.Path("run.json"), append(data, '\n'))
+}
+
+// AgentDir is the folder the run's agent works in.
+func (r *Run) AgentDir() string {
+	if r.Workdir != "" {
+		return r.Workdir
+	}
+	return r.Cwd
 }
 
 // Path names a file in the run directory.

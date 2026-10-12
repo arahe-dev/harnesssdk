@@ -22,6 +22,9 @@ type procSpec struct {
 	Inherit []*os.File
 	// OnStart, if set, is called with the root process id once it runs.
 	OnStart func(pid int)
+	// CmdLine, on Windows, is the exact command line to run Argv[0] with,
+	// for a program such as cmd.exe that parses its own; ignored elsewhere.
+	CmdLine string
 }
 
 // runProcess runs the CLI to completion and returns its exit status. A
@@ -37,6 +40,9 @@ func runProcess(ctx context.Context, s procSpec) (exitCode int, warnings []strin
 	cmd, t, err := newProcess(path, s.Argv[1:], s.Inherit)
 	if err != nil {
 		return -1, nil, err
+	}
+	if s.CmdLine != "" {
+		setCmdLine(cmd, s.CmdLine)
 	}
 	cmd.Dir = s.Dir
 	cmd.Env = append(os.Environ(), s.Env...)

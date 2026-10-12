@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,6 +35,14 @@ type Turn struct {
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
+	retryAfter  time.Duration      // what the last failed attempt's CLI asked to wait
+	spendSaved  float64            // the cost_usd written to the spending ledger so far
+	entry       *spendEntry        // the attempt's ledger entry, while its cost is not in it
+	opened      int                // ledger entries made for the turn
+	held        *Ticket            // admission kept until finish records the cost
+	changes     string             // the worktree branch's changes after the turn
+	check       string             // the check command run, if any
+	checked     string             // passed or failed
 	hint        string             // the repeat guard's advice, once noted
 	noted       bool               // the outcome was counted while the turn was admitted
 	argv        []string
@@ -63,6 +72,11 @@ type Report struct {
 	// Hint is advice for the caller, such as to stop repeating a request
 	// that keeps failing.
 	Hint string
+	// Check is the check command the turn ran, and Checked whether it
+	// passed or failed.
+	Check, Checked string
+	// Changes summarizes a worktree run's branch after the turn.
+	Changes string
 }
 
 // Environment harness sets for every CLI it starts, so a harness command
@@ -205,17 +219,77 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	}
 }
 
+// policyFor is the Herta policy of one attempt. Herta makes a single
+// attempt per call; the retries, with backoff and throttled outcomes that
+// Herta 1.0-next cannot express yet, are harness's own (execute).
 func policyFor(p *Profile) hertasdk.Policy[*Turn] {
-	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: p.Retry}
+	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
+}
+
+// retryable reports whether a failed attempt may be repeated: its outcome
+// is in the profile's retry list and safe for its effect. Transient means
+// the attempt took no effect. Uncertain and throttled may have done part
+// of the work (a rate limit can stop an agent half way through its
+// changes), so a non-idempotent profile never repeats them.
+func retryable(p *Profile, err error) bool {
+	o := hertasdk.OutcomeOf(err)
+	if err == nil || !p.Retry.On[o] {
+		return false
+	}
+	switch o {
+	case hertasdk.Transient:
+		return true
+	case hertasdk.Uncertain, hertasdk.Throttled:
+		return p.Effect != hertasdk.NonIdempotent
+	}
+	return false
+}
+
+const (
+	defaultBackoff = 2 * time.Second
+	maxBackoff     = 5 * time.Minute
+	maxRetryAfter  = time.Hour
+)
+
+// backoffDelay is the wait before retry number k (1 for the second
+// attempt): the profile's backoff doubled k-1 times, capped at maxBackoff,
+// half of it random so that turns failing together do not retry together;
+// and at least what the provider asked for (retryAfter), up to an hour.
+func backoffDelay(base time.Duration, k int, retryAfter time.Duration) time.Duration {
+	if base <= 0 {
+		base = defaultBackoff
+	}
+	d := base
+	for i := 1; i < k && d < maxBackoff; i++ {
+		d *= 2
+	}
+	d = min(d, maxBackoff)
+	d = d/2 + time.Duration(rand.Int64N(int64(d/2)+1))
+	return max(d, min(retryAfter, maxRetryAfter))
 }
 
 // checkPolicy validates a profile's contract: Herta checks its effect and
 // retry table (an unsafe retry fails here, not under load), and every budget
 // it claims must exist, once, and fit.
 func checkPolicy(p *Profile, budgets map[string]int64) error {
+	// Herta validates the effect and the retry table it knows; throttled,
+	// which it cannot retry yet, is checked here by the same rule as
+	// uncertain.
+	herta := hertasdk.RetryPolicy{MaxAttempts: p.Retry.MaxAttempts, On: map[hertasdk.Outcome]bool{}}
+	for o, on := range p.Retry.On {
+		if o != hertasdk.Throttled {
+			herta.On[o] = on
+		}
+	}
 	noop := func(context.Context, *Turn) (*Result, error) { return nil, nil }
-	if _, err := hertasdk.NewOperation(newRuntime(), p.Name, noop, policyFor(p)); err != nil {
+	policy := policyFor(p)
+	policy.Retry = herta
+	if _, err := hertasdk.NewOperation(newRuntime(), p.Name, noop, policy); err != nil {
 		return fmt.Errorf("profile %s: %w", p.Name, err)
+	}
+	if p.Retry.On[hertasdk.Throttled] && p.Effect == hertasdk.NonIdempotent {
+		return fmt.Errorf("profile %s: %w: a non-idempotent profile cannot retry throttled turns (a rate limit can stop an agent part way through its changes); continue the session with harness send instead",
+			p.Name, hertasdk.ErrUnsafeRetry)
 	}
 	seen := map[string]bool{}
 	for _, req := range p.Budget {
@@ -268,8 +342,9 @@ func (t *Turn) vars() Vars {
 	if t.Profile.System != "" {
 		v["system_file"] = t.Run.Path("system.md")
 	}
-	v["cwd"], v["run_id"], v["run_dir"] = t.Run.Cwd, t.Run.ID, t.Run.dir
+	v["cwd"], v["run_id"], v["run_dir"] = t.Run.AgentDir(), t.Run.ID, t.Run.dir
 	v["harness_home"] = t.home
+	v["report_file"] = t.Run.Path(fmt.Sprintf("turn-%d.report.%d.json", t.N, t.attempts)) // one per attempt: never a stale one
 	v["lineage"] = strings.Join(t.lineage, ",")
 	return v
 }
@@ -341,7 +416,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	}
 
 	code, warnings, runErr := runProcess(ctx, procSpec{
-		Argv: argv, Dir: t.Run.Cwd, Env: env,
+		Argv: argv, Dir: t.Run.AgentDir(), Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
 		OnStart: func(pid int) {
 			// Record this attempt's agent, so a nested run can find this
@@ -364,6 +439,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	// Every attempt's metrics count, a failed or stopped one's too: its
 	// tokens were spent.
 	x, xerr := extractFile(t.Def, stdoutPath)
+	t.Def.readReport(v["report_file"], &x)
 	for k, n := range x.Metrics {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
@@ -393,7 +469,19 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		cause = fmt.Errorf("%s reported an error: %s", t.Def.Name, firstLine(answer))
 	}
 	evidence := t.stderrTail + "\n" + readTail(stdoutPath, 0, 8<<10)
+	t.retryAfter = t.Def.retryAfterIn(evidence)
 	return nil, hertasdk.Fail(t.Def.classify(evidence), cause)
+}
+
+// logf appends a line to the turn's stderr log, where its attempts are
+// traced.
+func (t *Turn) logf(format string, a ...any) {
+	f, err := os.OpenFile(t.Run.Path(fmt.Sprintf("turn-%d.stderr.log", t.N)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, format+"\n", a...)
 }
 
 func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
@@ -408,10 +496,22 @@ func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
 	return p, d, nil
 }
 
+// TurnOptions are the settings of new turns beyond their prompt.
+type TurnOptions struct {
+	Extra Vars   // placeholder values for these turns (--set)
+	Kind  string // a label for stats (new runs)
+	// Check is a command line the turn must pass, instead of the
+	// profile's check.
+	Check string
+	// Worktree runs each new run in a git worktree of its own.
+	Worktree bool
+}
+
 // request is what a queued turn needs besides its prompt.
 type request struct {
 	Resume bool   `json:"resume"`
 	Extra  Vars   `json:"extra,omitempty"`
+	Check  string `json:"check,omitempty"`  // overrides the profile's check
 	Repeat string `json:"repeat,omitempty"` // the request's fingerprint when queued
 	// Caller is "run:<parent>" or "send:<run>": with the profile and
 	// definition loaded when the turn executes, it gives the fingerprint
@@ -436,13 +536,18 @@ func queue(run *Run, prompt string, req request) (int, error) {
 
 // Prepare records one new run per task, each with its first turn queued,
 // after checking that the profile and its harness load from cwd.
-func (r *Runner) Prepare(profile string, tasks []string, cwd string, extra Vars, kind string) ([]*Run, error) {
-	nr, err := r.check(profile, tasks, cwd, extra, kind)
+func (r *Runner) Prepare(profile string, tasks []string, cwd string, o TurnOptions) ([]*Run, error) {
+	nr, err := r.check(profile, tasks, cwd, o)
 	if err != nil {
 		return nil, err
 	}
-	r.home.AutoGC()
-	return r.create(nr)
+	r.home.AutoGC(r.closingCtx)
+	tx := randHex(8)
+	staged, err := r.create(r.closingCtx, nr, tx)
+	if err != nil {
+		return nil, err
+	}
+	return r.home.commitRuns(staged, tx)
 }
 
 // newRuns are runs that passed every check and are about to be created.
@@ -452,15 +557,15 @@ type newRuns struct {
 	tasks  []string
 	fps    []string
 	cwd    string
-	extra  Vars
-	kind   string
+	o      TurnOptions
 	depth  int
 	parent string
 }
 
 // check loads the profile, validates its policy, and applies max_depth
 // and the repeat guard: everything that can refuse a run before it exists.
-func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, kind string) (*newRuns, error) {
+func (r *Runner) check(profile string, tasks []string, cwd string, o TurnOptions) (*newRuns, error) {
+	kind := o.Kind
 	p, d, err := r.load(profile, cwd)
 	if err != nil {
 		return nil, err
@@ -479,9 +584,12 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	if err != nil {
 		return nil, err
 	}
-	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, extra: extra, kind: kind, depth: depth, parent: r.kin().Parent}
+	if err := r.home.checkSpend(p); err != nil {
+		return nil, fmt.Errorf("profile %s: %w", p.Name, err)
+	}
+	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, o: o, depth: depth, parent: r.kin().Parent}
 	for _, task := range tasks {
-		fp := requestFingerprint("run", nr.parent, p, d, cwd, task, extra)
+		fp := requestFingerprint("run", nr.parent, p, d, cwd, task, o)
 		if err := r.home.checkRepeat(fp); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", p.Name, err)
 		}
@@ -491,7 +599,7 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 }
 
 // testHookCreate, when set, runs at each stage of creating a run
-// ("record", "queue", "save"); an error fails that stage.
+// ("record", "mark", "queue", "save"); an error fails that stage.
 var testHookCreate func(stage string) error
 
 func createStage(stage string) error {
@@ -501,26 +609,36 @@ func createStage(stage string) error {
 	return nil
 }
 
-// create records the runs, all of them or none: a failure removes the
-// runs already created.
-func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
+// create records the runs of creation tx, all of them or none: a failure
+// rolls back the runs already created. Each run is published marked with
+// tx (creatingFile), its creation lock still held, and can execute only
+// once commitRuns has committed tx (see creation.go).
+func (r *Runner) create(ctx context.Context, nr *newRuns, tx string) (staged []*stagedRun, err error) {
 	defer func() {
 		if err != nil {
-			removeRuns(runs)
-			runs = nil
+			rollback(staged)
+			staged = nil
 		}
 	}()
 	for i, task := range nr.tasks {
 		var s *stagedRun
-		if s, err = r.home.stageRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
-			return runs, err
+		if s, err = r.home.stageRun(ctx, nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
+			return staged, err
 		}
 		// The first turn is queued before the run is published, so a run
 		// never appears without it.
-		s.Depth, s.Kind = nr.depth, nr.kind
-		err = createStage("queue")
+		s.Depth, s.Kind = nr.depth, nr.o.Kind
+		if err = createStage("mark"); err == nil {
+			err = os.WriteFile(s.Path(creatingFile), []byte(tx+"\n"), 0o600)
+		}
+		if err == nil && (nr.o.Worktree || nr.p.Worktree) {
+			err = r.home.addWorktree(ctx, s.Run)
+		}
 		if err == nil {
-			_, err = queue(s.Run, task, request{Extra: nr.extra, Repeat: nr.fps[i], Caller: "run:" + nr.parent})
+			err = createStage("queue")
+		}
+		if err == nil {
+			_, err = queue(s.Run, task, request{Extra: nr.o.Extra, Check: nr.o.Check, Repeat: nr.fps[i], Caller: "run:" + nr.parent})
 		}
 		if err == nil {
 			err = createStage("save")
@@ -530,25 +648,59 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 		}
 		if err != nil {
 			s.abort()
-			return runs, err
+			return staged, err
 		}
 		if err = s.publish(); err != nil {
-			return runs, err
+			return staged, err
 		}
+		staged = append(staged, s)
+	}
+	return staged, nil
+}
+
+// commitRuns commits creation tx, making its runs executable, then
+// releases their creation locks. If the commit cannot be recorded, every
+// run is rolled back. After it, the marks and the commit file are removed
+// as clutter, if they can be.
+func (h *Home) commitRuns(staged []*stagedRun, tx string) ([]*Run, error) {
+	err := createStage("commit")
+	if err == nil {
+		err = h.commit(tx)
+	}
+	if err != nil {
+		rollback(staged)
+		return nil, err
+	}
+	var runs []*Run
+	clean := true
+	for _, s := range staged {
+		if os.Remove(s.Path(creatingFile)) != nil {
+			clean = false
+		}
+		s.release()
 		runs = append(runs, s.Run)
+	}
+	if clean {
+		os.Remove(h.commitPath(tx))
 	}
 	return runs, nil
 }
 
-func removeRuns(runs []*Run) {
-	for _, run := range runs {
-		os.RemoveAll(run.Dir())
+// rollback undoes published runs that were never committed, with their
+// worktrees and branches. A run whose rollback cannot finish now keeps its
+// mark, and gc finishes it once the creation lock is released.
+func rollback(staged []*stagedRun) {
+	for _, s := range staged {
+		if removeWorktree(context.Background(), s.Run, true) == nil {
+			os.RemoveAll(s.Dir())
+		}
+		s.release()
 	}
 }
 
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
-func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
+func (r *Runner) PrepareSend(id, prompt string, o TurnOptions) (int, error) {
 	// A lost last turn is recorded as ended on its own first, so its end
 	// is kept (and counted once) even if this follow-up is refused below.
 	reaped := 0
@@ -572,8 +724,12 @@ func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 		if err != nil {
 			return err
 		}
-		fp := requestFingerprint("send", id, p, d, run.Cwd, prompt, extra)
+		o.Worktree = run.Worktree != ""
+		fp := requestFingerprint("send", id, p, d, run.Cwd, prompt, o)
 		if err := r.home.checkRepeat(fp); err != nil {
+			return err
+		}
+		if err := r.home.checkSpend(p); err != nil {
 			return err
 		}
 		if p.Harness != run.Harness {
@@ -586,7 +742,7 @@ func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp, Caller: "send:" + id})
+		n, err = queue(run, prompt, request{Resume: true, Extra: o.Extra, Check: o.Check, Repeat: fp, Caller: "send:" + id})
 		return err
 	})
 	return n, err
@@ -687,6 +843,11 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(fmt.Errorf("run %s: another process is executing it: %w", id, err))
 	}
 	defer execLock.Close()
+	if creating, err := r.home.creating(run.Dir()); err != nil {
+		return fail(fmt.Errorf("run %s: cannot tell whether its creation finished: %w", id, err))
+	} else if creating {
+		return fail(fmt.Errorf("run %s is being created, or its creation failed", id))
+	}
 	start := time.Now()
 	run, err = r.home.updateRun(id, func(run *Run) error {
 		if n != len(run.Turns) || run.Turns[n-1].Outcome != "queued" {
@@ -710,14 +871,66 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	}
 	defer r.home.clearActive(run.ID)
 
-	res, t, err := r.execute(ctx, run, n, execLock)
+	stops := &stopWatch{path: run.Path(fmt.Sprintf("stop-%d", n))}
+	res, t, err := r.execute(ctx, run, n, execLock, stops)
+	if testHookTurnEnd != nil {
+		testHookTurnEnd()
+	}
+	if t != nil && t.held != nil {
+		// Let go of once what the turn cost is in the ledger, or the turn
+		// is stopped first: its execution lock goes before its admission,
+		// so that the next turn admitted finds the turn over, and its cost
+		// unknown.
+		defer func() {
+			execLock.Close()
+			t.held.Release()
+		}()
+	}
+	// The end of the turn (the worktree commit, and saving a record that
+	// failed) stops with the caller, a shutdown, or a stop request that
+	// the turn has not acted on yet: one that stopped the agent does not
+	// stop the commit of what it did.
+	fctx, fcancel := r.bound(ctx)
+	defer stops.end(fcancel)
+	go stops.watch(fctx, fcancel)
+	if run.Worktree != "" && t != nil {
+		// The branch keeps the turn's work, whatever its outcome. Work the
+		// commit leaves stays in the worktree, which the next turn's
+		// commit, or gc, commits.
+		if testHookFinalize != nil {
+			testHookFinalize(fctx)
+		}
+		changes, cerr := commitTurn(fctx, run, n)
+		if cerr != nil {
+			t.logf("== harness warning: committing the worktree: %v", cerr)
+			changes = fmt.Sprintf("NOT committed (%v); the work is in %s", cerr, run.Worktree)
+		}
+		t.changes = changes
+	}
 	if t != nil && t.repeat != "" {
 		rep.Hint = t.hint
 		if !t.noted && !errors.Is(err, ErrRepeated) { // a refusal is not another failure
 			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err), now())
 		}
 	}
-	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
+	// A turn whose cost could not be written to the spending ledger stays
+	// admitted, writing it again, until it is written or the turn is
+	// stopped: no turn is admitted against a total that leaves it out.
+	for wait := time.Second; t != nil && t.held != nil && t.entry != nil && fctx.Err() == nil; wait = min(2*wait, 30*time.Second) {
+		t.logf("== harness warning: what the turn cost is not in the spending ledger; it stays admitted and tries again in %s", wait)
+		select {
+		case <-fctx.Done():
+		case <-time.After(wait):
+			if cerr := r.home.closeSpend(t); cerr != nil {
+				t.logf("== harness warning: writing the spending ledger: %v", cerr)
+			}
+		}
+	}
+	if t != nil && t.held != nil && t.entry != nil && err == nil {
+		err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf(
+			"what the turn cost could not be written to the spending ledger, so it is unknown: turns under a spending limit are refused until it is 24 hours old, or until you remove %s", r.home.spendPath(t.entry)))
+	}
+	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
 	if run != nil {
 		rep.Run = run
 	}
@@ -729,8 +942,9 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	if t != nil {
 		rep.Attempts, rep.StderrTail = t.attempts, t.stderrTail
 		rep.Model, rep.Metrics = t.vars()["model"], finiteMetrics(t.metrics)
+		rep.Check, rep.Checked, rep.Changes = t.check, t.checked, t.changes
 	}
-	if res != nil && err == nil {
+	if res != nil { // a turn whose check failed still has the agent's answer
 		rep.Output = res.Output
 	}
 	return rep
@@ -739,10 +953,10 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 // execute loads the turn's profile and request, passes the gate, and runs
 // the Herta operation. A stop file for the turn cancels it; Shutdown
 // withdraws it while it waits at the gate.
-func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (res *Result, t *Turn, err error) {
+func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File, stops *stopWatch) (res *Result, t *Turn, err error) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go watchStop(ctx, run.Path(fmt.Sprintf("stop-%d", n)), cancel)
+	defer stops.end(cancel)
+	go stops.watch(ctx, cancel)
 
 	var req request
 	data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", n)))
@@ -772,7 +986,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// The repeat guard follows what runs: the profile and definition as
 	// loaded now, which may have been edited since the turn was queued.
 	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
-		t.repeat = requestFingerprint(kind, caller, p, d, run.Cwd, t.Prompt, req.Extra)
+		t.repeat = requestFingerprint(kind, caller, p, d, run.Cwd, t.Prompt, TurnOptions{Extra: req.Extra, Check: req.Check, Worktree: run.Worktree != ""})
 	}
 
 	// Validate the policy before waiting anywhere: a project file reaches
@@ -804,35 +1018,132 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		nested := len(r.kin().Lineage) > 0
 		claims = append(claims, Claim{Name: runningGate, Units: 1, Capacity: int64(cfg.MaxRunning), NoWait: nested})
 	}
+	for i := range claims {
+		claims[i].MaxQueue = cfg.MaxQueue
+	}
+	maxWait := p.MaxWait
+	if maxWait == 0 {
+		maxWait = time.Duration(cfg.MaxWaitMinutes) * time.Minute
+	}
+	check := req.Check
+	if check == "" {
+		check = p.Check
+	}
+	// Each attempt is admitted on its own: between attempts, while it
+	// backs off, a turn holds no budget, key or slot.
+	for {
+		var ticket *Ticket
+		unrecorded := false
+		if ticket, err = r.admit(ctx, t, claims, maxWait); err != nil {
+			return nil, t, err
+		}
+		if err = r.home.checkRepeat(t.repeat); err == nil {
+			err = r.home.checkSpend(p)
+		}
+		executed := err == nil // a refusal of harness's own is final, never retried
+		if executed {
+			// The attempt's ledger entry is made before it runs: a turn
+			// under a spending limit whose spending cannot be recorded
+			// does not run.
+			if oerr := r.home.openSpend(t); oerr != nil {
+				if limited(cfg, p) {
+					err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("the spending ledger cannot be written, so a turn under a spending limit does not run: %w", oerr))
+					executed = false
+				} else {
+					t.logf("== harness warning: writing the spending ledger: %v", oerr)
+				}
+			}
+		}
+		if executed {
+			// On Unix the agent inherits these locks: while any process of
+			// its tree runs, the turn counts as executing and its budget
+			// stays held, even if this process dies.
+			t.inherit = []*os.File{execLock}
+			if ticket.Live != nil {
+				t.inherit = append(t.inherit, ticket.Live)
+			}
+			res, err = op.Do(ctx, t)
+			if err == nil && check != "" {
+				err = r.runCheck(ctx, t, check, p.CheckTimeout)
+			}
+			// Written before the admission is released, so the next turn
+			// admitted, and this one's retries, count this attempt. A turn
+			// under a limit whose cost cannot be written is not retried,
+			// and stays admitted (here and in Execute).
+			if cerr := r.home.closeSpend(t); cerr != nil {
+				t.logf("== harness warning: writing what the attempt cost to the spending ledger: %v", cerr)
+				if limited(cfg, p) {
+					unrecorded, executed = true, false
+				} else {
+					// Its entry stays, with its cost unknown: under no limit
+					// now, that matters only if one is set while it is in
+					// the window. A next attempt's entry takes the cost too.
+					t.entry = nil
+				}
+			}
+			if serr := r.saveMetrics(run.ID, n, t); serr != nil {
+				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
+			}
+		}
+		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
+		if !again {
+			// Counted while the turn still holds its budget, before a
+			// waiting turn of the same request is admitted and checks it.
+			if !errors.Is(err, ErrRepeated) {
+				t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
+			}
+			if unrecorded {
+				// What the attempt cost is not in the ledger: the turn
+				// stays admitted until it is (see Execute).
+				t.held = ticket
+			} else {
+				ticket.Release()
+			}
+			return res, t, err
+		}
+		ticket.Release()
+		delay := backoffDelay(p.Backoff, t.attempts, t.retryAfter)
+		t.logf("== %s; retrying in %s (attempt %d of %d)", OutcomeName(err), delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts)
+		select {
+		case <-ctx.Done():
+			return nil, t, ctx.Err()
+		case <-r.closingCtx.Done():
+			return nil, t, hertasdk.ErrRuntimeStopping
+		case <-time.After(delay):
+		}
+	}
+}
+
+// admit passes the gate for one attempt and records the turn's lineage.
+// A turn waits for its claims at most maxWait, if set.
+func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait time.Duration) (*Ticket, error) {
+	p, run, n := t.Profile, t.Run, t.N
 	gctx, gcancel := context.WithCancel(ctx)
+	defer gcancel()
+	if maxWait > 0 {
+		var cancel context.CancelFunc
+		gctx, cancel = context.WithTimeout(gctx, maxWait)
+		defer cancel()
+	}
 	stopWatch := context.AfterFunc(r.closingCtx, gcancel)
 	ticket, err := r.home.Gate(r.kin().Lineage).Acquire(gctx, claims, p.Admission == hertasdk.Reject, run.ID)
 	stopWatch()
-	gcancel()
 	switch {
 	case errors.Is(err, errNoWait):
-		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"all %d turns max_running allows are running, and a nested run does not wait for one; raise it with: harness config set max_running <n>", cfg.MaxRunning))
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"%w; a nested run does not wait for a running slot (its ancestors hold slots while they wait for it); raise it with: harness config set max_running <n>", err))
+	case errors.Is(err, errQueueFull):
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: %w; raise it with: harness config set max_queue <n>", p.Name, err))
 	case errors.Is(err, errBusy):
-		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: its budget or key is in use and admission is reject", p.Name))
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: its budget or key is in use and admission is reject", p.Name))
 	case errors.Is(err, ErrWouldDeadlock):
-		return nil, t, hertasdk.Fail(hertasdk.Permanent, err)
+		return nil, hertasdk.Fail(hertasdk.Permanent, err)
 	case err != nil && r.closingCtx.Err() != nil && ctx.Err() == nil:
-		return nil, t, hertasdk.ErrRuntimeStopping
+		return nil, hertasdk.ErrRuntimeStopping
+	case err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s waited max_wait (%s) for its budgets, keys or a running slot", p.Name, maxWait))
 	case err != nil:
-		return nil, t, err
-	}
-	defer ticket.Release()
-	// Deferred after the release, so it runs first: the outcome is counted
-	// while the turn still holds its budget, before a waiting turn of the
-	// same request is admitted and checks it.
-	defer func() {
-		if !errors.Is(err, ErrRepeated) {
-			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
-		}
-	}()
-	if err := r.home.checkRepeat(t.repeat); err != nil {
-		return nil, t, err
+		return nil, err
 	}
 	t.lineage = slices.Clone(r.kin().Lineage)
 	if ticket.ID != "" {
@@ -844,20 +1155,34 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		run.Turns[n-1].Lineage, run.Turns[n-1].Repeat = t.lineage, t.repeat
 		return nil
 	}); err != nil {
-		return nil, t, err
+		ticket.Release()
+		return nil, err
 	}
-	// On Unix the agent inherits these locks: while any process of its tree
-	// runs, the turn counts as executing and its budget stays held, even if
-	// this process dies.
-	t.inherit = []*os.File{execLock}
-	if ticket.Live != nil {
-		t.inherit = append(t.inherit, ticket.Live)
-	}
-	res, err = op.Do(ctx, t)
-	return res, t, err
+	return ticket, nil
 }
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
+
+// Test hooks, when set: testHookTurnEnd runs when execute returns, and
+// testHookFinalize before a worktree turn's commit.
+var (
+	testHookFinalize func(ctx context.Context)
+	testHookTurnEnd  func()
+)
+
+// saveMetrics records the turn's metrics so far in its run record, for
+// those who look at the turn while it runs.
+func (r *Runner) saveMetrics(id string, n int, t *Turn) error {
+	if len(t.metrics) == 0 {
+		return nil
+	}
+	_, err := r.home.updateRun(id, func(run *Run) error {
+		rec := &run.Turns[n-1]
+		rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
+		return nil
+	})
+	return err
+}
 
 // claimsFor are the gate claims of a turn: its budgets, at their current
 // capacities (checkPolicy has verified them), and its serialize key.
@@ -902,6 +1227,7 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 		if t != nil {
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
 			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
+			rec.Check, rec.Checked, rec.Changes = t.check, t.checked, t.changes
 		}
 		return nil // always save: the record must leave "running"
 	})
@@ -911,12 +1237,22 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 	return run, saveErr
 }
 
-// watchStop cancels when a stop file appears.
-func watchStop(ctx context.Context, path string, cancel context.CancelFunc) {
+// stopWatch watches a turn's stop file. Each stop request (the file
+// appearing, or written again) is acted on once, by whichever watch sees
+// it first: it cancels what runs then.
+type stopWatch struct {
+	path    string
+	mu      sync.Mutex
+	handled string // the stamp of the last request acted on
+	hook    func() // for tests: runs in take, after its context check
+}
+
+// watch cancels when a request not acted on yet appears, until ctx ends.
+func (w *stopWatch) watch(ctx context.Context, cancel context.CancelFunc) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if _, err := os.Stat(path); err == nil {
+		if w.take(ctx) {
 			cancel()
 			return
 		}
@@ -928,21 +1264,67 @@ func watchStop(ctx context.Context, path string, cancel context.CancelFunc) {
 	}
 }
 
+// take reports a request not acted on yet, and marks it acted on, unless
+// ctx has ended: a watch that ended acts on nothing.
+func (w *stopWatch) take(ctx context.Context) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	if w.hook != nil {
+		w.hook()
+	}
+	s := fileStamp(w.path)
+	if s == "" || s == w.handled {
+		return false
+	}
+	w.handled = s
+	return true
+}
+
+// end cancels a watch's context, between takes: a request taken before
+// is the watch's, and any after it is left for the next watch.
+func (w *stopWatch) end(cancel context.CancelFunc) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cancel()
+}
+
 // Start runs each task as a new run of the profile, in this process. Tasks
 // run concurrently, admitted against the profile's budgets. started, if
 // set, is called with each run before any of them executes.
-func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd string, extra Vars, kind string, started func(*Run)) ([]Report, error) {
-	runs, err := r.Prepare(profile, tasks, cwd, extra, kind)
+func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd string, o TurnOptions, started func(*Run)) ([]Report, error) {
+	nr, err := r.check(profile, tasks, cwd, o)
+	if err != nil {
+		return nil, err
+	}
+	cctx, cancel := r.bound(ctx)
+	r.home.AutoGC(cctx)
+	tx := randHex(8)
+	staged, err := r.create(cctx, nr, tx)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	runs, err := r.home.commitRuns(staged, tx)
 	if err != nil {
 		return nil, err
 	}
 	return r.executeAll(ctx, runs, started), nil
 }
 
+// bound is ctx, also cancelled when the runner shuts down.
+func (r *Runner) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.closingCtx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
 // Compare runs one task on each of several profiles side by side, so their
 // answers, outcomes and metrics can be compared. Every profile is checked
 // before any run is created.
-func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd string, extra Vars, kind string, started func(*Run)) ([]Report, error) {
+func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd string, o TurnOptions, started func(*Run)) ([]Report, error) {
 	if len(profiles) < 2 {
 		return nil, errors.New("compare needs at least two profiles")
 	}
@@ -951,21 +1333,28 @@ func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd strin
 		if slices.Contains(profiles[:i], name) {
 			return nil, fmt.Errorf("profile %s is listed twice", name)
 		}
-		nr, err := r.check(name, []string{task}, cwd, extra, kind)
+		nr, err := r.check(name, []string{task}, cwd, o)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, nr)
 	}
-	r.home.AutoGC()
-	var runs []*Run
+	cctx, cancel := r.bound(ctx)
+	defer cancel()
+	r.home.AutoGC(cctx)
+	tx := randHex(8)
+	var staged []*stagedRun
 	for _, nr := range all {
-		rs, err := r.create(nr)
+		ss, err := r.create(cctx, nr, tx)
 		if err != nil {
-			removeRuns(runs) // all or nothing
+			rollback(staged) // all or nothing
 			return nil, err
 		}
-		runs = append(runs, rs...)
+		staged = append(staged, ss...)
+	}
+	runs, err := r.home.commitRuns(staged, tx)
+	if err != nil {
+		return nil, err
 	}
 	return r.executeAll(ctx, runs, started), nil
 }
@@ -988,8 +1377,8 @@ func (r *Runner) executeAll(ctx context.Context, runs []*Run, started func(*Run)
 
 // Send continues a run with one more turn in the same harness session, in
 // this process.
-func (r *Runner) Send(ctx context.Context, id, prompt string, extra Vars) (Report, error) {
-	n, err := r.PrepareSend(id, prompt, extra)
+func (r *Runner) Send(ctx context.Context, id, prompt string, o TurnOptions) (Report, error) {
+	n, err := r.PrepareSend(id, prompt, o)
 	if err != nil {
 		return Report{}, err
 	}
@@ -1007,7 +1396,9 @@ func (r *Runner) Stop(id string) (int, error) {
 	if n == 0 || run.Turns[n-1].finished() {
 		return n, fmt.Errorf("run %s has no unfinished turn", id)
 	}
-	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), nil, 0o600)
+	// Written with content, so a stop asked for again (during the turn's
+	// final commit) changes the file even where an empty rewrite would not.
+	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
 // Wait blocks until the run's last turn finishes or ctx ends, and reports
@@ -1084,7 +1475,8 @@ func fileStamp(path string) string {
 // reportOf builds a report from a run's record of turn n.
 func reportOf(run *Run, n int) Report {
 	rec := run.Turns[n-1]
-	rep := Report{Run: run, Turn: n, Outcome: rec.Outcome, Attempts: rec.Attempts, Model: rec.Model, Metrics: rec.Metrics, Hint: rec.Hint}
+	rep := Report{Run: run, Turn: n, Outcome: rec.Outcome, Attempts: rec.Attempts, Model: rec.Model, Metrics: rec.Metrics, Hint: rec.Hint,
+		Check: rec.Check, Checked: rec.Checked, Changes: rec.Changes}
 	if rec.Error != "" {
 		rep.Err = errors.New(rec.Error)
 	}

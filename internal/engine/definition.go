@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/arahe-dev/hertasdk"
 )
@@ -46,6 +48,14 @@ type Definition struct {
 	// Failures classify a failed run by matching its stderr and stdout.
 	// The first match wins; anything unmatched is permanent.
 	Failures []FailureRule `json:"failures,omitempty"`
+	// RetryAfter is a regex over a failed attempt's stderr and stdout whose
+	// one group is how long the provider asked to wait: seconds ("30") or
+	// a duration ("1m30s"). A retry waits at least that long.
+	RetryAfter string `json:"retry_after,omitempty"`
+	// Version are the arguments that make the CLI print its version, for
+	// harness def check; the default is --version.
+	Version    []string `json:"version,omitempty"`
+	retryAfter *regexp.Regexp
 }
 
 // OutputRule locates the final answer in the CLI's stdout.
@@ -60,7 +70,9 @@ type OutputRule struct {
 	// SessionField captures the session id from the document.
 	SessionField string `json:"session_field,omitempty"`
 	// Answer, Session and Error pick values out of a JSONL event stream.
-	// Answer is required for jsonl; any Error match marks the run failed.
+	// Answer is required for jsonl. Any Error match marks the run failed;
+	// with "pick": "last", only the last event Error's where matches
+	// decides, so an error the CLI recovered from does not count.
 	Answer  *Selector `json:"answer,omitempty"`
 	Session *Selector `json:"session,omitempty"`
 	Error   *Selector `json:"error,omitempty"`
@@ -69,6 +81,16 @@ type OutputRule struct {
 	// over the one document for json. Pick "sum" adds up every match and
 	// "count" counts matches; a field may add several paths with "+".
 	Metrics map[string]*Selector `json:"metrics,omitempty"`
+	// Report reads the session id and metrics from a JSON document the CLI
+	// writes to {report_file}, for a CLI that reports usage apart from its
+	// answer.
+	Report *ReportRule `json:"report,omitempty"`
+}
+
+// ReportRule says what to read from the report file.
+type ReportRule struct {
+	SessionField string               `json:"session_field,omitempty"`
+	Metrics      map[string]*Selector `json:"metrics,omitempty"`
 }
 
 // Selector picks a field from the events of a JSONL stream that match
@@ -185,6 +207,16 @@ func (d *Definition) validate() error {
 			return fmt.Errorf("output.metrics.%s: %w", name, err)
 		}
 	}
+	if o.Report != nil {
+		for name, sel := range o.Report.Metrics {
+			if err := sel.validateMetric(name); err != nil {
+				return fmt.Errorf("output.report.metrics.%s: %w", name, err)
+			}
+		}
+		if o.Report.SessionField == "" && len(o.Report.Metrics) == 0 {
+			return errors.New("output.report needs session_field or metrics")
+		}
+	}
 	for i := range d.Failures {
 		f := &d.Failures[i]
 		if _, err := parseOutcome(f.Outcome); err != nil {
@@ -203,7 +235,38 @@ func (d *Definition) validate() error {
 		}
 		f.re = re
 	}
+	if d.RetryAfter != "" {
+		if j := strings.IndexFunc(d.RetryAfter, func(r rune) bool { return r < 0x20 && r != '\t' }); j >= 0 {
+			return fmt.Errorf("retry_after has a control character (%q) at byte %d; in JSON write \\\\d for a digit", d.RetryAfter[j], j)
+		}
+		re, err := regexp.Compile(d.RetryAfter)
+		if err != nil {
+			return fmt.Errorf("retry_after: %w", err)
+		}
+		if re.NumSubexp() != 1 {
+			return fmt.Errorf("retry_after needs exactly one group, the wait (it has %d)", re.NumSubexp())
+		}
+		d.retryAfter = re
+	}
 	return nil
+}
+
+// retryAfterIn is the wait a failed attempt's output asked for, or 0.
+func (d *Definition) retryAfterIn(text string) time.Duration {
+	if d.retryAfter == nil {
+		return 0
+	}
+	m := d.retryAfter.FindStringSubmatch(text)
+	if m == nil {
+		return 0
+	}
+	if s, err := strconv.ParseFloat(strings.TrimSpace(m[1]), 64); err == nil && finite(s) && s > 0 {
+		return time.Duration(min(s, maxRetryAfter.Seconds()) * float64(time.Second))
+	}
+	if dur, err := time.ParseDuration(strings.TrimSpace(m[1])); err == nil && dur > 0 {
+		return dur
+	}
+	return 0
 }
 
 // Dropped is an argument group left out because a placeholder was empty.
@@ -353,6 +416,7 @@ func (d *Definition) extractEvents(stdout io.Reader) (extraction, error) {
 	var x extraction
 	o := d.Output
 	errs, sess, ans := newCollector(o.Error), newCollector(o.Session), newCollector(o.Answer)
+	errs.final = o.Error != nil && o.Error.Pick == "last"
 	metrics := newMetrics(o.Metrics)
 	cs := []*collector{errs, sess, ans}
 	for _, c := range metrics {
@@ -409,6 +473,7 @@ type collector struct {
 	metric  bool
 	matched int
 	vals    []string // every value for pick join; otherwise the chosen one
+	final   bool     // an error decided by the last match alone
 	num     float64  // a metric's value so far
 	found   bool     // a metric found a number
 	// literal holds Where values that can be found in a raw line before it
@@ -501,6 +566,14 @@ func (c *collector) add(ev any) {
 		return
 	}
 	v, ok := lookup(ev, c.s.Field)
+	if c.final {
+		// Each match replaces what came before, an empty one included.
+		c.vals = c.vals[:0]
+		if str := scalar(v); ok && str != "" {
+			c.vals = append(c.vals, str)
+		}
+		return
+	}
 	if !ok {
 		return
 	}
@@ -644,5 +717,38 @@ func jsonTruthy(v any) bool {
 		return x != 0
 	default:
 		return true
+	}
+}
+
+// readReport adds what the report file says to x: the session id, unless
+// stdout gave one, and its metrics. A missing or unreadable report (the CLI
+// failed before writing it) adds nothing.
+func (d *Definition) readReport(path string, x *extraction) {
+	rule := d.Output.Report
+	if rule == nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var doc any
+	if json.Unmarshal(bytes.TrimSpace(data), &doc) != nil {
+		return
+	}
+	if rule.SessionField != "" && x.Session == "" {
+		if s, ok := lookup(doc, rule.SessionField); ok {
+			x.Session = scalar(s)
+		}
+	}
+	metrics := newMetrics(rule.Metrics)
+	for _, c := range metrics {
+		c.add(doc)
+	}
+	for k, v := range metricValues(metrics) {
+		if x.Metrics == nil {
+			x.Metrics = map[string]float64{}
+		}
+		x.Metrics[k] = v
 	}
 }

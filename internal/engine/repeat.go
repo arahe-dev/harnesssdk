@@ -59,9 +59,10 @@ func fingerprint(parts ...string) string {
 
 // requestFingerprint is the fingerprint of a new run ("run", by its parent
 // run) or a follow-up ("send", by its run).
-func requestFingerprint(kind, caller string, p *Profile, d *Definition, cwd, prompt string, extra Vars) string {
+func requestFingerprint(kind, caller string, p *Profile, d *Definition, cwd, prompt string, o TurnOptions) string {
 	def, _ := json.Marshal(d)
-	return fingerprint(kind, caller, p.Name, digest(p.Bytes()), digest(def), cwd, prompt, varsKey(extra))
+	return fingerprint(kind, caller, p.Name, digest(p.Bytes()), digest(def), cwd, prompt, varsKey(o.Extra),
+		"check="+o.Check, fmt.Sprint("worktree=", o.Worktree))
 }
 
 // varsKey is a stable rendering of per-run placeholder values.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arahe-dev/harnesssdk/internal/engine"
+	"github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // The test binary is also the fake agent CLI (HARNESS_SDK_FAKE=1) and, as
@@ -28,6 +28,11 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Printf("answer: %s", strings.TrimSpace(string(in)))
 		os.Exit(0)
+	}
+	// The processes the tests start (guards, fake agents, workers) are this
+	// binary; built with -race, each would sleep a second as it exits.
+	if os.Getenv("GORACE") == "" {
+		os.Setenv("GORACE", "atexit_sleep_ms=0")
 	}
 	os.Exit(m.Run())
 }
@@ -66,7 +71,7 @@ func TestRunAndSend(t *testing.T) {
 	if err != nil || res.Outcome != Success || res.Output != "answer: hello" || res.Session == "" || res.Turn != 1 {
 		t.Fatalf("run: %+v %v", res, err)
 	}
-	again, err := c.Send(ctx, res.Run, "again", nil)
+	again, err := c.Send(ctx, res.Run, FollowUp{Prompt: "again"})
 	if err != nil || again.Turn != 2 || again.Session != res.Session || again.Output != "answer: again" {
 		t.Fatalf("send: %+v %v", again, err)
 	}
@@ -105,7 +110,7 @@ func TestStartAndWait(t *testing.T) {
 	if err != nil || res.Output != "answer: later" {
 		t.Fatalf("wait: %+v %v", res, err)
 	}
-	if err := c.SendStart(id, "more", nil); err != nil {
+	if err := c.SendStart(id, FollowUp{Prompt: "more"}); err != nil {
 		t.Fatal(err)
 	}
 	res, err = c.Result(id)
@@ -171,10 +176,10 @@ func TestConfigAndGC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := c.GC(time.Hour, true); err != nil || len(ids) != 0 {
+	if ids, err := c.GC(context.Background(), time.Hour, true); err != nil || len(ids) != 0 {
 		t.Fatalf("gc of runs an hour old: %v %v", ids, err)
 	}
-	if ids, err := c.GC(0, true); err != nil || len(ids) != 1 || ids[0] != res.Run {
+	if ids, err := c.GC(context.Background(), 0, true); err != nil || len(ids) != 1 || ids[0] != res.Run {
 		t.Fatalf("gc of every finished run: %v %v", ids, err)
 	}
 }

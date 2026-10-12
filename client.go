@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/arahe-dev/harnesssdk/internal/engine"
+	"github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // Client runs agents through one data folder. Its methods are safe for
@@ -66,6 +66,24 @@ type Request struct {
 	Vars map[string]string
 	// Kind labels the run for Stats, such as "review".
 	Kind string
+	// Check is a command line run as is in the agent's folder once it
+	// answers; the turn succeeds only if it exits 0. It replaces the
+	// profile's check.
+	Check string
+	// Worktree runs the agent in a git worktree of its own, on branch
+	// harness/<run>, which keeps its work.
+	Worktree bool
+}
+
+func (r Request) options(vars engine.Vars) engine.TurnOptions {
+	return engine.TurnOptions{Extra: vars, Kind: r.Kind, Check: r.Check, Worktree: r.Worktree}
+}
+
+// FollowUp is the next turn of a run, in the same session.
+type FollowUp struct {
+	Prompt string
+	Vars   map[string]string
+	Check  string // replaces the profile's check for this turn
 }
 
 // Run runs one agent and waits for its answer. The error is non-nil
@@ -76,7 +94,7 @@ func (c *Client) Run(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	reps, err := c.runner.Start(ctx, req.Profile, []string{req.Prompt}, cwd, vars, req.Kind, nil)
+	reps, err := c.runner.Start(ctx, req.Profile, []string{req.Prompt}, cwd, req.options(vars), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +109,7 @@ func (c *Client) Compare(ctx context.Context, profiles []string, req Request) ([
 	if err != nil {
 		return nil, err
 	}
-	reps, err := c.runner.Compare(ctx, profiles, req.Prompt, cwd, vars, req.Kind, nil)
+	reps, err := c.runner.Compare(ctx, profiles, req.Prompt, cwd, req.options(vars), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +127,7 @@ func (c *Client) Start(req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	runs, err := c.runner.Prepare(req.Profile, []string{req.Prompt}, cwd, vars, req.Kind)
+	runs, err := c.runner.Prepare(req.Profile, []string{req.Prompt}, cwd, req.options(vars))
 	if err != nil {
 		return "", err
 	}
@@ -117,11 +135,11 @@ func (c *Client) Start(req Request) (string, error) {
 }
 
 // Send runs a follow-up turn in a run's session and waits for its answer.
-func (c *Client) Send(ctx context.Context, run, prompt string, vars map[string]string) (*Result, error) {
-	if err := checkSend(prompt, vars); err != nil {
+func (c *Client) Send(ctx context.Context, run string, f FollowUp) (*Result, error) {
+	if err := checkSend(f.Prompt, f.Vars); err != nil {
 		return nil, err
 	}
-	rep, err := c.runner.Send(ctx, run, prompt, vars)
+	rep, err := c.runner.Send(ctx, run, f.Prompt, engine.TurnOptions{Extra: f.Vars, Check: f.Check})
 	if err != nil {
 		return nil, err
 	}
@@ -130,11 +148,11 @@ func (c *Client) Send(ctx context.Context, run, prompt string, vars map[string]s
 
 // SendStart queues a follow-up turn and runs it in the background. Wait
 // or Result reads its answer.
-func (c *Client) SendStart(run, prompt string, vars map[string]string) error {
-	if err := checkSend(prompt, vars); err != nil {
+func (c *Client) SendStart(run string, f FollowUp) error {
+	if err := checkSend(f.Prompt, f.Vars); err != nil {
 		return err
 	}
-	n, err := c.runner.PrepareSend(run, prompt, vars)
+	n, err := c.runner.PrepareSend(run, f.Prompt, engine.TurnOptions{Extra: f.Vars, Check: f.Check})
 	if err != nil {
 		return err
 	}
@@ -259,23 +277,31 @@ type Config struct {
 	// request may fail before the caller is warned (Result.Hint), and
 	// before it is refused; 0 turns either off.
 	RepeatWarn, RepeatRefuse int
+	// MaxWaitMinutes bounds a turn's wait for its budgets unless its
+	// profile sets max_wait; MaxQueue is how many turns may wait for one;
+	// SpendLimitUSD caps the machine's reported spend over 24 hours. 0
+	// means no limit.
+	MaxWaitMinutes, MaxQueue, SpendLimitUSD int
 }
 
 // Config reads the limits.
 func (c *Client) Config() (Config, error) {
 	cfg, err := c.home.Config()
 	return Config{MaxDepth: cfg.MaxDepth, MaxRunning: cfg.MaxRunning, RetentionDays: cfg.RetentionDays,
-		RepeatWarn: cfg.RepeatWarn, RepeatRefuse: cfg.RepeatRefuse}, err
+		RepeatWarn: cfg.RepeatWarn, RepeatRefuse: cfg.RepeatRefuse,
+		MaxWaitMinutes: cfg.MaxWaitMinutes, MaxQueue: cfg.MaxQueue, SpendLimitUSD: cfg.SpendLimitUSD}, err
 }
 
 // SetConfig sets one limit: max_depth, max_running, retention_days,
-// repeat_warn or repeat_refuse.
+// repeat_warn, repeat_refuse, max_wait_minutes, max_queue or
+// spend_limit_usd.
 func (c *Client) SetConfig(key string, value int) error { return c.home.SetConfig(key, value) }
 
 // GC removes runs last active before olderThan ago that are not running,
-// and returns their ids. With dryRun it only lists them.
-func (c *Client) GC(olderThan time.Duration, dryRun bool) ([]string, error) {
-	rep, err := c.home.GC(time.Now().Add(-olderThan), dryRun)
+// and runs whose creation was abandoned, and returns their ids. With dryRun
+// it only lists them. Cancelling ctx stops it; what it was removing is kept.
+func (c *Client) GC(ctx context.Context, olderThan time.Duration, dryRun bool) ([]string, error) {
+	rep, err := c.home.GC(ctx, time.Now().Add(-olderThan), dryRun)
 	return rep.Runs, err
 }
 
@@ -295,6 +321,8 @@ type Stats struct {
 	Turns    int
 	Outcomes map[Outcome]int
 	Attempts int
+	Checks   int // turns that ran a check
+	Passed   int // and passed it
 	Median   time.Duration
 	P90      time.Duration
 	// Metrics are each metric's mean over the turns that reported it, and
@@ -313,7 +341,7 @@ func (c *Client) Stats(f StatsFilter) ([]Stats, error) {
 	}
 	out := make([]Stats, len(st))
 	for i, s := range st {
-		o := Stats{Profile: s.Profile, Model: s.Model, Kind: s.Kind, Turns: s.Turns, Attempts: s.Attempts,
+		o := Stats{Profile: s.Profile, Model: s.Model, Kind: s.Kind, Turns: s.Turns, Attempts: s.Attempts, Checks: s.Checks, Passed: s.Passed,
 			Median: s.Median, P90: s.P90, Outcomes: map[Outcome]int{}}
 		for k, n := range s.Outcomes {
 			o.Outcomes[Outcome(k)] = n
@@ -327,6 +355,34 @@ func (c *Client) Stats(f StatsFilter) ([]Stats, error) {
 		out[i] = o
 	}
 	return out, nil
+}
+
+// DefCheck is what CheckDefinition found.
+type DefCheck struct {
+	Path     string  // where the CLI was found
+	Version  string  // the first line of its version
+	Live     *Result // the live turn, when a profile was given
+	Answered bool    // it answered as asked
+	Metrics  []string
+	Missing  []string // declared metrics the live turn did not report
+}
+
+// CheckDefinition checks that a definition's CLI is on PATH and reports
+// its version; with a profile on that harness, it also runs one short
+// live turn (spending tokens) and checks the answer and metrics come out.
+func (c *Client) CheckDefinition(ctx context.Context, name, cwd, profile string) (*DefCheck, error) {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	dc, err := c.runner.CheckDefinition(ctx, name, cwd, profile)
+	if dc == nil {
+		return nil, err
+	}
+	out := &DefCheck{Path: dc.Path, Version: dc.Version, Answered: dc.Answered, Metrics: dc.Metrics, Missing: dc.Missing}
+	if dc.Live != nil {
+		out.Live = resultOf(*dc.Live)
+	}
+	return out, err
 }
 
 func (r Request) check() (string, engine.Vars, error) {

@@ -49,7 +49,13 @@ type Claim struct {
 	// NoWait refuses the request at once, with errNoWait, when this claim
 	// does not fit.
 	NoWait bool
+	// MaxQueue, if positive, refuses a request with errQueueFull rather
+	// than queue it behind that many waiters.
+	MaxQueue int
 }
+
+// errQueueFull refuses a request whose queue is full.
+var errQueueFull = errors.New("too many turns are waiting")
 
 // runningGate is the gate name of max_running. No budget can be named so.
 const runningGate = "_running"
@@ -149,22 +155,57 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 	}
 	me := gateEntry{ID: id, PID: os.Getpid(), Label: label, Since: time.Now().UTC()}
 	drop := func() {
-		g.update(claims, func(sts []*gateState) {
+		g.update(context.Background(), claims, func(sts []*gateState) {
 			for _, st := range sts {
 				st.remove(id)
 			}
 		})
 	}
+	// entered is set once a pass got into the ledgers: before that, this
+	// request is in none, and leaving has nothing to undo there.
+	entered := false
 	leave := func() {
-		drop()
+		if entered {
+			drop()
+		}
 		live.Close()
 		os.Remove(g.liveFile(id))
 	}
+	// expire leaves at once, when the wait has run out: closing the ticket
+	// is enough, since the next reader of each ledger drops a ticket whose
+	// owner let go, and waiting for ledger locks to withdraw it would
+	// outlast the wait.
+	expire := func() {
+		if entered {
+			// One try, without waiting: a ledger locked by another is left
+			// to drop the dead ticket itself.
+			now, cancel := context.WithDeadline(context.Background(), time.Now())
+			g.update(now, claims, func(sts []*gateState) {
+				for _, st := range sts {
+					st.remove(id)
+				}
+			})
+			cancel()
+		}
+		live.Close()
+		os.Remove(g.liveFile(id)) // a missing liveness file reads as dead too
+	}
 	for queued := false; ; {
+		if err := ctx.Err(); err != nil {
+			expire()
+			return nil, err
+		}
 		// Stamped before the pass, so a change during it is not missed.
 		stamps := g.stamps(claims)
-		granted, verdict, err := g.try(claims, me, !queued, reject)
+		granted, verdict, err := g.try(ctx, claims, me, !queued, reject)
+		if err == nil {
+			entered = true
+		}
 		switch {
+		case err != nil && ctx.Err() != nil:
+			// The wait ended during the pass: leave at once, as below.
+			expire()
+			return nil, ctx.Err()
 		case errors.Is(err, errBusy) && !reject:
 			// A ledger stayed locked by others all through this pass:
 			// contention is part of waiting, never a failure. The request
@@ -172,6 +213,11 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		case err != nil:
 			leave()
 			return nil, err
+		case granted && ctx.Err() != nil:
+			// The wait ended (max_wait, or the caller) while the pass was
+			// waiting for a ledger: a late grant is given back.
+			expire()
+			return nil, ctx.Err()
 		case granted:
 			return &Ticket{ID: id, Live: live, release: leave}, nil
 		case verdict != nil:
@@ -181,7 +227,7 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 			queued = true
 		}
 		if err := g.waitChange(ctx, claims, stamps); err != nil {
-			leave()
+			expire()
 			return nil, err
 		}
 	}
@@ -215,9 +261,9 @@ func (g *Gate) waitChange(ctx context.Context, claims []Claim, stamps []string) 
 // try makes one pass over the ledgers: it enqueues me on the first pass and
 // grants me everything if every ledger allows it. verdict is a final
 // refusal.
-func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bool, verdict, err error) {
+func (g *Gate) try(ctx context.Context, claims []Claim, me gateEntry, first, reject bool) (granted bool, verdict, err error) {
 	nested := len(g.lineage) > 0
-	err = g.update(claims, func(sts []*gateState) {
+	err = g.update(ctx, claims, func(sts []*gateState) {
 		ok := true
 		for i, c := range claims {
 			st := sts[i]
@@ -240,6 +286,12 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 			}
 			if c.NoWait && c.Capacity-used < c.Units {
 				verdict = fmt.Errorf("%s: all %d units are in use: %w", c.Name, c.Capacity, errNoWait)
+				return
+			}
+			// Checked when the request joins the queue: one already queued
+			// keeps its place however long the queue behind it grows.
+			if first && c.MaxQueue > 0 && len(st.Queue) > c.MaxQueue && (c.Capacity-used < c.Units || !nested && st.Queue[0].ID != me.ID) {
+				verdict = fmt.Errorf("%s: %d turns are waiting already: %w", c.Name, len(st.Queue)-1, errQueueFull)
 				return
 			}
 			head := len(st.Queue) > 0 && st.Queue[0].ID == me.ID
@@ -266,7 +318,8 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 
 // update changes ledgers under their locks, taken in name order, after
 // dropping dead tickets.
-func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
+func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateState)) error {
+
 	var locks []*os.File
 	defer func() {
 		for i := len(locks) - 1; i >= 0; i-- {
@@ -280,12 +333,18 @@ func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), 2*time.Second)
+		// Each ledger lock is waited for up to two seconds, and never past
+		// the caller's deadline, counted afresh for each.
+		wait := 2 * time.Second
+		if d, ok := ctx.Deadline(); ok {
+			wait = max(0, min(wait, time.Until(d)))
+		}
+		lk, err := lockWaitCtx(ctx, filepath.Join(dir, "state.lock"), wait)
 		if err != nil {
 			return fmt.Errorf("gate %s: %w", c.Name, err)
 		}
 		locks = append(locks, lk)
-		st, err := readGate(dir)
+		st, err := readGate(ctx, dir)
 		if err != nil {
 			return err
 		}
@@ -302,15 +361,15 @@ func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
 		if string(after) == string(before[i]) {
 			continue
 		}
-		if err := writeFileAtomic(filepath.Join(g.ledger(c.Name), "state.json"), append(after, '\n')); err != nil {
+		if err := writeFileAtomicCtx(ctx, filepath.Join(g.ledger(c.Name), "state.json"), append(after, '\n')); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func readGate(dir string) (*gateState, error) {
-	data, err := readShared(filepath.Join(dir, "state.json"))
+func readGate(ctx context.Context, dir string) (*gateState, error) {
+	data, err := readSharedCtx(ctx, filepath.Join(dir, "state.json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return &gateState{}, nil
 	}
@@ -416,7 +475,7 @@ func (h *Home) GateStatus() ([]GateInfo, error) {
 		}
 		// Read without the lock: ledgers are replaced whole, and status
 		// must not queue behind the waiters it reports on.
-		st, err := readGate(g.ledger(n))
+		st, err := readGate(context.Background(), g.ledger(n))
 		if err != nil {
 			return nil, err
 		}

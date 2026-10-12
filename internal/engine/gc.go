@@ -1,10 +1,14 @@
 package engine
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,28 +25,70 @@ type GCReport struct {
 }
 
 // GC removes the runs last active before cutoff that no process executes,
-// oldest first. A run that cannot be removed now is left for the next pass.
-func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
+// oldest first, and the runs whose creation was abandoned. A run that
+// cannot be removed now is left for the next pass. Cancelling ctx stops
+// it between runs, and stops git; what it was removing then is kept.
+func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport, error) {
 	var rep GCReport
+	scanned := time.Now()
 	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
 	if err != nil {
 		return rep, err
 	}
 	var errs []error
+	refs := map[string]bool{} // creations that marked runs still refer to
+	unsure := false           // a mark could not be read
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		id := e.Name()
 		if strings.HasPrefix(id, stagePrefix) {
 			if !dryRun {
-				h.collectStage(id)
+				h.collectStage(ctx, id)
 			}
 			continue
 		}
-		// Ids start with their creation time: a run clearly created after
-		// the cutoff was active after it, and is not read at all.
-		if created, ok := idTime(id); !e.IsDir() || !ok || !created.Add(-idSlack).Before(cutoff) {
+		if !e.IsDir() {
 			continue
 		}
-		size, err := h.collect(id, cutoff, dryRun)
+		// A run whose creation has not committed is left to its creator;
+		// once the creator is gone (it can then no longer commit), it was
+		// abandoned, and goes whatever its age, as its rollback would.
+		// One whose mark cannot be read is left alone.
+		dir := filepath.Join(h.Dir, "runs", id)
+		abandoned := false
+		if tx, marked, err := readMark(dir); marked {
+			committed := false
+			if err == nil {
+				committed, err = h.committed(tx)
+			}
+			switch {
+			case err != nil:
+				unsure = true
+				continue
+			case committed:
+				if os.Remove(filepath.Join(dir, creatingFile)) != nil { // only clutter now
+					refs[tx] = true
+				}
+			default:
+				refs[tx] = true
+				if !h.creatorGone(ctx, id) {
+					continue
+				}
+				if abandoned, err = h.creating(dir); err != nil {
+					unsure = true
+					continue
+				}
+			}
+		}
+		// Ids start with their creation time: a run clearly created after
+		// the cutoff was active after it, and is not read at all.
+		if created, ok := idTime(id); !abandoned && (!ok || !created.Add(-idSlack).Before(cutoff)) {
+			continue
+		}
+		size, err := h.collect(ctx, id, cutoff, dryRun, abandoned)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
@@ -54,14 +100,19 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 	sort.Strings(rep.Runs)
 	h.pruneLive(cutoff)
 	h.pruneRepeats()
+	h.pruneSpend()
+	if ctx.Err() == nil && !unsure {
+		h.pruneCommits(refs, scanned)
+	}
 	return rep, errors.Join(errs...)
 }
 
 // collect removes one run if it is idle and was last active before cutoff,
-// and returns its size, or -1 if it is kept. It holds the run's execution
-// and state locks while it decides and removes, so the run cannot be sent a
-// turn or executed meanwhile.
-func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) {
+// or was abandoned, and returns its size, or -1 if it is kept. It holds the
+// run's execution and state locks while it decides and removes, so the run
+// cannot be sent a turn or executed meanwhile. An abandoned run is removed
+// as its creation's rollback would have: its branch too.
+func (h *Home) collect(ctx context.Context, id string, cutoff time.Time, dryRun, abandoned bool) (int64, error) {
 	dir := filepath.Join(h.Dir, "runs", id)
 	// Runs appear with their record (NewRun renames them into place), so
 	// a folder without one is what an interrupted removal leaves: removed
@@ -69,7 +120,7 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	// so it takes no locks, which would also make the folder look new.
 	if _, err := os.Stat(filepath.Join(dir, "run.json")); errors.Is(err, fs.ErrNotExist) {
 		fi, err := os.Stat(dir)
-		if err != nil || !fi.ModTime().Before(cutoff) {
+		if err != nil || !abandoned && !fi.ModTime().Before(cutoff) {
 			return -1, nil
 		}
 		size, _, err := dirSize(dir)
@@ -91,7 +142,11 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	release := func() { state.Close(); exec.Close() }
 	// Under the locks, the record decides; one this harness cannot read is
 	// left alone, and so is a run still taking shape.
-	if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) || r.settling() {
+	r, err := h.LoadRun(id)
+	// An abandoned creation never ran; a run that did is not one, whatever
+	// its mark says, and is kept or collected like any other.
+	abandoned = abandoned && err == nil && !r.ran()
+	if err != nil || !abandoned && (!r.lastActive().Before(cutoff) || r.settling()) {
 		release()
 		return -1, nil
 	}
@@ -99,6 +154,20 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	if err != nil || dryRun {
 		release()
 		return size, err
+	}
+	// A v1 record counts its turns' costs itself: they move to the
+	// spending ledger before it goes, or it stays.
+	if r.Format < runFormat {
+		if err := moveV1Spend(h.Dir, r); err != nil {
+			release()
+			return -1, fmt.Errorf("run %s: moving its turns' costs to the spending ledger: %w", id, err)
+		}
+	}
+	// The worktree goes first, its work committed to its branch, which
+	// stays; a worktree whose work cannot be kept keeps its run too.
+	if err := removeWorktree(ctx, r, abandoned); err != nil {
+		release()
+		return -1, fmt.Errorf("run %s: %w", id, err)
 	}
 	// The record goes first: from then on the run does not exist. The lock
 	// files, open here, go last (Windows cannot delete an open file).
@@ -121,20 +190,71 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 // lock is free. A live creator holds the lock from before it makes the
 // folder until it has published or removed it. The lock file is removed
 // under the creation lock (see stageRun).
-func (h *Home) collectStage(name string) {
-	lockPath := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock")+".lock")
-	coord, err := h.creationLock()
+func (h *Home) collectStage(ctx context.Context, name string) {
+	stage := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock"))
+	lockPath := stage + ".lock"
+	coord, err := h.creationLock(ctx)
 	if err != nil {
 		return
 	}
-	defer coord()
-	unlock, err := lockFile(lockPath)
+	lk, err := lockOpen(lockPath)
+	coord()
 	if err != nil {
 		return // its creator is alive
 	}
-	os.RemoveAll(strings.TrimSuffix(lockPath, ".lock"))
-	unlock()
-	os.Remove(lockPath)
+	// Its creator is gone, and this lock keeps any other from the id while
+	// what it left is undone: a worktree and branch it made, then the folder.
+	release := func(removeLock bool) {
+		coord, err := h.creationLock(ctx)
+		lk.Close()
+		if err == nil {
+			if removeLock {
+				os.Remove(lockPath)
+			}
+			coord()
+		}
+	}
+	if run := readStaged(stage); run != nil && run.Worktree != "" {
+		if err := removeWorktree(ctx, run, true); err != nil {
+			release(false) // tried again by the next pass
+			return
+		}
+	}
+	os.RemoveAll(stage)
+	release(true)
+}
+
+// creatorGone reports whether the creator of published run id has let go
+// of its creation lock, which it holds until the run is committed or
+// rolled back, and then removes the lock file.
+func (h *Home) creatorGone(ctx context.Context, id string) bool {
+	coord, err := h.creationLock(ctx)
+	if err != nil {
+		return false
+	}
+	defer coord()
+	path := filepath.Join(h.Dir, "runs", stagePrefix+id+".lock")
+	lk, err := lockOpen(path)
+	if err != nil {
+		return false // held, or cannot tell
+	}
+	lk.Close()
+	os.Remove(path)
+	return true
+}
+
+// readStaged reads the record of a run being prepared, or nil.
+func readStaged(stage string) *Run {
+	data, err := os.ReadFile(filepath.Join(stage, "run.json"))
+	if err != nil {
+		return nil
+	}
+	var r Run
+	if json.Unmarshal(data, &r) != nil || checkFormatUpTo("staged run", r.Format, runFormat) != nil {
+		return nil
+	}
+	r.dir = stage
+	return &r
 }
 
 // dirSize adds up the sizes of a run folder's files.
@@ -150,6 +270,12 @@ func dirSize(dir string) (int64, []os.DirEntry, error) {
 		}
 	}
 	return size, entries, nil
+}
+
+// ran reports whether any turn of the run started executing. (A queued
+// turn that was never started can be ended as lost without running.)
+func (r *Run) ran() bool {
+	return slices.ContainsFunc(r.Turns, func(t TurnRecord) bool { return !t.Started.IsZero() })
 }
 
 // settling reports whether a run may still be taking shape without
@@ -198,7 +324,7 @@ func (h *Home) pruneLive(cutoff time.Time) {
 
 // AutoGC applies config retention_days, at most once a day across every
 // harness process. It is best effort: errors are left for harness gc.
-func (h *Home) AutoGC() {
+func (h *Home) AutoGC(ctx context.Context) {
 	cfg, err := h.Config()
 	if err != nil || cfg.RetentionDays == 0 {
 		return
@@ -222,5 +348,5 @@ func (h *Home) AutoGC() {
 	if err := os.WriteFile(stamp, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
 		return
 	}
-	h.GC(time.Now().AddDate(0, 0, -cfg.RetentionDays), false)
+	h.GC(ctx, time.Now().AddDate(0, 0, -cfg.RetentionDays), false)
 }

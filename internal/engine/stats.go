@@ -28,6 +28,8 @@ type Stats struct {
 	Turns    int                    `json:"turns"`
 	Outcomes map[string]int         `json:"outcomes"`
 	Attempts int                    `json:"attempts"`
+	Checks   int                    `json:"checks"` // turns that ran a check
+	Passed   int                    `json:"passed"` // and passed it
 	Median   time.Duration          `json:"median_ns"`
 	P90      time.Duration          `json:"p90_ns"`
 	Metrics  map[string]MetricStats `json:"metrics,omitempty"`
@@ -80,6 +82,12 @@ func (h *Home) Stats(f StatsFilter) ([]Stats, error) {
 			g.Turns++
 			g.Outcomes[t.Outcome]++
 			g.Attempts += t.Attempts
+			if t.Checked != "" {
+				g.Checks++
+			}
+			if t.Checked == "passed" {
+				g.Passed++
+			}
 			if !t.Started.IsZero() {
 				durations[key] = append(durations[key], t.Ended.Sub(t.Started))
 			}

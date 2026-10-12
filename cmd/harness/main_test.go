@@ -3,17 +3,19 @@ package main
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	harness "github.com/arahe-dev/harnesssdk/internal/engine"
+	harness "github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // The test binary doubles as the harness CLI (HARNESS_TEST_CLI=1) and as a
@@ -28,12 +30,21 @@ func TestMain(m *testing.M) {
 	case os.Getenv("HARNESS_TEST_CLI") == "1":
 		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
+	// The processes the tests start (guards, fake agents, workers) are this
+	// binary; built with -race, each would sleep a second as it exits.
+	if os.Getenv("GORACE") == "" {
+		os.Setenv("GORACE", "atexit_sleep_ms=0")
+	}
 	os.Exit(m.Run())
 }
 
 // fakeAgent "tree <pidfile>" starts a sleeping grandchild, records its pid
 // and sleeps.
 func fakeAgent(args []string) int {
+	if len(args) == 2 && args[0] == "reply" {
+		fmt.Println(args[1])
+		return 0
+	}
 	if len(args) == 1 && args[0] == "echo" {
 		in, _ := io.ReadAll(os.Stdin)
 		os.Stdout.Write(append([]byte("echo: "), in...))
@@ -150,6 +161,28 @@ func TestCLICompareAndStats(t *testing.T) {
 	if code, out, _ := harnessCLI(t, "", "stats", "--json", "--profile", "b"); code != 0 || !strings.Contains(out, `"profile": "b"`) || strings.Contains(out, `"profile": "a"`) {
 		t.Fatalf("stats --json: %d %s", code, out)
 	}
+	// Checks decide the outcome.
+	if code, _, errs := harnessCLI(t, "", "run", "a", "--check", "exit 0", "hi"); code != 0 || !strings.Contains(errs, "check passed: exit 0") {
+		t.Fatalf("passing check: %d %s", code, errs)
+	}
+	if code, out, errs := harnessCLI(t, "", "run", "a", "--check", "exit 3", "hi"); code != 3 || !strings.Contains(errs, "check failed") || !strings.Contains(out, "echo: hi") {
+		t.Fatalf("failing check: %d %q %s", code, out, errs)
+	}
+	code, out, _ = harnessCLI(t, "", "stats", "--profile", "a")
+	if code != 0 || !strings.Contains(out, "1/2") {
+		t.Fatalf("stats checks: %s", out)
+	}
+	// def check: the CLI and its version; with a profile, a live turn.
+	withVersion := `{"command":` + strconv.Quote(exe) + `,"args":[["reply","harness-check-ok"]],"env":{"HARNESS_TEST_FAKE":"1"},"version":["echo"],"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, withVersion, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatalf("def set: %d %s", code, errs)
+	}
+	if code, out, errs := harnessCLI(t, "", "def", "check", "fake", "--profile", "a"); code != 0 || !strings.Contains(out, "version:") || !strings.Contains(out, "as asked") {
+		t.Fatalf("def check: %d %s %s", code, out, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "spend_limit_usd") || !strings.Contains(out, "max_queue") {
+		t.Fatalf("config: %s", out)
+	}
 }
 
 func TestCostPerSuccess(t *testing.T) {
@@ -173,7 +206,7 @@ func TestCostPerSuccess(t *testing.T) {
 
 func TestCLIConfigAndGC(t *testing.T) {
 	t.Setenv("HARNESS_HOME", t.TempDir())
-	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "max_depth") || !strings.Contains(out, "retention_days  30") {
+	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "max_depth") || !regexp.MustCompile(`retention_days +30 `).MatchString(out) {
 		t.Fatalf("config: %d %q", code, out)
 	}
 	if code, _, errs := harnessCLI(t, "", "config", "set", "max_depth", "x"); code != 2 {

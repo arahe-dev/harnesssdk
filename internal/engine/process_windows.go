@@ -115,6 +115,14 @@ func newProcess(path string, args []string, _ []*os.File) (*exec.Cmd, *tree, err
 	return cmd, &tree{cmd: cmd}, nil
 }
 
+func setCmdLine(cmd *exec.Cmd, line string) { cmd.SysProcAttr.CmdLine = line }
+
+// shellArgv runs a command line with cmd.exe; the line itself goes in
+// procSpec.CmdLine, so cmd.exe reads it as written.
+func shellArgv(line string) (argv []string, cmdLine string) {
+	return []string{"cmd.exe", "/d", "/s", "/c", line}, `cmd.exe /d /s /c "` + line + `"`
+}
+
 // guard is not used on Windows.
 func guard([]string) int { return 127 }
 

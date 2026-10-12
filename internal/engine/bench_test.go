@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func BenchmarkGatePass(b *testing.B) {
 		defer tk.Release()
 	}
 	for b.Loop() {
-		g.update(c, func([]*gateState) {})
+		g.update(context.Background(), c, func([]*gateState) {})
 	}
 }
 

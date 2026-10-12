@@ -1,5 +1,200 @@
 # Changelog
 
+## v2.0.0-next (2026-10-12)
+
+The v2 candidate: verified outcomes, isolated working copies, spending and
+waiting limits, and retries Herta 1.0-next cannot express yet. The module
+path is now `github.com/arahe-dev/harnesssdk/v2`; v1.7.0 stays the stable v1.
+
+- **Retries with backoff.** Herta 1.0-next keeps v0.2.0's limits: no backoff,
+  and `throttled` cannot be retried. Harness now owns the retry loop (Herta
+  runs one attempt per call and still validates effects and turns a timeout
+  into `uncertain`): a profile's `backoff` (default 2s) doubles per retry up
+  to 5 minutes with jitter, and waits at least what the CLI asked for (a
+  definition's `retry_after` regex). `throttled` may be listed in `retry`,
+  except for non-idempotent profiles. **Between attempts a turn holds no
+  budget, key or slot.**
+- **Verified outcomes.** A profile's `check` (or `--check`) is a command line
+  run as written in the agent's folder once it answers; the turn succeeds
+  only if it exits 0. A failed check is permanent and keeps the answer and
+  session. `stats` counts checks passed.
+- **Worktrees.** `--worktree` (or a profile's `worktree: true`) runs the
+  agent in a git worktree on branch `harness/<run>`; each turn's work is
+  committed there and summarized. `compare --worktree` compares agents that
+  edit files. `gc` removes the worktree and keeps the branch.
+- **Limits.** Config `max_wait_minutes` and profile `max_wait` bound a wait at
+  the gate; `max_queue` refuses a turn that would queue behind that many;
+  config and profile `spend_limit_usd` cap the reported cost over 24 hours.
+- **`harness def check <name> [--profile p]`** finds the CLI and its version,
+  and with a profile runs a live turn and checks its answer and metrics.
+- **Usage reports.** `output.report` reads metrics and the session id from a
+  JSON file the CLI writes to `{report_file}`.
+- **New definitions.** Hermes Agent 0.20.5, verified live (answer, resume,
+  metrics). Factory Droid and Kimi Code as unverified starting points (the
+  CLIs were not signed in).
+- **Go API (v2).** `Request.Check` and `Worktree`; `Send` and `SendStart` take
+  a `FollowUp`; `Result` and `Turn` gain check, branch and changes fields;
+  `Config` gains the new limits; `Stats` counts checks; `CheckDefinition`;
+  `GC` takes a context.
+  The engine's `TurnOptions` replaces its growing argument lists.
+- **docs/DESIGN.md** explains every lock and protocol in one place.
+- **Formats.** Run records and `config.json` are format 2: they hold what
+  v1 would misread or drop (a worktree run's folder, the new limits), so
+  v1.7 refuses them ("upgrade harness") instead of acting on them. v2 reads
+  format 1. Other files are unchanged and shared.
+
+### Review
+
+The Pi review agent (`review`, GPT-6.1 Sol) reviewed this release before it
+was merged. Its first review found 2 high, 11 medium and 2 low issues, all
+fixed with regression tests:
+- `gc` could delete a worktree whose work was never committed: it now
+  commits the work first and keeps any worktree it cannot commit; a failed
+  turn commit is reported.
+- v1.7 could act on v2 records (above).
+- A spending refusal could loop as a retry; only an attempt that ran is
+  retried.
+- Spending counted only finished turns of runs created in the window: each
+  attempt's cost is now recorded before its budget is released, and counted
+  by when it was spent.
+- Checks now run with the run's identity (`HARNESS_*`), its locks, and as
+  its recorded process.
+- `max_wait` held only between gate passes: lock waits are now bounded by
+  it, and a grant after it is given back.
+- Worktrees: what is about to be made is recorded first, so a failed
+  `git worktree add` or a creator that died is undone (by its rollback or by
+  `gc`); git is addressed from the run's folder or the repository's own git
+  folder; every git command is bounded and contained like an agent; an
+  untracked starting folder is created in the worktree; paths keep leading
+  spaces.
+- `def check` no longer accepts an echoed prompt, reports declared metrics
+  that did not come out, and runs the version command with its process
+  tree bounded.
+- Each attempt has its own `{report_file}`.
+
+Its second review found 3 high, 5 medium and 1 low issues, also fixed with
+regression tests: worktrees claim only free branch and folder names, and a
+rollback never deletes what it did not make; gc keeps a worktree whose HEAD
+left its branch; harness's commits run no hook at all (an empty hooks
+folder), and gc's removal is never forced, so a change it did not commit is
+kept; each attempt's cost is a timestamped entry, so the rolling window
+counts only what was spent in it, and a turn whose spending cannot be
+recorded is not retried; every ledger lock waits only what remains of
+`max_wait`, and an expired turn leaves without waiting for locks; a rollback
+that cannot finish keeps its staged record for gc to finish; git honors
+cancellation and shutdown.
+
+Its third review found 2 high and 5 medium issues, also fixed with
+regression tests:
+- Worktree names are claimed by operations that fail when a name is taken
+  (making the folder, then `git branch`), and recorded only once claimed,
+  so two data folders using one repository can never remove each other's
+  branch; a rollback deletes a branch only while it still points where it
+  was made.
+- Each commit gets a new private hooks folder (one in a fixed place could
+  be planted with hooks).
+- An attempt whose cost could not be recorded keeps its admission until the
+  turn's record holds it, so no turn is admitted against a total that
+  leaves it out.
+- Gate lock waits and shared-file retries stop when the wait ends, and a
+  pass that ends that way leaves at once.
+- A `compare` whose rollback cannot finish leaves its runs marked: they
+  never execute, and `gc` finishes the rollback, whatever their age.
+- `Start` creates worktrees under its caller's context, and `harness stop`
+  also stops a turn's final commit.
+- The Pi example's `error` selector is back, reading only the final
+  `turn_end`: in JSON mode Pi exits 0 when its last model call failed.
+
+Its fourth review found 5 medium issues, also fixed with regression tests:
+- A turn whose cost cannot be recorded stays admitted, saving its record
+  again, until the cost is on record or the turn is stopped.
+- A creation is a transaction: runs are published marked `creating` and
+  unmarked only once all of them exist, so a run never executes, and is
+  never kept as a normal run, unless its creation finished; gc finishes an
+  abandoned creation once its creator is gone. (This replaces the
+  `abandoned` mark of the third round.)
+- The worktree lock and the daily automatic `gc` honor the caller's
+  cancellation.
+- A stop request is acted on once, by the turn or its final commit,
+  whichever sees it first, so one that arrives in between is not lost.
+- A rollback does not delete a branch that another worktree has checked out.
+
+Its fifth review found 4 medium issues, also fixed with regression tests:
+- A cost that cannot go into its run record is recorded apart, in
+  `<home>/spend`, and counts at once, so a turn stopped while its record
+  cannot be saved leaves its cost on record.
+- A creation commits by one decision, a file in `<home>/created`, instead of
+  removing its runs' marks one by one, so a crash part way cannot leave some
+  runs created and others not.
+- Waits for `create.lock` end with the caller, in creation and in `gc`.
+- A stop watch ends between takes of a stop request, so a request is never
+  taken by a watch that has ended.
+
+Its sixth review found 2 high and 3 medium issues, also fixed with
+regression tests:
+- A creation mark or commit file that cannot be read leaves its run alone
+  (gc used to read it as "not committed"), a run that ever ran is never
+  rolled back, and a rollback keeps a worktree that holds changes.
+- Commit files are pruned only when an hour older than the start of a gc
+  scan that read every mark, so a long scan cannot prune one still needed.
+- Spending is one ledger, `<home>/spend`, with an entry per attempt made
+  before it runs and given its cost before its admission is released. It
+  replaces the per-turn `spend` records and the files written apart in the
+  fifth round. A cost that never reached the ledger is unknown and, like an
+  unreadable entry, refuses turns under a limit until it leaves the 24-hour
+  window or is removed: spending limits fail closed.
+
+Its seventh review found 1 high and 5 medium issues, also fixed with
+regression tests:
+- A rollback removes a worktree only when git finds it clean, or never made
+  it one; one it cannot inspect is kept.
+- A v1 record's turn costs move into the ledger before v2 first saves the
+  record, so a follow-up on an old run still counts them.
+- Ledger entries have names of their own, so a run id used again cannot
+  write over earlier costs, and an entry whose cost could not be written is
+  kept even when no limit applies.
+- A run counts as having run only when a turn started, so an uncommitted
+  creation whose queued turn was ended as lost is still rolled back.
+- Ledger entries are validated (run, turn, attempt, profile, time, cost);
+  an invalid one is unknown, and a turn number of 0 no longer panics.
+
+Its eighth review found 2 high and 4 medium issues, also fixed with
+regression tests:
+- A rollback asks git for every untracked and ignored file whatever the
+  repository's configuration, and removes a folder that is not a worktree
+  only when it is empty.
+- A v1 turn's cost counts once, in the ledger once it is there, and moves
+  there before `gc` removes its record too.
+- A ledger entry names its run's creation time, so a later run with the
+  same id cannot make an earlier unknown entry look like it is running.
+- A closed entry without a cost, or with a null one, is not valid.
+
+Its ninth review found 1 high and 1 medium issue, also fixed with
+regression tests: a rollback also shows submodule changes whatever the
+configuration, and keeps a worktree that holds a submodule or another
+repository; and spending reads the ledger again after the v1 records, so a
+cost moved to the ledger while it reads counts once.
+
+Its tenth review found 2 medium issues, also fixed with regression tests:
+moved v1 costs are named by their run's creation time too, so two v1 runs
+with one id keep both costs; and the search for submodules stops when its
+caller cancels.
+
+Its eleventh review found 1 medium issue, also fixed with a regression
+test: a run record that cannot be read, or that a later harness wrote, may
+hold a cost, so its cost is unknown and turns under a limit are refused.
+
+- **Pi definition fix.** v1.6's Pi example had an `error` selector that
+  marked a run failed when any model call errored, even one Pi recovered
+  from (the review agent's own long run hit it). An `error` selector can now
+  use `"pick": "last"`: only the last event its `where` matches decides.
+  The Pi example uses it on `turn_end`.
+
+Not done: the Codex `workspace-write` sandbox (with the data folder writable
+and network on) could not be verified, because Codex's Windows sandbox fails
+to start any command on the machine used; the guide describes it as
+unverified, and the full-access Codex example stays.
+
 ## v1.7.0 (2026-10-12)
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in

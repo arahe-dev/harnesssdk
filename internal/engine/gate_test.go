@@ -76,7 +76,7 @@ func TestGateRejectCancelAndDuplicates(t *testing.T) {
 	if _, err := g.Acquire(ctx, []Claim{c}, false, "waiter"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancel: got %v", err)
 	}
-	st, _ := readGate(g.ledger("b"))
+	st, _ := readGate(context.Background(), g.ledger("b"))
 	if len(st.Queue) != 0 || len(st.Held) != 1 {
 		t.Fatalf("a refused or cancelled request must leave the ledger: %+v", st)
 	}
@@ -100,7 +100,7 @@ func TestGateAllOrNothing(t *testing.T) {
 		g.Acquire(ctx, []Claim{{Name: "a", Units: 1, Capacity: 1}, {Name: "z", Units: 1, Capacity: 1}}, false, "both")
 	}()
 	time.Sleep(100 * time.Millisecond)
-	st, _ := readGate(g.ledger("a"))
+	st, _ := readGate(context.Background(), g.ledger("a"))
 	if len(st.Held) != 0 {
 		t.Fatalf("a waiting request holds a: %+v", st)
 	}

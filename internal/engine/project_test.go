@@ -66,7 +66,7 @@ func TestProjectWritesAreTrusted(t *testing.T) {
 	}
 	// Runs in the project use it.
 	f.r, _ = NewRunner(f.home)
-	reps, err := f.r.Start(t.Context(), "local", []string{"hi"}, repo, nil, "", nil)
+	reps, err := f.r.Start(t.Context(), "local", []string{"hi"}, repo, TurnOptions{}, nil)
 	if err != nil || reps[0].Output != "echo: hi" {
 		t.Fatalf("%+v %v", reps, err)
 	}

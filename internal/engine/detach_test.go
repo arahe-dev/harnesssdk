@@ -16,7 +16,7 @@ func TestDetachedRunsShareBudgetAcrossProcesses(t *testing.T) {
 	f := newFixture(t, map[string]int64{"fake": 1})
 	dir := t.TempDir()
 	f.profile("one", "harness: fake\neffect: pure\nbudget: fake=1\nmode: interval\nopts: ms=400 dir="+dir)
-	runs, err := f.r.Prepare("one", []string{"a", "b", "c"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("one", []string{"a", "b", "c"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestDetachedStop(t *testing.T) {
 	f := newFixture(t, nil)
 	pidfile := filepath.Join(t.TempDir(), "pid")
 	f.profile("hang", "harness: fake\neffect: pure\nmode: tree\nopts: pidfile="+pidfile)
-	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestDetachedStop(t *testing.T) {
 func TestWaitReapsLostTurn(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestWaitReapsLostTurn(t *testing.T) {
 func TestWaitTimesOutWhileRunning(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

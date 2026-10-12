@@ -108,7 +108,7 @@ func TestSiblingTurnsFindTheirOwnParent(t *testing.T) {
 func TestParentFoundAmongManyNewerRuns(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("nest", "harness: fake\neffect: pure\nmode: nested\nopts: strip=1 home="+f.home.Dir)
-	runs, err := f.r.Prepare("nest", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("nest", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

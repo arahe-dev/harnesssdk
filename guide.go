@@ -16,4 +16,4 @@ var Guide string
 var Skill string
 
 // Version is the HarnessSDK release.
-const Version = "1.7.0"
+const Version = "2.0.0-next"

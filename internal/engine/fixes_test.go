@@ -21,7 +21,7 @@ func runFingerprint(t *testing.T, f *fixture, profile, prompt string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return requestFingerprint("run", "", p, d, f.cwd, prompt, nil)
+	return requestFingerprint("run", "", p, d, f.cwd, prompt, TurnOptions{})
 }
 
 // A where value with a character JSON escapes briefly is spelled
@@ -83,11 +83,11 @@ func TestRepeatGuardFollowsProfile(t *testing.T) {
 	for range 2 {
 		f.start(context.Background(), "bad", "same")
 	}
-	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, nil, "", nil); !errors.Is(err, ErrRepeated) {
+	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, TurnOptions{}, nil); !errors.Is(err, ErrRepeated) {
 		t.Fatalf("not refused: %v", err)
 	}
 	f.profile("bad", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=other")
-	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, nil, "", nil); err != nil {
+	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, TurnOptions{}, nil); err != nil {
 		t.Fatalf("edited profile refused: %v", err)
 	}
 }
@@ -98,7 +98,7 @@ func TestQueuedTurnRefusedAtExecution(t *testing.T) {
 	f := newFixture(t, nil)
 	f.home.SetConfig("repeat_refuse", 2)
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestRepeatWindowSlides(t *testing.T) {
 func TestLostTurnCounts(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestCompareIsAllOrNothing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.home.Dir, "profiles", "unsafe.md"), []byte(unsafe), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.r.Compare(context.Background(), []string{"a", "unsafe"}, "q", f.cwd, nil, "", nil); err == nil {
+	if _, err := f.r.Compare(context.Background(), []string{"a", "unsafe"}, "q", f.cwd, TurnOptions{}, nil); err == nil {
 		t.Fatal("compare with an unsafe policy accepted")
 	}
 	f.profile("b", "harness: fake\neffect: pure\nmode: echo")
@@ -197,7 +197,7 @@ func TestCompareIsAllOrNothing(t *testing.T) {
 			}
 			return nil
 		}
-		if _, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, nil, "", nil); err == nil {
+		if _, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, TurnOptions{}, nil); err == nil {
 			t.Fatalf("%s: failed creation reported success", stage)
 		}
 		if entries, _ := os.ReadDir(filepath.Join(f.home.Dir, "runs")); len(entries) != 0 {
@@ -239,7 +239,7 @@ func TestQueuedTurnFollowsEditedProfile(t *testing.T) {
 	f := newFixture(t, nil)
 	f.home.SetConfig("repeat_refuse", 2)
 	f.profile("p", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=a")
-	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestQueuedTurnFollowsEditedProfile(t *testing.T) {
 		t.Fatalf("edited profile refused under its old identity: %v", rep.Err)
 	}
 	f.profile("p", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=b")
-	runs, _ = f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
+	runs, _ = f.r.Prepare("p", []string{"x"}, f.cwd, TurnOptions{})
 	f.r.Execute(context.Background(), runs[0].ID, 1)
 	third := runFingerprint(t, f, "p", "x")
 	if len(f.home.failures(before)) != 2 || len(f.home.failures(after)) != 0 || len(f.home.failures(third)) != 1 {
@@ -296,7 +296,7 @@ func TestLostTurnCountedOnce(t *testing.T) {
 		func(r *TurnRecord) { r.Outcome = "running" },                           // its worker died
 		func(r *TurnRecord) { r.Queued = time.Now().Add(-2 * lostAfter).UTC() }, // no worker started
 	} {
-		runs, err := f.r.Prepare("ns", []string{"x"}, f.cwd, nil, "")
+		runs, err := f.r.Prepare("ns", []string{"x"}, f.cwd, TurnOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestLostTurnCountedOnce(t *testing.T) {
 			return nil
 		})
 		for range 3 { // refused each time: the run has no session
-			if _, err := f.r.PrepareSend(runs[0].ID, "more", nil); err == nil || !strings.Contains(err.Error(), "no session") {
+			if _, err := f.r.PrepareSend(runs[0].ID, "more", TurnOptions{}); err == nil || !strings.Contains(err.Error(), "no session") {
 				t.Fatalf("send: %v", err)
 			}
 			f.r.WaitTurn(context.Background(), runs[0].ID, 1)
@@ -379,18 +379,18 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 	defer func() { testHookCreate = nil }()
 	testHookCreate = func(stage string) error {
 		if stage == "record" { // the folder exists, its record does not yet
-			if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+			if rep, err := f.home.GC(context.Background(), future, false); err != nil || len(rep.Runs) != 0 {
 				t.Errorf("gc during creation: %+v %v", rep, err)
 			}
 		}
 		return nil
 	}
-	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	testHookCreate = nil
-	if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+	if rep, err := f.home.GC(context.Background(), future, false); err != nil || len(rep.Runs) != 0 {
 		t.Fatalf("gc of a queued run: %+v %v", rep, err)
 	}
 	if _, err := f.home.LoadRun(runs[0].ID); err != nil {
@@ -408,7 +408,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(live); err != nil {
 		t.Fatal("a live creation was removed")
 	}
@@ -416,7 +416,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 		t.Fatal("a crashed creation was kept")
 	}
 	lk.Close() // the creator dies
-	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("an abandoned creation was kept")
 	}
@@ -433,7 +433,7 @@ func TestReapedTurnCountedByNumber(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "ok", "x")[0] // a session to send to
-	n, err := f.r.PrepareSend(rep.Run.ID, "y", nil)
+	n, err := f.r.PrepareSend(rep.Run.ID, "y", TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,12 +443,12 @@ func TestReapedTurnCountedByNumber(t *testing.T) {
 		return nil
 	})
 	// Another caller queues the next turn before the reaped one is counted.
-	if _, err := f.r.PrepareSend(rep.Run.ID, "z", nil); err != nil {
+	if _, err := f.r.PrepareSend(rep.Run.ID, "z", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	f.r.countReaped(rep.Run.ID, n)
 	p, d, _ := f.r.load("ok", f.cwd)
-	if got := len(f.home.failures(requestFingerprint("send", rep.Run.ID, p, d, f.cwd, "y", nil))); got != 1 {
+	if got := len(f.home.failures(requestFingerprint("send", rep.Run.ID, p, d, f.cwd, "y", TurnOptions{}))); got != 1 {
 		t.Fatalf("reaped turn counted %d times", got)
 	}
 }
@@ -481,7 +481,7 @@ func TestRunIDCollisions(t *testing.T) {
 // creator waits while cleanup holds the coordination lock.
 func TestCreationWaitsForCleanup(t *testing.T) {
 	h := newGateHome(t)
-	unlock, err := h.creationLock() // cleanup, between unlocking and removing a lock file
+	unlock, err := h.creationLock(context.Background()) // cleanup, between unlocking and removing a lock file
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +513,7 @@ func TestReusedCreationIDIsProtected(t *testing.T) {
 	stage := filepath.Join(runs, stagePrefix+id)
 	os.Mkdir(stage, 0o700) // abandoned: its lock file exists, unlocked
 	os.WriteFile(stage+".lock", nil, 0o600)
-	h.collectStage(stagePrefix + id)
+	h.collectStage(context.Background(), stagePrefix+id)
 	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("abandoned creation kept")
 	}
@@ -524,8 +524,8 @@ func TestReusedCreationIDIsProtected(t *testing.T) {
 	runID = func() string { return id }
 	testHookCreate = func(s string) error {
 		if s == "record" { // the creator holds its lock and its folder exists
-			h.collectStage(stagePrefix + id)
-			h.collectStage(stagePrefix + id + ".lock")
+			h.collectStage(context.Background(), stagePrefix+id)
+			h.collectStage(context.Background(), stagePrefix+id+".lock")
 			if _, err := os.Stat(stage); err != nil {
 				t.Error("a live creation was removed")
 			}
@@ -550,7 +550,7 @@ func TestLateFailureDoesNotUndoSuccess(t *testing.T) {
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "ok", "x")[0] // a session to send to
 	id := rep.Run.ID
-	n, err := f.r.PrepareSend(id, "y", nil)
+	n, err := f.r.PrepareSend(id, "y", TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestLateFailureDoesNotUndoSuccess(t *testing.T) {
 	})
 	// ...and pauses before counting it, while the same follow-up is sent
 	// again and succeeds.
-	m, err := f.r.PrepareSend(id, "y", nil)
+	m, err := f.r.PrepareSend(id, "y", TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,11 +570,11 @@ func TestLateFailureDoesNotUndoSuccess(t *testing.T) {
 	}
 	f.r.countReaped(id, n) // the waiter resumes
 	p, d, _ := f.r.load("ok", f.cwd)
-	fp := requestFingerprint("send", id, p, d, f.cwd, "y", nil)
+	fp := requestFingerprint("send", id, p, d, f.cwd, "y", TurnOptions{})
 	if got := len(f.home.failures(fp)); got != 0 {
 		t.Fatalf("the late failure undid the success: %d failures", got)
 	}
-	if _, err := f.r.PrepareSend(id, "y", nil); err != nil {
+	if _, err := f.r.PrepareSend(id, "y", TurnOptions{}); err != nil {
 		t.Fatalf("the next identical send was refused: %v", err)
 	}
 }
