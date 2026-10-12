@@ -103,9 +103,10 @@ branch included, whatever its age. Only what is known is acted on: a mark
 or commit file that cannot be read leaves the run alone (and `Execute`
 refuses it), a run that ever started a turn is never treated as abandoned,
 and a rollback removes a worktree only when git finds it clean (`status
---porcelain --ignored --untracked-files=all`), and a folder that is not a
-worktree (no `.git`) only when it is empty: anything it cannot inspect is
-kept.
+--porcelain --ignored --untracked-files=all --ignore-submodules=none`) and
+it holds no repository of its own (an initialized submodule), and a folder
+that is not a worktree (no `.git`) only when it is empty: anything it
+cannot inspect is kept.
 
 A `--worktree` run gets its worktree and branch while staged. Each name is
 claimed by an operation that fails if the name is taken (`mkdir` of the
@@ -145,8 +146,10 @@ and its profile's) until it is out of the window, or someone removes it:
 spending limits fail closed. Turns recorded before v2 count by their run
 records until v2 saves the record, or `gc` removes it, either of which
 first moves their costs into the ledger (`<run>-<turn>-v1.json`, the same
-name each time); a turn whose cost is there counts only there. Entries go
-once they are two windows old.
+name each time); a turn whose cost is there counts only there. Spending
+reads the ledger before the v1 records and again after them, so a cost
+moved while it reads is counted once, from wherever it was when read.
+Entries go once they are two windows old.
 
 ## The repeat guard
 

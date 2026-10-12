@@ -177,13 +177,22 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	if drop && made {
 		// The run never ran, so its worktree should hold nothing of
 		// anyone's: it is removed only once git finds it clean, every
-		// untracked and ignored file shown whatever the configuration.
-		status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain", "--ignored", "--untracked-files=all")
+		// untracked, ignored and submodule change shown whatever the
+		// configuration, and it holds no repository of its own (a
+		// submodule's changes are its own repository's to report).
+		status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=none")
 		if err != nil {
 			return fmt.Errorf("cannot tell whether worktree %s holds changes, so it is kept: %w", run.Worktree, err)
 		}
 		if status != "" {
 			return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
+		}
+		nested, err := holdsRepository(run.Worktree)
+		if err != nil {
+			return fmt.Errorf("worktree %s cannot be inspected, so it is kept: %w", run.Worktree, err)
+		}
+		if nested != "" {
+			return fmt.Errorf("worktree %s holds a submodule or another repository (%s), so it is kept", run.Worktree, nested)
 		}
 	}
 	if drop && exists && !made {
@@ -255,6 +264,27 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 		}
 	}
 	return nil
+}
+
+// holdsRepository returns a repository (a .git entry) found anywhere below
+// root other than root's own, or "".
+func holdsRepository(root string) (string, error) {
+	found := ""
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case d.Name() != ".git":
+			return nil
+		case path != filepath.Join(root, ".git"):
+			found = path
+			return fs.SkipAll
+		case d.IsDir():
+			return fs.SkipDir
+		}
+		return nil
+	})
+	return found, err
 }
 
 // commitWork commits what is uncommitted in run's worktree, if anything,

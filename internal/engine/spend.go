@@ -183,15 +183,70 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 			s.unknownMine = what
 		}
 	}
+	add := func(p string, usd float64) {
+		s.all += usd
+		if p == profile {
+			s.mine += usd
+		}
+	}
+	// The ledger is read before the v1 records and again after them: a v1
+	// cost moved to the ledger while the records were read (the record
+	// upgraded or removed since) is counted from the ledger then, and one
+	// the record counted (byRecord) is not counted again.
+	seen, byRecord := map[string]bool{}, map[string]bool{}
+	if err := h.readLedger(since, profile, seen, byRecord, add, unknown); err != nil {
+		return s, err
+	}
+	if testHookSpending != nil {
+		testHookSpending()
+	}
+	// Turns recorded before v2 count by their run records, by when they
+	// ended, unless the ledger counted them; only run folders changed since
+	// then are read.
+	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
+	if err != nil {
+		return s, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) {
+			continue
+		}
+		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
+			continue
+		}
+		run, err := h.LoadRun(e.Name())
+		if err != nil || run.Format >= runFormat {
+			continue
+		}
+		for _, t := range run.Turns {
+			name := filepath.Base(v1SpendPath(h.Dir, run.ID, t.N))
+			if t.Ended.Before(since) || seen[name] {
+				continue
+			}
+			byRecord[name] = true
+			add(run.Profile, t.Metrics["cost_usd"])
+		}
+	}
+	return s, h.readLedger(since, profile, seen, byRecord, add, unknown)
+}
+
+// testHookSpending, when set, runs between spending's first reading of
+// the ledger and its reading of the v1 records.
+var testHookSpending func()
+
+// readLedger counts the ledger's entries not seen yet, nor counted by
+// their v1 records.
+func (h *Home) readLedger(since time.Time, profile string, seen, byRecord map[string]bool, add func(string, float64), unknown func(bool, string)) error {
 	files, err := os.ReadDir(h.spendDir())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return s, err
+		return err
 	}
 	for _, f := range files {
 		name := f.Name()
-		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			continue // an entry being written
+		if seen[name] || byRecord[name] || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue // counted already, or an entry being written
 		}
+		seen[name] = true
 		path := filepath.Join(h.spendDir(), name)
 		info, err := f.Info()
 		if err == nil && info.ModTime().Before(since) {
@@ -222,51 +277,10 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 		case e.Running:
 			unknown(e.Profile == profile, fmt.Sprintf("what run %s turn %d attempt %d cost is unknown (it ended before its cost was written to %s)", e.Run, e.Turn, e.Attempt, path))
 		default:
-			s.all += *e.USD
-			if e.Profile == profile {
-				s.mine += *e.USD
-			}
+			add(e.Profile, *e.USD)
 		}
 	}
-	// Turns recorded before v2 count by their run records, by when they
-	// ended; only run folders changed since then are read.
-	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
-	if err != nil {
-		return s, err
-	}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) {
-			continue
-		}
-		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
-			continue
-		}
-		run, err := h.LoadRun(e.Name())
-		if err != nil || run.Format >= runFormat {
-			continue
-		}
-		for _, t := range run.Turns {
-			if t.Ended.Before(since) {
-				continue
-			}
-			// A cost already moved to the ledger, by a save or a gc that
-			// did not finish, counts there.
-			_, err := os.Stat(v1SpendPath(h.Dir, run.ID, t.N))
-			switch {
-			case err == nil:
-				continue
-			case !errors.Is(err, fs.ErrNotExist):
-				unknown(run.Profile == profile, fmt.Sprintf("whether run %s turn %d's cost is in the ledger cannot be told (%v)", run.ID, t.N, err))
-				continue
-			}
-			c := t.Metrics["cost_usd"]
-			s.all += c
-			if run.Profile == profile {
-				s.mine += c
-			}
-		}
-	}
-	return s, nil
+	return nil
 }
 
 // turnRunning reports whether the turn of entry e is executing: in the

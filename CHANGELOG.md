@@ -169,6 +169,12 @@ regression tests:
   same id cannot make an earlier unknown entry look like it is running.
 - A closed entry without a cost, or with a null one, is not valid.
 
+Its ninth review found 1 high and 1 medium issue, also fixed with
+regression tests: a rollback also shows submodule changes whatever the
+configuration, and keeps a worktree that holds a submodule or another
+repository; and spending reads the ledger again after the v1 records, so a
+cost moved to the ledger while it reads counts once.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now
