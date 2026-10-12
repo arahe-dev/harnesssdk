@@ -37,7 +37,7 @@ func TestWorkerDeathEndsAgentTree(t *testing.T) {
 	f := newFixture(t, nil)
 	pidfile := filepath.Join(t.TempDir(), "pid")
 	f.profile("hang", "harness: fake\neffect: pure\nmode: tree\nopts: pidfile="+pidfile)
-	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("hang", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestInvalidProjectPolicyFailsFast(t *testing.T) {
 	defer cancel()
 	// Since v1.7 the policy is checked before the run is created.
 	start := time.Now()
-	reps, err := f.r.Start(ctx, "unsafe", []string{"x"}, repo, nil, "", nil)
+	reps, err := f.r.Start(ctx, "unsafe", []string{"x"}, repo, TurnOptions{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unsafe retry") || reps != nil || time.Since(start) > 2*time.Second {
 		t.Fatalf("want an immediate policy error, got %+v %v", reps, err)
 	}
@@ -96,7 +96,7 @@ func TestWaitTurnStaysOnItsTurn(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "echo", "first")[0]
-	if _, err := f.r.PrepareSend(rep.Run.ID, "second, queued", nil); err != nil {
+	if _, err := f.r.PrepareSend(rep.Run.ID, "second, queued", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -116,7 +116,7 @@ func TestDetachedWorkerGetsEnvironment(t *testing.T) {
 	t.Setenv("HARNESS_TEST_SECRET", "s3cret-from-the-shell")
 	f := newFixture(t, nil)
 	f.profile("env", "harness: fake\neffect: pure\nmode: env")
-	runs, err := f.r.Prepare("env", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("env", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestShutdownWithdrawsGateWaiters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer holder.Release()
-	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("p", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestShutdownWithdrawsGateWaiters(t *testing.T) {
 func TestLostTurnRemovesEnvironmentFile(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
-	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	runs, err := f.r.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

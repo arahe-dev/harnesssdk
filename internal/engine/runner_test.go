@@ -85,6 +85,11 @@ func fakeHarness(args []string) int {
 			return 1
 		}
 		fmt.Println("ok after retry")
+	case "write": // writes a file in its working folder
+		os.WriteFile(opts["file"], []byte("written by the agent"), 0o644)
+		fmt.Println("wrote " + opts["file"])
+	case "version":
+		fmt.Println("fake 1.2.3")
 	case "ratelimited":
 		if _, err := os.Stat(opts["state"]); err != nil {
 			os.WriteFile(opts["state"], nil, 0o644)
@@ -219,7 +224,7 @@ func (f *fixture) saveProfile(name, header string) {
 
 func (f *fixture) start(ctx context.Context, profile string, tasks ...string) []Report {
 	f.t.Helper()
-	reps, err := f.r.Start(ctx, profile, tasks, f.cwd, nil, "", nil)
+	reps, err := f.r.Start(ctx, profile, tasks, f.cwd, TurnOptions{}, nil)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -259,7 +264,7 @@ func TestSessionMintAndResume(t *testing.T) {
 	if len(sid) != 36 || rep.Output != "flags: --sid "+sid {
 		t.Fatalf("first turn: session %q output %q", sid, rep.Output)
 	}
-	rep2, err := f.r.Send(context.Background(), rep.Run.ID, "second", nil)
+	rep2, err := f.r.Send(context.Background(), rep.Run.ID, "second", TurnOptions{})
 	if err != nil || rep2.Err != nil {
 		t.Fatal(err, rep2.Err)
 	}
@@ -411,10 +416,10 @@ func TestUnfinishedTurnRefusesAnother(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "echo", "hi")[0]
-	if _, err := f.r.PrepareSend(rep.Run.ID, "queued, never executed", nil); err != nil {
+	if _, err := f.r.PrepareSend(rep.Run.ID, "queued, never executed", TurnOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.r.PrepareSend(rep.Run.ID, "again", nil)
+	_, err := f.r.PrepareSend(rep.Run.ID, "again", TurnOptions{})
 	if err == nil || OutcomeName(err) != "throttled" || !strings.Contains(err.Error(), "busy with turn 2") {
 		t.Fatalf("want a throttled busy error, got %v", err)
 	}
@@ -484,7 +489,7 @@ func TestSendRejectsHarnessChange(t *testing.T) {
 	f.profile("p", "harness: fake\neffect: pure\nmode: echo")
 	rep := f.start(context.Background(), "p", "x")[0]
 	f.saveProfile("p", "harness: other\neffect: pure\nmode: echo")
-	if _, err := f.r.Send(context.Background(), rep.Run.ID, "y", nil); err == nil || !strings.Contains(err.Error(), "cannot move between harnesses") {
+	if _, err := f.r.Send(context.Background(), rep.Run.ID, "y", TurnOptions{}); err == nil || !strings.Contains(err.Error(), "cannot move between harnesses") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -494,7 +499,7 @@ func TestExtraCannotSetBuiltins(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("args", "harness: fake\neffect: pure\nmode: args")
 	rep := f.start(context.Background(), "args", "x")[0]
-	rep2, err := f.r.Send(context.Background(), rep.Run.ID, "y", Vars{"new_session": "forged", "prompt": "forged"})
+	rep2, err := f.r.Send(context.Background(), rep.Run.ID, "y", TurnOptions{Extra: Vars{"new_session": "forged", "prompt": "forged"}})
 	if err != nil || rep2.Err != nil {
 		t.Fatal(err, rep2.Err)
 	}

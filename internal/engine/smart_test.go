@@ -98,7 +98,7 @@ func TestRepeatGuard(t *testing.T) {
 			t.Fatal("hint not recorded for wait and result")
 		}
 	}
-	_, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, nil, "", nil)
+	_, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, TurnOptions{}, nil)
 	if !errors.Is(err, ErrRepeated) || OutcomeName(err) != "permanent" {
 		t.Fatalf("fourth identical request: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRepeatGuard(t *testing.T) {
 	}
 	// Turned off.
 	f.home.SetConfig("repeat_refuse", 0)
-	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, nil, "", nil); err != nil {
+	if _, err := f.r.Start(context.Background(), "bad", []string{"same"}, f.cwd, TurnOptions{}, nil); err != nil {
 		t.Fatalf("with repeat_refuse 0: %v", err)
 	}
 }
@@ -131,7 +131,7 @@ func TestCompare(t *testing.T) {
 	usageDef(f)
 	f.profile("a", "harness: fake\neffect: pure\nmode: echo")
 	f.profile("b", "harness: fakeusage\neffect: pure\nmode: usage\nmodel: m-b")
-	reps, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, nil, "eval", nil)
+	reps, err := f.r.Compare(context.Background(), []string{"a", "b"}, "q", f.cwd, TurnOptions{Kind: "eval"}, nil)
 	if err != nil || len(reps) != 2 {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestCompare(t *testing.T) {
 	}
 	before, _ := f.home.Runs(0)
 	for _, bad := range [][]string{{"a"}, {"a", "a"}, {"a", "missing"}} {
-		if _, err := f.r.Compare(context.Background(), bad, "q", f.cwd, nil, "", nil); err == nil {
+		if _, err := f.r.Compare(context.Background(), bad, "q", f.cwd, TurnOptions{}, nil); err == nil {
 			t.Errorf("compare %v accepted", bad)
 		}
 	}
@@ -158,7 +158,7 @@ func TestStats(t *testing.T) {
 	f.profile("b", "harness: fakeusage\neffect: pure\nmode: usage\nmodel: m-b")
 	f.profile("bad", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=boom")
 	f.start(context.Background(), "b", "1", "2")
-	if _, err := f.r.Start(context.Background(), "b", []string{"3"}, f.cwd, nil, "review", nil); err != nil {
+	if _, err := f.r.Start(context.Background(), "b", []string{"3"}, f.cwd, TurnOptions{Kind: "review"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.start(context.Background(), "bad", "x")

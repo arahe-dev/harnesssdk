@@ -16,17 +16,17 @@ func TestMaxDepth(t *testing.T) {
 	if err := f.home.SetConfig("max_depth", 1); err != nil {
 		t.Fatal(err)
 	}
-	top, err := f.r.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	top, err := f.r.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil || top[0].Depth != 0 {
 		t.Fatalf("top-level run: %v %v", top, err)
 	}
 	child, _ := NewRunnerFor(f.home, top[0].ID, nil)
-	mid, err := child.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	mid, err := child.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if err != nil || mid[0].Depth != 1 || mid[0].Parent != top[0].ID {
 		t.Fatalf("nested run: %+v %v", mid, err)
 	}
 	grandchild, _ := NewRunnerFor(f.home, mid[0].ID, nil)
-	_, err = grandchild.Prepare("echo", []string{"x"}, f.cwd, nil, "")
+	_, err = grandchild.Prepare("echo", []string{"x"}, f.cwd, TurnOptions{})
 	if !errors.Is(err, ErrTooDeep) || OutcomeName(err) != "permanent" {
 		t.Fatalf("run below max_depth: err = %v (%s)", err, OutcomeName(err))
 	}
@@ -54,13 +54,13 @@ func TestMaxRunning(t *testing.T) {
 	// A nested turn whose ancestors hold no slot fails as throttled at once.
 	nested, _ := NewRunnerFor(f.home, rep.Run.ID, []string{"tsomeoneelse"})
 	start := time.Now()
-	reps, err := nested.Start(context.Background(), "echo", []string{"x"}, f.cwd, nil, "", nil)
+	reps, err := nested.Start(context.Background(), "echo", []string{"x"}, f.cwd, TurnOptions{}, nil)
 	if err != nil || OutcomeName(reps[0].Err) != "throttled" || time.Since(start) > 5*time.Second {
 		t.Fatalf("nested turn with no slot free: %v %s %v", err, OutcomeName(reps[0].Err), reps[0].Err)
 	}
 	// One whose ancestor holds the only slot could never run.
 	nested, _ = NewRunnerFor(f.home, rep.Run.ID, []string{held.ID})
-	reps, _ = nested.Start(context.Background(), "echo", []string{"x"}, f.cwd, nil, "", nil)
+	reps, _ = nested.Start(context.Background(), "echo", []string{"x"}, f.cwd, TurnOptions{}, nil)
 	if !errors.Is(reps[0].Err, ErrWouldDeadlock) {
 		t.Fatalf("nested turn under the holder: %v", reps[0].Err)
 	}

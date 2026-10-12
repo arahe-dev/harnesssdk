@@ -29,13 +29,23 @@ type Profile struct {
 	Backoff time.Duration
 	// MaxWait bounds how long a turn waits at the gate for its budgets,
 	// keys and slot; 0 takes config max_wait_minutes.
-	MaxWait   time.Duration
-	Budget    []hertasdk.Requirement
-	Serialize string // key template; runs sharing a key run one at a time
-	Vars      Vars
-	System    string
-	Scope     string // project or global, once loaded
-	Path      string
+	MaxWait time.Duration
+	// Check is a command line run as is in the agent's working folder
+	// once it answers; the turn succeeds only if it exits 0. CheckTimeout
+	// bounds it (default 10m).
+	Check        string
+	CheckTimeout time.Duration
+	// Worktree runs every new run of the profile in a git worktree.
+	Worktree bool
+	// SpendLimit caps what the profile's turns cost over 24 hours, in
+	// dollars, as the CLI reports it; 0 means no limit.
+	SpendLimit float64
+	Budget     []hertasdk.Requirement
+	Serialize  string // key template; runs sharing a key run one at a time
+	Vars       Vars
+	System     string
+	Scope      string // project or global, once loaded
+	Path       string
 
 	header []headerLine // kept in order so Set preserves the file
 }
@@ -49,7 +59,8 @@ type headerLine struct {
 var reservedKeys = map[string]bool{
 	"harness": true, "description": true, "effect": true, "admission": true,
 	"timeout": true, "retry": true, "budget": true, "serialize": true,
-	"backoff": true, "max_wait": true,
+	"backoff": true, "max_wait": true, "check": true, "check_timeout": true, "worktree": true,
+	"spend_limit_usd": true,
 }
 
 // builtinVars are filled in by HarnessSDK for every attempt; a profile
@@ -185,6 +196,17 @@ func (p *Profile) apply(key, value string) error {
 		p.Backoff, err = parseTimeout(value)
 	case "max_wait":
 		p.MaxWait, err = parseTimeout(value)
+	case "check":
+		p.Check = value
+	case "check_timeout":
+		p.CheckTimeout, err = parseTimeout(value)
+	case "worktree":
+		p.Worktree = Vars{"v": value}.truthy("v")
+	case "spend_limit_usd":
+		p.SpendLimit, err = strconv.ParseFloat(strings.TrimPrefix(value, "$"), 64)
+		if err == nil && (p.SpendLimit < 0 || !finite(p.SpendLimit)) {
+			err = fmt.Errorf("%q is not a number of dollars", value)
+		}
 	case "budget":
 		p.Budget, err = parseBudget(value)
 	case "serialize":

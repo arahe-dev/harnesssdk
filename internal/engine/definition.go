@@ -51,6 +51,9 @@ type Definition struct {
 	// one group is how long the provider asked to wait: seconds ("30") or
 	// a duration ("1m30s"). A retry waits at least that long.
 	RetryAfter string `json:"retry_after,omitempty"`
+	// Version are the arguments that make the CLI print its version, for
+	// harness def check; the default is --version.
+	Version    []string `json:"version,omitempty"`
 	retryAfter *regexp.Regexp
 }
 

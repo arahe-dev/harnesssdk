@@ -86,10 +86,13 @@ type Config struct {
 	// turn that would wait behind more fails at once as throttled. 0
 	// means no limit.
 	MaxQueue int `json:"max_queue"`
+	// SpendLimitUSD caps what turns on this machine cost over 24 hours, in
+	// whole dollars, as the CLIs report it; 0 means no limit.
+	SpendLimitUSD int `json:"spend_limit_usd"`
 }
 
 // ConfigKeys are the settable keys, in display order.
-var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse", "max_wait_minutes", "max_queue"}
+var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse", "max_wait_minutes", "max_queue", "spend_limit_usd"}
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
@@ -114,7 +117,7 @@ func (h *Home) Config() (Config, error) {
 	if err := checkFormat("config.json", c.Format); err != nil {
 		return c, err
 	}
-	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 || c.MaxWaitMinutes < 0 || c.MaxQueue < 0 {
+	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 || c.MaxWaitMinutes < 0 || c.MaxQueue < 0 || c.SpendLimitUSD < 0 {
 		return c, errors.New("config.json: limits must be ≥ 0")
 	}
 	return c, nil
@@ -152,6 +155,8 @@ func (h *Home) SetConfig(key string, value int) error {
 		c.MaxWaitMinutes = value
 	case "max_queue":
 		c.MaxQueue = value
+	case "spend_limit_usd":
+		c.SpendLimitUSD = value
 	}
 	c.Format = formatVersion
 	data, _ := json.MarshalIndent(c, "", "  ")

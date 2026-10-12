@@ -91,7 +91,8 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	release := func() { state.Close(); exec.Close() }
 	// Under the locks, the record decides; one this harness cannot read is
 	// left alone, and so is a run still taking shape.
-	if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) || r.settling() {
+	r, err := h.LoadRun(id)
+	if err != nil || !r.lastActive().Before(cutoff) || r.settling() {
 		release()
 		return -1, nil
 	}
@@ -100,6 +101,7 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 		release()
 		return size, err
 	}
+	removeWorktree(r, false) // its branch, the agent's work, stays
 	// The record goes first: from then on the run does not exist. The lock
 	// files, open here, go last (Windows cannot delete an open file).
 	var errs []error

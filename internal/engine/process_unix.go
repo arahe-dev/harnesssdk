@@ -26,6 +26,13 @@ type tree struct {
 
 // newProcess wraps the CLI in the guard. extra are files the guard holds
 // for the tree's lifetime.
+func setCmdLine(*exec.Cmd, string) {}
+
+// shellArgv runs a command line with /bin/sh.
+func shellArgv(line string) (argv []string, cmdLine string) {
+	return []string{"/bin/sh", "-c", line}, ""
+}
+
 func newProcess(path string, args []string, extra []*os.File) (*exec.Cmd, *tree, error) {
 	self, err := os.Executable()
 	if err != nil {

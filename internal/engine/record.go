@@ -17,17 +17,24 @@ import (
 // harness session and turns. It lives in runs/<id>/ with the prompts,
 // answers and raw output of every turn.
 type Run struct {
-	Format  int          `json:"format"`
-	ID      string       `json:"id"`
-	Profile string       `json:"profile"`
-	Harness string       `json:"harness"`
-	Cwd     string       `json:"cwd"`
-	Parent  string       `json:"parent,omitempty"` // the harness run whose agent started this one
-	Depth   int          `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
-	Kind    string       `json:"kind,omitempty"`   // a label for grouping stats, such as review
-	Session string       `json:"session,omitempty"`
-	Created time.Time    `json:"created"`
-	Turns   []TurnRecord `json:"turns"`
+	Format  int    `json:"format"`
+	ID      string `json:"id"`
+	Profile string `json:"profile"`
+	Harness string `json:"harness"`
+	Cwd     string `json:"cwd"`
+	Parent  string `json:"parent,omitempty"` // the harness run whose agent started this one
+	Depth   int    `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
+	Kind    string `json:"kind,omitempty"`   // a label for grouping stats, such as review
+	// Worktree is the git worktree a run started with --worktree works in,
+	// on its own Branch; Workdir is the agent's folder inside it, the
+	// counterpart of Cwd, whose project and profiles still apply.
+	Worktree string       `json:"worktree,omitempty"`
+	Branch   string       `json:"branch,omitempty"`
+	Base     string       `json:"base,omitempty"` // the commit the branch was made from
+	Workdir  string       `json:"workdir,omitempty"`
+	Session  string       `json:"session,omitempty"`
+	Created  time.Time    `json:"created"`
+	Turns    []TurnRecord `json:"turns"`
 
 	dir string
 }
@@ -49,6 +56,9 @@ type TurnRecord struct {
 	Hint     string    `json:"hint,omitempty"`    // advice for the caller, such as the repeat guard's
 	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
 	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
+	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
+	Check    string    `json:"check,omitempty"`   // the check command it ran
+	Checked  string    `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -149,8 +159,9 @@ func (s *stagedRun) publish() error {
 	return nil
 }
 
-// abort removes the prepared run.
+// abort removes the prepared run, with the worktree and branch made for it.
 func (s *stagedRun) abort() {
+	removeWorktree(s.Run, true)
 	os.RemoveAll(s.dir)
 	s.release()
 }
@@ -276,6 +287,14 @@ func (r *Run) Save() error {
 		return err
 	}
 	return writeFileAtomic(r.Path("run.json"), append(data, '\n'))
+}
+
+// AgentDir is the folder the run's agent works in.
+func (r *Run) AgentDir() string {
+	if r.Workdir != "" {
+		return r.Workdir
+	}
+	return r.Cwd
 }
 
 // Path names a file in the run directory.
