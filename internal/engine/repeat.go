@@ -38,6 +38,10 @@ var now = time.Now
 type repeatRecord struct {
 	Format   int             `json:"format"`
 	Failures []repeatFailure `json:"failures"` // consecutive, oldest first
+	// Cleared is when the request last succeeded. Outcomes are ordered by
+	// when their turns ended, not by when they are counted: a failure
+	// that ended before it, counted late, does not undo the success.
+	Cleared time.Time `json:"cleared,omitzero"`
 }
 
 // A failure names its turn, so one turn is counted once however often its
@@ -83,16 +87,23 @@ func (h *Home) repeatPath(fp string) string { return filepath.Join(h.repeatDir()
 // file that is never removed cannot be removed while it is held.
 func (h *Home) repeatLock() string { return filepath.Join(h.Dir, "repeats.lock") }
 
-// failures are a request's consecutive failures within the window.
-func (h *Home) failures(fp string) []repeatFailure {
+// record reads a request's record, keeping only the failures since its
+// last success within the window.
+func (h *Home) record(fp string) repeatRecord {
 	var rec repeatRecord
 	data, err := readShared(h.repeatPath(fp))
 	if err != nil || json.Unmarshal(data, &rec) != nil || checkFormat("repeat record", rec.Format) != nil {
-		return nil // missing, or from an older harness that counted differently: start over
+		return repeatRecord{} // missing, or from an older harness that counted differently: start over
 	}
 	cutoff := now().Add(-repeatWindow)
-	return slices.DeleteFunc(rec.Failures, func(f repeatFailure) bool { return f.At.Before(cutoff) })
+	rec.Failures = slices.DeleteFunc(rec.Failures, func(f repeatFailure) bool {
+		return f.At.Before(cutoff) || !f.At.After(rec.Cleared)
+	})
+	return rec
 }
+
+// failures are a request's consecutive failures within the window.
+func (h *Home) failures(fp string) []repeatFailure { return h.record(fp).Failures }
 
 // checkRepeat refuses a request that has failed repeat_refuse times in a
 // row within the window. It is checked when a turn is queued and again
@@ -114,10 +125,11 @@ func (h *Home) checkRepeat(fp string) error {
 	return nil
 }
 
-// noteRepeat counts a finished turn of a request and returns a hint for the
-// caller once the request has failed repeat_warn times in a row. Counting
-// the same turn again changes nothing.
-func (h *Home) noteRepeat(fp, turn, outcome string) string {
+// noteRepeat counts a turn of a request that ended at the given time and
+// returns a hint for the caller once the request has failed repeat_warn
+// times in a row. Counting the same turn again changes nothing, and a
+// failure that ended before the request last succeeded is not counted.
+func (h *Home) noteRepeat(fp, turn, outcome string, ended time.Time) string {
 	cfg, err := h.Config()
 	if fp == "" || err != nil || cfg.RepeatWarn == 0 && cfg.RepeatRefuse == 0 {
 		return ""
@@ -134,16 +146,23 @@ func (h *Home) noteRepeat(fp, turn, outcome string) string {
 		return ""
 	}
 	defer unlock()
-	if outcome == "success" {
-		os.Remove(h.repeatPath(fp))
-		return ""
+	rec := h.record(fp)
+	rec.Format = formatVersion
+	switch {
+	case outcome == "success":
+		if ended.After(rec.Cleared) {
+			rec.Cleared = ended.UTC()
+		}
+		rec.Failures = slices.DeleteFunc(rec.Failures, func(f repeatFailure) bool { return !f.At.After(rec.Cleared) })
+	case !ended.After(rec.Cleared):
+		return "" // it ended before the request last succeeded
+	case !slices.ContainsFunc(rec.Failures, func(f repeatFailure) bool { return f.Turn == turn }):
+		rec.Failures = append(rec.Failures, repeatFailure{At: ended.UTC(), Turn: turn})
+		slices.SortFunc(rec.Failures, func(a, b repeatFailure) int { return a.At.Compare(b.At) })
 	}
-	fails := h.failures(fp)
-	if !slices.ContainsFunc(fails, func(f repeatFailure) bool { return f.Turn == turn }) {
-		fails = append(fails, repeatFailure{At: now().UTC(), Turn: turn})
-	}
-	data, _ := json.Marshal(repeatRecord{Format: formatVersion, Failures: fails})
-	if writeFileAtomic(h.repeatPath(fp), data) != nil || cfg.RepeatWarn == 0 || len(fails) < cfg.RepeatWarn {
+	data, _ := json.Marshal(rec)
+	fails := rec.Failures
+	if writeFileAtomic(h.repeatPath(fp), data) != nil || outcome == "success" || cfg.RepeatWarn == 0 || len(fails) < cfg.RepeatWarn {
 		return ""
 	}
 	limit := "it will not be refused"
@@ -168,8 +187,12 @@ func (h *Home) pruneRepeats() {
 	defer unlock()
 	for _, e := range entries {
 		name := e.Name()
-		if fp, ok := strings.CutSuffix(name, ".json"); ok && len(h.failures(fp)) == 0 {
-			os.Remove(filepath.Join(h.repeatDir(), name))
+		// A success older than the window orders nothing that can still
+		// count: every failure it could outrank is out of the window too.
+		if fp, ok := strings.CutSuffix(name, ".json"); ok {
+			if rec := h.record(fp); len(rec.Failures) == 0 && now().Sub(rec.Cleared) > repeatWindow {
+				os.Remove(filepath.Join(h.repeatDir(), name))
+			}
 		}
 		// v1.6 kept a lock file per record; none is taken any more.
 		if info, err := e.Info(); err == nil && strings.HasSuffix(name, ".lock") && now().Sub(info.ModTime()) > 24*time.Hour {

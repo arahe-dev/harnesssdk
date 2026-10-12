@@ -110,9 +110,9 @@ func TestRepeatGuard(t *testing.T) {
 	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
 	fp := runFingerprint(t, f, "ok", "x")
 	for i := range 2 {
-		f.home.noteRepeat(fp, fmt.Sprint("r/", i), "permanent")
+		f.home.noteRepeat(fp, fmt.Sprint("r/", i), "permanent", now())
 	}
-	if h := f.home.noteRepeat(fp, "r/9", "throttled"); h != "" || len(f.home.failures(fp)) != 2 {
+	if h := f.home.noteRepeat(fp, "r/9", "throttled", now()); h != "" || len(f.home.failures(fp)) != 2 {
 		t.Fatal("a throttled turn counted")
 	}
 	f.start(context.Background(), "ok", "x")

@@ -104,7 +104,7 @@ func TestQueuedTurnRefusedAtExecution(t *testing.T) {
 	}
 	fp := runFingerprint(t, f, "ok", "x")
 	for i := range 2 {
-		f.home.noteRepeat(fp, fmt.Sprint("other/", i), "permanent")
+		f.home.noteRepeat(fp, fmt.Sprint("other/", i), "permanent", now())
 	}
 	rep := f.r.Execute(context.Background(), runs[0].ID, 1)
 	if !errors.Is(rep.Err, ErrRepeated) || rep.Outcome != "permanent" {
@@ -123,7 +123,7 @@ func TestRepeatWindowSlides(t *testing.T) {
 	defer func() { now = time.Now }()
 	for _, at := range []time.Duration{0, 50 * time.Minute, 100 * time.Minute} {
 		now = func() time.Time { return start.Add(at) }
-		h.noteRepeat("fp", at.String(), "permanent")
+		h.noteRepeat("fp", at.String(), "permanent", now())
 	}
 	if n := len(h.failures("fp")); n != 2 {
 		t.Fatalf("failures within the hour: %d, want 2", n)
@@ -132,7 +132,7 @@ func TestRepeatWindowSlides(t *testing.T) {
 		t.Fatalf("refused with two failures in the hour: %v", err)
 	}
 	now = func() time.Time { return start.Add(4 * time.Hour) }
-	h.noteRepeat("other", "r/1", "permanent")
+	h.noteRepeat("other", "r/1", "permanent", now())
 	h.pruneRepeats()
 	if _, err := os.Stat(h.repeatPath("fp")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("expired record kept")
@@ -245,7 +245,7 @@ func TestQueuedTurnFollowsEditedProfile(t *testing.T) {
 	}
 	before := runFingerprint(t, f, "p", "x")
 	for i := range 2 {
-		f.home.noteRepeat(before, fmt.Sprint("other/", i), "permanent")
+		f.home.noteRepeat(before, fmt.Sprint("other/", i), "permanent", now())
 	}
 	f.profile("p", "harness: fake\neffect: pure\nmode: echo") // the fix
 	after := runFingerprint(t, f, "p", "x")
@@ -331,7 +331,7 @@ func TestRepeatCountingIsAtomic(t *testing.T) {
 	done := make(chan bool)
 	for i := range 20 {
 		go func() {
-			h.noteRepeat("fp", fmt.Sprint("r/", i), "permanent")
+			h.noteRepeat("fp", fmt.Sprint("r/", i), "permanent", now())
 			h.pruneRepeats()
 			done <- true
 		}()
@@ -361,7 +361,7 @@ func TestCountedTurnNotRecounted(t *testing.T) {
 		run.Turns[0].Outcome, run.Turns[0].Ended = "running", time.Time{}
 		return nil
 	})
-	f.home.noteRepeat(fp, "other/1", "success") // an identical request succeeded
+	f.home.noteRepeat(fp, "other/1", "success", now()) // an identical request succeeded
 	if _, done, err := f.r.WaitTurn(context.Background(), rep.Run.ID, 1); !done || err != nil {
 		t.Fatalf("reap: %v %v", done, err)
 	}
@@ -537,5 +537,44 @@ func TestReusedCreationIDIsProtected(t *testing.T) {
 	}
 	if _, err := os.Stat(stage + ".lock"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the creation lock file was left behind")
+	}
+}
+
+// Round six of the review.
+
+// A lost turn counted only after an identical later turn succeeded does
+// not undo that success.
+func TestLateFailureDoesNotUndoSuccess(t *testing.T) {
+	f := newFixture(t, nil)
+	f.home.SetConfig("repeat_refuse", 1)
+	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
+	rep := f.start(context.Background(), "ok", "x")[0] // a session to send to
+	id := rep.Run.ID
+	n, err := f.r.PrepareSend(id, "y", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.home.updateRun(id, func(run *Run) error { // turn n's worker died; a waiter reaps it...
+		run.Turns[n-1].Outcome = "running"
+		f.r.reapLost(run)
+		return nil
+	})
+	// ...and pauses before counting it, while the same follow-up is sent
+	// again and succeeds.
+	m, err := f.r.PrepareSend(id, "y", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep := f.r.Execute(context.Background(), id, m); rep.Err != nil {
+		t.Fatal(rep.Err)
+	}
+	f.r.countReaped(id, n) // the waiter resumes
+	p, d, _ := f.r.load("ok", f.cwd)
+	fp := requestFingerprint("send", id, p, d, f.cwd, "y", nil)
+	if got := len(f.home.failures(fp)); got != 0 {
+		t.Fatalf("the late failure undid the success: %d failures", got)
+	}
+	if _, err := f.r.PrepareSend(id, "y", nil); err != nil {
+		t.Fatalf("the next identical send was refused: %v", err)
 	}
 }

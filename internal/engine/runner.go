@@ -621,7 +621,7 @@ func (r *Runner) reapLost(run *Run) bool {
 // again (its final save failed, its worker died) never counts it again,
 // even after a success or the window cleared the request's failures. A
 // crash between the two undercounts; it never overcounts.
-func (r *Runner) countTurn(id string, n int, fp, outcome string) string {
+func (r *Runner) countTurn(id string, n int, fp, outcome string, ended time.Time) string {
 	if fp == "" {
 		return ""
 	}
@@ -633,7 +633,7 @@ func (r *Runner) countTurn(id string, n int, fp, outcome string) string {
 	}); err != nil || already {
 		return ""
 	}
-	return r.home.noteRepeat(fp, turnID(id, n), outcome)
+	return r.home.noteRepeat(fp, turnID(id, n), outcome, ended)
 }
 
 // countReaped counts turn n after reapLost ended it and the record was
@@ -655,7 +655,7 @@ func (r *Runner) countReaped(id string, n int) *Run {
 			fp = req.Repeat
 		}
 	}
-	if hint := r.countTurn(id, rec.N, fp, rec.Outcome); hint != "" {
+	if hint := r.countTurn(id, rec.N, fp, rec.Outcome, rec.Ended); hint != "" {
 		run, _ = r.home.updateRun(id, func(run *Run) error {
 			run.Turns[rec.N-1].Hint = hint
 			return nil
@@ -714,7 +714,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	if t != nil && t.repeat != "" {
 		rep.Hint = t.hint
 		if !t.noted && !errors.Is(err, ErrRepeated) { // a refusal is not another failure
-			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err))
+			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err), now())
 		}
 	}
 	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
@@ -828,7 +828,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// same request is admitted and checks it.
 	defer func() {
 		if !errors.Is(err, ErrRepeated) {
-			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err)), true
+			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
 		}
 	}()
 	if err := r.home.checkRepeat(t.repeat); err != nil {

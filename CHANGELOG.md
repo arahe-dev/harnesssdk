@@ -4,7 +4,7 @@
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in
 its review of v1.6.0, and 5 more in its review of the first version of
-this release, then 2, 2 and 1 in its next three. Every code fix has a
+this release, then 2, 2, 1 and 1 in its next four. Every code fix has a
 regression test. **v1.6.0 is
 retracted** (`go.mod`), since it broke code written for v1.5.
 
@@ -35,7 +35,9 @@ retracted** (`go.mod`), since it broke code written for v1.5.
   end again (after a lost final save, a success or the window cleared the
   failures) never counts it again; a lost turn's end is saved even when
   the follow-up that found it is refused, and the turn counted is the one
-  that was found lost, even if another was queued after it meanwhile. "In a row within an hour" is now
+  that was found lost, even if another was queued after it meanwhile.
+  Outcomes are ordered by when their turns ended: a failure counted late
+  does not undo a success that came after it. "In a row within an hour" is now
   a true sliding window, not an
   inactivity timeout; one lock guards every record, so cleanup can no
   longer remove a lock in use.
