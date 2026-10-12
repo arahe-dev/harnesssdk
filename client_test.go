@@ -171,10 +171,10 @@ func TestConfigAndGC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := c.GC(time.Hour, true); err != nil || len(ids) != 0 {
+	if ids, err := c.GC(context.Background(), time.Hour, true); err != nil || len(ids) != 0 {
 		t.Fatalf("gc of runs an hour old: %v %v", ids, err)
 	}
-	if ids, err := c.GC(0, true); err != nil || len(ids) != 1 || ids[0] != res.Run {
+	if ids, err := c.GC(context.Background(), 0, true); err != nil || len(ids) != 1 || ids[0] != res.Run {
 		t.Fatalf("gc of every finished run: %v %v", ids, err)
 	}
 }

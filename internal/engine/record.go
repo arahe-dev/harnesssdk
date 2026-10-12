@@ -158,14 +158,14 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 
 // publish renames the prepared run into runs/. It cannot replace a run:
 // a published run is never empty, and a rename replaces only an empty
-// folder on Unix and none on Windows. On failure the run is removed.
+// folder on Unix and none on Windows. On failure the run is removed. The
+// creation lock stays held until release.
 func (s *stagedRun) publish() error {
 	if err := os.Rename(s.dir, s.final); err != nil {
 		s.abort()
 		return err
 	}
 	s.dir = s.final
-	s.release()
 	return nil
 }
 
@@ -195,7 +195,11 @@ func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.Run, s.publish()
+	if err := s.publish(); err != nil {
+		return nil, err
+	}
+	s.release()
+	return s.Run, nil
 }
 
 // idSlack bounds how far a run id's time can be from when the run was

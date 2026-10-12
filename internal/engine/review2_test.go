@@ -38,7 +38,7 @@ func TestGCKeepsWorktreeWork(t *testing.T) {
 	f.profile("writer", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
 	run, repo := worktreeRun(t, f, "writer", "sub")
 	os.WriteFile(filepath.Join(run.Workdir, "late.txt"), []byte("left after the turn"), 0o644)
-	if rep, err := f.home.GC(time.Now().Add(time.Hour), false); err != nil || len(rep.Runs) != 1 {
+	if rep, err := f.home.GC(context.Background(), time.Now().Add(time.Hour), false); err != nil || len(rep.Runs) != 1 {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	if files, err := git(context.Background(), "-C", repo, "show", "--name-only", "--format=%s", run.Branch); err != nil ||
@@ -54,7 +54,7 @@ func TestGCKeepsWorktreeWork(t *testing.T) {
 	}
 	os.WriteFile(lock, nil, 0o644) // git add now fails
 	defer os.Remove(lock)
-	if _, err := f.home.GC(time.Now().Add(time.Hour), false); err == nil || !strings.Contains(err.Error(), "kept") {
+	if _, err := f.home.GC(context.Background(), time.Now().Add(time.Hour), false); err == nil || !strings.Contains(err.Error(), "kept") {
 		t.Fatalf("gc removed a worktree it could not commit: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(run.Workdir, "late.txt")); err != nil {
@@ -202,7 +202,7 @@ func TestGCUndoesCrashedWorktreeCreation(t *testing.T) {
 	if _, err := os.Stat(s.Worktree); err != nil {
 		t.Fatal(err)
 	}
-	h.GC(time.Now().AddDate(0, 0, -30), false)
+	h.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(s.Worktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the crashed creation's worktree was kept")
 	}
@@ -292,7 +292,7 @@ func TestDetachedWorktreeIsKept(t *testing.T) {
 	if _, err := git(context.Background(), "-C", run.Worktree, "checkout", "-q", "--detach"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.home.GC(time.Now().Add(time.Hour), false); err == nil || !strings.Contains(err.Error(), "not on its branch") {
+	if _, err := f.home.GC(context.Background(), time.Now().Add(time.Hour), false); err == nil || !strings.Contains(err.Error(), "not on its branch") {
 		t.Fatalf("gc removed a detached worktree: %v", err)
 	}
 	if _, err := os.Stat(run.Worktree); err != nil {
@@ -383,7 +383,7 @@ func TestFailedRollbackIsFinishedByGC(t *testing.T) {
 		t.Fatal("the record of what to undo was removed with the rollback unfinished")
 	}
 	os.Remove(refLock)
-	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("gc did not finish the rollback")
 	}

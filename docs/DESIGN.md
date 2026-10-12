@@ -68,7 +68,9 @@ or once a second to reclaim dead tickets.
    the backoff (at least the CLI's `retry_after`), and is admitted again. A
    turn backing off holds no budget, key or slot. An attempt's cost is
    recorded before its ticket is released; if that fails, the turn stays
-   admitted until its final save records the cost.
+   admitted, saving its record again (1 s, doubling to 30 s), until the
+   cost is on record or the turn is stopped (`harness stop`, the caller, a
+   shutdown).
 5. **Finished**: the outcome is counted for the repeat guard before the last
    ticket is released (so the next identical turn sees it), a worktree's
    changes are committed, and the record is saved.
@@ -77,14 +79,22 @@ or once a second to reclaim dead tickets.
 
 A run is prepared in `runs/.new-<id>`, with its record and first turn, and
 renamed into `runs/<id>` whole, so `runs/` never holds a half-made run. The
-creator holds `runs/.new-<id>.lock` from before it makes the folder until it
-has published or removed it, and rechecks under that lock that the id is
-free (a creator publishes before it releases its lock). Creation locks are
-taken, and their files removed, only while holding `create.lock`, briefly, so
-a lock can never be split. `compare` validates every profile first and
-removes what it created if a later creation fails, marking each run
-`abandoned` first: an abandoned run never executes, and `gc` finishes a
-rollback that could not finish, whatever the run's age.
+creator holds `runs/.new-<id>.lock` from before it makes the folder until
+the creation is committed or rolled back, and rechecks under that lock that
+the id is free (a creator publishes before it releases its lock). Creation
+locks are taken, and their files removed, only while holding `create.lock`,
+briefly, so a lock can never be split.
+
+A creation is all or nothing: `start` with several tasks, or `compare`
+(which validates every profile first). Each run is marked `creating` in its
+staged folder, so it is published marked, and a run whose mark cannot be
+written is never published. Once every run is published, the creator
+removes the marks, then releases the locks; a mark it cannot remove rolls
+every run back. A marked run never executes. `gc` leaves a marked run alone
+while its creation lock is held; once it is free, the creator is gone and
+can no longer remove the mark, so a run still marked was abandoned (a crash,
+or a rollback that could not finish), and `gc` removes it as its rollback
+would have, branch included, whatever its age.
 
 A `--worktree` run gets its worktree and branch while staged. Each name is
 claimed by an operation that fails if the name is taken (`mkdir` of the
@@ -110,10 +120,11 @@ undercounts, never overcounts.
 
 ## Collection
 
-`gc` removes runs last active before its cutoff, under their execution and
-state locks, record first. It leaves alone a run that is executing, or whose
-first turn still waits for its worker, and a staging folder whose creator is
-alive. A folder without a record (an interrupted removal) goes once it is
+`gc` removes runs last active before its cutoff, and abandoned creations
+(above), under their execution and state locks, record first. It leaves
+alone a run that is executing, or whose first turn still waits for its
+worker, and a staging folder or marked run whose creator is alive. It stops
+when its caller cancels; what it was removing is kept. A folder without a record (an interrupted removal) goes once it is
 untouched since the cutoff. A collected worktree run loses its worktree, after anything left in it is
 committed to its branch, which stays; a worktree whose work cannot be
 committed is kept, with its run.

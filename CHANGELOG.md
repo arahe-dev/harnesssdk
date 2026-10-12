@@ -34,7 +34,8 @@ path is now `github.com/arahe-dev/harnesssdk/v2`; v1.7.0 stays the stable v1.
   CLIs were not signed in).
 - **Go API (v2).** `Request.Check` and `Worktree`; `Send` and `SendStart` take
   a `FollowUp`; `Result` and `Turn` gain check, branch and changes fields;
-  `Config` gains the new limits; `Stats` counts checks; `CheckDefinition`.
+  `Config` gains the new limits; `Stats` counts checks; `CheckDefinition`;
+  `GC` takes a context.
   The engine's `TurnOptions` replaces its growing argument lists.
 - **docs/DESIGN.md** explains every lock and protocol in one place.
 - **Formats.** Run records and `config.json` are format 2: they hold what
@@ -97,12 +98,26 @@ regression tests:
   leaves it out.
 - Gate lock waits and shared-file retries stop when the wait ends, and a
   pass that ends that way leaves at once.
-- A `compare` whose rollback cannot finish marks its runs abandoned: they
+- A `compare` whose rollback cannot finish leaves its runs marked: they
   never execute, and `gc` finishes the rollback, whatever their age.
 - `Start` creates worktrees under its caller's context, and `harness stop`
   also stops a turn's final commit.
 - The Pi example's `error` selector is back, reading only the final
   `turn_end`: in JSON mode Pi exits 0 when its last model call failed.
+
+Its fourth review found 5 medium issues, also fixed with regression tests:
+- A turn whose cost cannot be recorded stays admitted, saving its record
+  again, until the cost is on record or the turn is stopped.
+- A creation is a transaction: runs are published marked `creating` and
+  unmarked only once all of them exist, so a run never executes, and is
+  never kept as a normal run, unless its creation finished; gc finishes an
+  abandoned creation once its creator is gone. (This replaces the
+  `abandoned` mark of the third round.)
+- The worktree lock and the daily automatic `gc` honor the caller's
+  cancellation.
+- A stop request is acted on once, by the turn or its final commit,
+  whichever sees it first, so one that arrives in between is not lost.
+- A rollback does not delete a branch that another worktree has checked out.
 
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered

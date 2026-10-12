@@ -379,7 +379,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 	defer func() { testHookCreate = nil }()
 	testHookCreate = func(stage string) error {
 		if stage == "record" { // the folder exists, its record does not yet
-			if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+			if rep, err := f.home.GC(context.Background(), future, false); err != nil || len(rep.Runs) != 0 {
 				t.Errorf("gc during creation: %+v %v", rep, err)
 			}
 		}
@@ -390,7 +390,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	testHookCreate = nil
-	if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+	if rep, err := f.home.GC(context.Background(), future, false); err != nil || len(rep.Runs) != 0 {
 		t.Fatalf("gc of a queued run: %+v %v", rep, err)
 	}
 	if _, err := f.home.LoadRun(runs[0].ID); err != nil {
@@ -408,7 +408,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(live); err != nil {
 		t.Fatal("a live creation was removed")
 	}
@@ -416,7 +416,7 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 		t.Fatal("a crashed creation was kept")
 	}
 	lk.Close() // the creator dies
-	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false)
 	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("an abandoned creation was kept")
 	}
@@ -513,7 +513,7 @@ func TestReusedCreationIDIsProtected(t *testing.T) {
 	stage := filepath.Join(runs, stagePrefix+id)
 	os.Mkdir(stage, 0o700) // abandoned: its lock file exists, unlocked
 	os.WriteFile(stage+".lock", nil, 0o600)
-	h.collectStage(stagePrefix + id)
+	h.collectStage(context.Background(), stagePrefix+id)
 	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("abandoned creation kept")
 	}
@@ -524,8 +524,8 @@ func TestReusedCreationIDIsProtected(t *testing.T) {
 	runID = func() string { return id }
 	testHookCreate = func(s string) error {
 		if s == "record" { // the creator holds its lock and its folder exists
-			h.collectStage(stagePrefix + id)
-			h.collectStage(stagePrefix + id + ".lock")
+			h.collectStage(context.Background(), stagePrefix+id)
+			h.collectStage(context.Background(), stagePrefix+id+".lock")
 			if _, err := os.Stat(stage); err != nil {
 				t.Error("a live creation was removed")
 			}

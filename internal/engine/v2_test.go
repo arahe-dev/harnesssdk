@@ -106,7 +106,7 @@ func TestWorktree(t *testing.T) {
 		t.Fatalf("branch log: %q %v", log, err)
 	}
 	// Collected: the worktree goes, the branch stays.
-	if rep, err := f.home.GC(time.Now().Add(time.Hour), false); err != nil || len(rep.Runs) != 1 {
+	if rep, err := f.home.GC(context.Background(), time.Now().Add(time.Hour), false); err != nil || len(rep.Runs) != 1 {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	if _, err := os.Stat(run.Worktree); !errors.Is(err, os.ErrNotExist) {

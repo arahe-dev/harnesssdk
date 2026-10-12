@@ -575,7 +575,9 @@ func (c *cli) gc(args []string) error {
 		}
 		*days = cfg.RetentionDays
 	}
-	rep, err := c.home.GC(time.Now().AddDate(0, 0, -*days), *dry)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rep, err := c.home.GC(ctx, time.Now().AddDate(0, 0, -*days), *dry)
 	verb := "removed"
 	if *dry {
 		verb = "would remove"

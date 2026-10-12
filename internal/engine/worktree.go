@@ -95,11 +95,11 @@ func (h *Home) addWorktree(ctx context.Context, run *Run) error {
 	}
 	// Two worktrees added to one repository at once can trip on git's own
 	// locks: harness adds one at a time.
-	unlock, err := lockFileWait(filepath.Join(h.Dir, "worktrees.lock"), time.Minute)
+	lk, err := lockWaitCtx(ctx, filepath.Join(h.Dir, "worktrees.lock"), time.Minute)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lk.Close()
 	root, branch := filepath.Join(h.Dir, "worktrees", run.ID), "harness/"+run.ID
 	if err := os.Mkdir(root, 0o755); err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -202,6 +202,17 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 			return err
 		}
 		if tip == run.Base {
+			// Not while a worktree has it checked out, as git branch -D
+			// refuses too: that worktree would be left on no branch.
+			list, err := git(ctx, append(at, "worktree", "list", "--porcelain")...)
+			if err != nil {
+				return err
+			}
+			for line := range strings.SplitSeq(list, "\n") {
+				if strings.TrimSpace(line) == "branch refs/heads/"+run.Branch {
+					return fmt.Errorf("branch %s is checked out in another worktree, so it is kept until it is not", run.Branch)
+				}
+			}
 			// Deleted only if it still points there, as one change.
 			if _, err := git(ctx, append(at, "update-ref", "-d", "refs/heads/"+run.Branch, run.Base)...); err != nil {
 				return err

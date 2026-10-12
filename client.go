@@ -298,9 +298,10 @@ func (c *Client) Config() (Config, error) {
 func (c *Client) SetConfig(key string, value int) error { return c.home.SetConfig(key, value) }
 
 // GC removes runs last active before olderThan ago that are not running,
-// and returns their ids. With dryRun it only lists them.
-func (c *Client) GC(olderThan time.Duration, dryRun bool) ([]string, error) {
-	rep, err := c.home.GC(time.Now().Add(-olderThan), dryRun)
+// and runs whose creation was abandoned, and returns their ids. With dryRun
+// it only lists them. Cancelling ctx stops it; what it was removing is kept.
+func (c *Client) GC(ctx context.Context, olderThan time.Duration, dryRun bool) ([]string, error) {
+	rep, err := c.home.GC(ctx, time.Now().Add(-olderThan), dryRun)
 	return rep.Runs, err
 }
 

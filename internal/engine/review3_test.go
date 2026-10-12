@@ -44,7 +44,7 @@ func TestOtherHomesBranchIsLeftAlone(t *testing.T) {
 	}
 	// a's run is collected (its branch stays), then b collects.
 	for _, f := range []*fixture{a, b} {
-		f.home.GC(time.Now().Add(time.Hour), false)
+		f.home.GC(context.Background(), time.Now().Add(time.Hour), false)
 	}
 	if now, err := git(context.Background(), "-C", repo, "rev-parse", "harness/261012-000000-cccc"); err != nil || now != tip {
 		t.Fatalf("the other run's branch was changed: %q %v", now, err)
@@ -80,35 +80,44 @@ func TestNoHooksFolderCannotBePlanted(t *testing.T) {
 }
 
 // M3: an attempt whose cost could not be recorded keeps its admission
-// until finish records it, so the next turn admitted counts it.
+// until the turn's record holds it, so the next turn admitted counts it:
+// also when the turn's final save fails too, and is tried again.
 func TestUnrecordedCostKeepsAdmission(t *testing.T) {
-	f := newFixture(t, map[string]int64{"b": 1})
-	usageDef(f) // $0.50 a turn
-	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
-	var calls atomic.Int32
-	testHookSaveMetrics = func() error {
-		if calls.Add(1) == 1 {
-			return errors.New("disk full")
+	for _, finishFailures := range []int32{0, 2} {
+		f := newFixture(t, map[string]int64{"b": 1})
+		usageDef(f) // $0.50 a turn
+		f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
+		var saves, finishes atomic.Int32
+		testHookSaveMetrics = func() error {
+			if saves.Add(1) == 1 {
+				return errors.New("disk full")
+			}
+			return nil
 		}
-		return nil
-	}
-	// A slow end of turn (a worktree commit), during which a turn admitted
-	// too early would run.
-	testHookFinalize = func(context.Context) { time.Sleep(time.Second) }
-	defer func() { testHookSaveMetrics, testHookFinalize = nil, nil }()
-	reps, err := f.r.Start(context.Background(), "u", []string{"first", "second"}, gitRepo(t), TurnOptions{Worktree: true}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var outcomes []string
-	for _, rep := range reps {
-		outcomes = append(outcomes, rep.Outcome)
-	}
-	if !strings.Contains(strings.Join(outcomes, " "), "success") || !strings.Contains(strings.Join(outcomes, " "), "throttled") {
-		t.Fatalf("both turns ran, or neither: %v", outcomes)
-	}
-	if _, spent, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || spent != 0.5 {
-		t.Fatalf("spent %v, %v", spent, err)
+		testHookFinish = func() error {
+			if finishes.Add(1) <= finishFailures {
+				return errors.New("disk full")
+			}
+			return nil
+		}
+		// A slow end of turn (a worktree commit), during which a turn
+		// admitted too early would run.
+		testHookFinalize = func(context.Context) { time.Sleep(time.Second) }
+		reps, err := f.r.Start(context.Background(), "u", []string{"first", "second"}, gitRepo(t), TurnOptions{Worktree: true}, nil)
+		testHookSaveMetrics, testHookFinish, testHookFinalize = nil, nil, nil
+		if err != nil {
+			t.Fatal(err)
+		}
+		var outcomes []string
+		for _, rep := range reps {
+			outcomes = append(outcomes, rep.Outcome)
+		}
+		if !strings.Contains(strings.Join(outcomes, " "), "success") || !strings.Contains(strings.Join(outcomes, " "), "throttled") {
+			t.Fatalf("%d failed final saves: both turns ran, or neither: %v", finishFailures, outcomes)
+		}
+		if _, spent, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || spent != 0.5 {
+			t.Fatalf("%d failed final saves: spent %v, %v", finishFailures, spent, err)
+		}
 	}
 }
 
@@ -133,9 +142,9 @@ func TestCancelledDuringLockWait(t *testing.T) {
 	}
 }
 
-// M5: a compare whose rollback of an earlier run cannot finish marks the
-// run abandoned: it never executes, and gc finishes the rollback, branch
-// included, whatever the run's age.
+// M5: a compare whose rollback of an earlier run cannot finish leaves the
+// run marked as being created: it never executes, and once its creator is
+// gone gc finishes the rollback, branch included, whatever the run's age.
 func TestAbandonedRunIsRolledBackByGC(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("w1", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
@@ -156,14 +165,14 @@ func TestAbandonedRunIsRolledBackByGC(t *testing.T) {
 		t.Fatal("failed creation reported success")
 	}
 	testHookCreate = nil
-	if _, err := os.Stat(filepath.Join(f.home.Dir, "runs", "261012-000000-aaaa", abandonedFile)); err != nil {
-		t.Fatal("the run whose rollback failed is not marked abandoned")
+	if _, err := os.Stat(filepath.Join(f.home.Dir, "runs", "261012-000000-aaaa", creatingFile)); err != nil {
+		t.Fatal("the run whose rollback failed is not marked")
 	}
-	if rep := f.r.Execute(context.Background(), "261012-000000-aaaa", 1); rep.Err == nil || !strings.Contains(rep.Err.Error(), "abandoned") {
+	if rep := f.r.Execute(context.Background(), "261012-000000-aaaa", 1); rep.Err == nil || !strings.Contains(rep.Err.Error(), "being created") {
 		t.Fatalf("an abandoned run executed: %v", rep.Err)
 	}
 	os.Remove(refLock)
-	if rep, err := f.home.GC(time.Now().AddDate(0, 0, -30), false); err != nil || len(rep.Runs) != 1 {
+	if rep, err := f.home.GC(context.Background(), time.Now().AddDate(0, 0, -30), false); err != nil || len(rep.Runs) != 1 {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	if out, _ := git(context.Background(), "-C", repo, "branch", "--list", "harness/*"); out != "" {

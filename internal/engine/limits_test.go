@@ -138,7 +138,7 @@ func TestGC(t *testing.T) {
 	os.Remove(creating.Path("run.json"))
 
 	cutoff := time.Now().AddDate(0, 0, -30)
-	rep, err := h.GC(cutoff, true)
+	rep, err := h.GC(context.Background(), cutoff, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestGC(t *testing.T) {
 	if _, err := os.Stat(expired.Dir()); err != nil {
 		t.Fatal("dry run removed a run")
 	}
-	if rep, err = h.GC(cutoff, false); err != nil || !slices.Equal(rep.Runs, want) {
+	if rep, err = h.GC(context.Background(), cutoff, false); err != nil || !slices.Equal(rep.Runs, want) {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	for _, r := range []*Run{expired, leftover} {
@@ -170,12 +170,12 @@ func TestGC(t *testing.T) {
 func TestAutoGCOncePerDay(t *testing.T) {
 	h := newGateHome(t)
 	first := oldRun(t, h, 40, "aaaa")
-	h.AutoGC()
+	h.AutoGC(context.Background())
 	if _, err := os.Stat(first.Dir()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("expired run kept")
 	}
 	second := oldRun(t, h, 40, "bbbb")
-	h.AutoGC() // within a day of the last pass
+	h.AutoGC(context.Background()) // within a day of the last pass
 	if _, err := os.Stat(second.Dir()); err != nil {
 		t.Fatal("collected twice in a day")
 	}
@@ -183,7 +183,7 @@ func TestAutoGCOncePerDay(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Remove(filepath.Join(h.Dir, "gc.stamp"))
-	h.AutoGC()
+	h.AutoGC(context.Background())
 	if _, err := os.Stat(second.Dir()); err != nil {
 		t.Fatal("collected with retention off")
 	}
