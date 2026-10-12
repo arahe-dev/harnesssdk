@@ -64,7 +64,10 @@ fixed with regression tests:
 - Worktrees: what is about to be made is recorded first, so a failed
   `git worktree add` or a creator that died is undone (by its rollback or by
   `gc`); git is addressed from the run's folder or the repository's own git
-  folder; every git command is bounded and contained like an agent; an
+  folder; every git command is bounded (2 minutes, and its caller) and runs
+  in a process tree of its own that is killed with it (on Unix without the
+  guard agents run under, which made every git command start harness
+  again); an
   untracked starting folder is created in the worktree; paths keep leading
   spaces.
 - `def check` no longer accepts an echoed prompt, reports declared metrics

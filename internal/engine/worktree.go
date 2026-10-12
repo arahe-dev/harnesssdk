@@ -25,9 +25,9 @@ import (
 
 const gitTimeout = 2 * time.Minute
 
-// git runs git with args, bounded by ctx and gitTimeout, as harness runs
-// agents (its process tree is contained and killed with it), without
-// terminal prompts. It returns the output with line endings trimmed only,
+// git runs git with args, bounded by ctx and gitTimeout, in a process tree
+// of its own that is killed with it (without the guard agents run under on
+// Unix: git is short, and bounded), without terminal prompts. It returns the output with line endings trimmed only,
 // since a path may begin or end with spaces.
 func git(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
@@ -45,7 +45,7 @@ func git(ctx context.Context, args ...string) (string, error) {
 	defer os.Remove(stderr.Name())
 	defer stderr.Close()
 	code, _, err := runProcess(ctx, procSpec{Argv: append([]string{"git"}, args...), Stdout: stdout, Stderr: stderr,
-		Env: []string{"GIT_TERMINAL_PROMPT=0"}})
+		Env: []string{"GIT_TERMINAL_PROMPT=0"}, Short: true})
 	out, _ := readAll(stdout)
 	msg, _ := readAll(stderr)
 	switch {
