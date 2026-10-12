@@ -57,7 +57,7 @@ func TestV1CostsOutliveTheUpgrade(t *testing.T) {
 	if _, err := f.r.PrepareSend(id, "more", TurnOptions{}); err == nil || OutcomeName(err) != "throttled" {
 		t.Fatalf("a follow-up over the limit was queued: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(f.home.spendDir(), id+"-1-v1.json")); err != nil {
+	if moved, _ := filepath.Glob(filepath.Join(f.home.spendDir(), id+"-*-1-v1.json")); len(moved) != 1 {
 		t.Fatal("the v1 turn's cost is not in the ledger")
 	}
 	if run, err := f.home.LoadRun(id); err != nil || run.Format != runFormat {

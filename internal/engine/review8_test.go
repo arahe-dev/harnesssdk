@@ -91,7 +91,7 @@ func TestV1CostsCountOnce(t *testing.T) {
 	if s, err := f.home.spending(time.Now().Add(-spendWindow), "u"); err != nil || s.mine != 0.6 {
 		t.Fatalf("spent %+v %v, want 0.6", s, err)
 	}
-	os.Remove(v1SpendPath(f.home.Dir, id, 1))
+	os.Remove(v1SpendPath(f.home.Dir, run, 1))
 	if rep, err := f.home.GC(context.Background(), time.Now().Add(-time.Hour), false); err != nil || len(rep.Runs) != 1 {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}

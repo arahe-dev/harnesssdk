@@ -187,7 +187,7 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 		if status != "" {
 			return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
 		}
-		nested, err := holdsRepository(run.Worktree)
+		nested, err := holdsRepository(ctx, run.Worktree)
 		if err != nil {
 			return fmt.Errorf("worktree %s cannot be inspected, so it is kept: %w", run.Worktree, err)
 		}
@@ -267,13 +267,15 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 }
 
 // holdsRepository returns a repository (a .git entry) found anywhere below
-// root other than root's own, or "".
-func holdsRepository(root string) (string, error) {
+// root other than root's own, or "". It stops when ctx ends.
+func holdsRepository(ctx context.Context, root string) (string, error) {
 	found := ""
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		switch {
 		case err != nil:
 			return err
+		case ctx.Err() != nil:
+			return ctx.Err()
 		case d.Name() != ".git":
 			return nil
 		case path != filepath.Join(root, ".git"):

@@ -38,7 +38,8 @@ import (
 // the window, or someone removes it; an entry is never removed because its
 // cost could not be written. Turns recorded before v2 count by their run
 // records, until v2 saves the record: their costs then move to the ledger
-// first (<run>-<turn>-v1.json). Entries go once they are two windows old.
+// first (<run>-<created>-<turn>-v1.json). Entries go once they are two
+// windows old.
 
 const spendWindow = 24 * time.Hour
 
@@ -219,7 +220,7 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 			continue
 		}
 		for _, t := range run.Turns {
-			name := filepath.Base(v1SpendPath(h.Dir, run.ID, t.N))
+			name := filepath.Base(v1SpendPath(h.Dir, run, t.N))
 			if t.Ended.Before(since) || seen[name] {
 				continue
 			}
@@ -293,8 +294,10 @@ func (h *Home) turnRunning(e *spendEntry) bool {
 	return run.executing()
 }
 
-func v1SpendPath(home, run string, turn int) string {
-	return filepath.Join(spendDirOf(home), fmt.Sprintf("%s-%d-v1.json", run, turn))
+// v1SpendPath names a v1 turn's cost in the ledger: by its run's id and
+// creation time, so a later run with the id has names of its own.
+func v1SpendPath(home string, r *Run, turn int) string {
+	return filepath.Join(spendDirOf(home), fmt.Sprintf("%s-%d-%d-v1.json", r.ID, r.Created.UnixNano(), turn))
 }
 
 // moveV1Spend writes the costs of a v1 record's recent turns into the
@@ -314,7 +317,7 @@ func moveV1Spend(home string, r *Run) error {
 		if err := os.MkdirAll(spendDirOf(home), 0o700); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(v1SpendPath(home, r.ID, t.N), append(data, '\n')); err != nil {
+		if err := writeFileAtomic(v1SpendPath(home, r, t.N), append(data, '\n')); err != nil {
 			return err
 		}
 	}

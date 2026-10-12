@@ -175,6 +175,11 @@ configuration, and keeps a worktree that holds a submodule or another
 repository; and spending reads the ledger again after the v1 records, so a
 cost moved to the ledger while it reads counts once.
 
+Its tenth review found 2 medium issues, also fixed with regression tests:
+moved v1 costs are named by their run's creation time too, so two v1 runs
+with one id keep both costs; and the search for submodules stops when its
+caller cancels.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now

@@ -145,8 +145,9 @@ unknown cost refuses turns under any limit it falls under (the machine's,
 and its profile's) until it is out of the window, or someone removes it:
 spending limits fail closed. Turns recorded before v2 count by their run
 records until v2 saves the record, or `gc` removes it, either of which
-first moves their costs into the ledger (`<run>-<turn>-v1.json`, the same
-name each time); a turn whose cost is there counts only there. Spending
+first moves their costs into the ledger (`<run>-<created>-<turn>-v1.json`,
+the same name each time for one run, and another for a later run with its
+id); a turn whose cost is there counts only there. Spending
 reads the ledger before the v1 records and again after them, so a cost
 moved while it reads is counted once, from wherever it was when read.
 Entries go once they are two windows old.
