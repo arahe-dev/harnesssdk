@@ -34,7 +34,12 @@
   - ledger failures under a limit put a hint on the turn.
 
   Unreadable ledger or run folders now count as unknown instead of failing
-  the turn.
+  the turn. Its second review found 3 medium issues, also fixed with
+  regression tests:
+  - an unreadable ledger folder counts as one unknown cost per check;
+  - a turn's own unwritten entries are left out of the ledger's reading,
+    so each counts once even when its file cannot be read either;
+  - they leave the window like any other entry.
 
 ## v2.0.0-next (2026-10-12)
 

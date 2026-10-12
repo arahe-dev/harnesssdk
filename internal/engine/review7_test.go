@@ -77,7 +77,7 @@ func TestReusedRunIDKeepsEarlierCosts(t *testing.T) {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	f.start(context.Background(), "u", "second")
-	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || s.mine != 1 {
+	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u", nil); err != nil || s.mine != 1 {
 		t.Fatalf("spent %+v %v, want $1", s, err)
 	}
 }

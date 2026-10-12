@@ -39,7 +39,7 @@ func TestEntryMadeLaterKeepsTheCost(t *testing.T) {
 	if rep.Outcome != "success" || !strings.Contains(rep.Hint, "spending ledger could not be written") || !strings.Contains(rep.Hint, "spend_unknown") {
 		t.Fatalf("%s %v %q", rep.Outcome, rep.Err, rep.Hint)
 	}
-	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || s.mine != 0.5 || len(s.unknownMine) != 0 {
+	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u", nil); err != nil || s.mine != 0.5 || len(s.unknownMine) != 0 {
 		t.Fatalf("spent %+v %v, want $0.50 known", s, err)
 	}
 }
@@ -65,7 +65,7 @@ func TestRetryCountsItsUnwrittenAttempts(t *testing.T) {
 		if rep.Outcome != c.outcome || !strings.Contains(rep.Hint, "could not be written") {
 			t.Fatalf("%s: %s %v %q", c.name, rep.Outcome, rep.Err, rep.Hint)
 		}
-		s, err := f.home.spending(time.Now().Add(-time.Hour), "u")
+		s, err := f.home.spending(time.Now().Add(-time.Hour), "u", nil)
 		want := map[string]float64{"0.4": 0.25, "5": 0.75}[c.limit]
 		if err != nil || math.Abs(s.mine-want) > 1e-9 || len(s.unknownMine) != 0 {
 			t.Fatalf("%s: spent %+v %v, want $%.2f known", c.name, s, err, want)

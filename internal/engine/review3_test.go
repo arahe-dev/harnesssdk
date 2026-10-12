@@ -101,7 +101,7 @@ func TestUnrecordedCostKeepsAdmission(t *testing.T) {
 	if o := strings.Join(outcomes, " "); !strings.Contains(o, "success") || !strings.Contains(o, "throttled") {
 		t.Fatalf("both turns ran, or neither: %v", outcomes)
 	}
-	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || s.mine != 0.5 {
+	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u", nil); err != nil || s.mine != 0.5 {
 		t.Fatalf("spent %+v, %v", s, err)
 	}
 }

@@ -1051,7 +1051,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			// Read once for the attempt: its ledger handling follows the
 			// same rule as its check.
 			var hint string
-			rule, hint, err = r.home.checkSpend(p, t.unwrittenWhy())
+			rule, hint, err = r.home.checkSpend(p, t.unwritten)
 			t.spendHint(hint)
 		}
 		executed := err == nil // a refusal of harness's own is final, never retried

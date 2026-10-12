@@ -23,7 +23,7 @@ func TestV1CostsOfTwoRunsWithOneID(t *testing.T) {
 		t.Fatalf("gc: %+v %v", rep, err)
 	}
 	v1Run(t, h, id, "u", t.TempDir(), time.Now().Add(-2*time.Hour), 0.4) // the id again, created later
-	if s, err := h.spending(time.Now().Add(-spendWindow), "u"); err != nil || math.Abs(s.mine-1) > 1e-9 {
+	if s, err := h.spending(time.Now().Add(-spendWindow), "u", nil); err != nil || math.Abs(s.mine-1) > 1e-9 {
 		t.Fatalf("before the second move: spent %+v %v, want $1", s, err)
 	}
 	run, err := h.LoadRun(id)
@@ -33,7 +33,7 @@ func TestV1CostsOfTwoRunsWithOneID(t *testing.T) {
 	if err := run.Save(); err != nil { // moves the second run's cost
 		t.Fatal(err)
 	}
-	if s, err := h.spending(time.Now().Add(-spendWindow), "u"); err != nil || math.Abs(s.mine-1) > 1e-9 {
+	if s, err := h.spending(time.Now().Add(-spendWindow), "u", nil); err != nil || math.Abs(s.mine-1) > 1e-9 {
 		t.Fatalf("after: spent %+v %v, want $1", s, err)
 	}
 }

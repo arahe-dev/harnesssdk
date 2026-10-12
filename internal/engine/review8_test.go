@@ -88,7 +88,7 @@ func TestV1CostsCountOnce(t *testing.T) {
 	if err := moveV1Spend(f.home.Dir, run); err != nil { // moved, but the record never saved
 		t.Fatal(err)
 	}
-	if s, err := f.home.spending(time.Now().Add(-spendWindow), "u"); err != nil || s.mine != 0.6 {
+	if s, err := f.home.spending(time.Now().Add(-spendWindow), "u", nil); err != nil || s.mine != 0.6 {
 		t.Fatalf("spent %+v %v, want 0.6", s, err)
 	}
 	os.Remove(v1SpendPath(f.home.Dir, run, 1))
@@ -124,7 +124,7 @@ func TestUnknownEntryOfAnEarlierRunWithTheID(t *testing.T) {
 	if err := h.writeSpend("open", earlier); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := h.spending(time.Now().Add(-spendWindow), "u"); err != nil || len(s.unknownMine) == 0 {
+	if s, err := h.spending(time.Now().Add(-spendWindow), "u", nil); err != nil || len(s.unknownMine) == 0 {
 		t.Fatalf("the earlier run's entry was taken for the running turn: %+v %v", s, err)
 	}
 }
@@ -137,7 +137,7 @@ func TestEntryWithoutCostIsUnknown(t *testing.T) {
 	for _, usd := range []string{``, `, "usd": null`} {
 		path := filepath.Join(h.spendDir(), "r-1-1-x.json")
 		os.WriteFile(path, []byte(fmt.Sprintf(`{"run": "r", "created": %q, "turn": 1, "attempt": 1, "profile": "u", "at": %q%s}`, at, at, usd)), 0o600)
-		if s, err := h.spending(time.Now().Add(-spendWindow), "u"); err != nil || !strings.Contains(strings.Join(s.unknownMine, " "), "not a valid entry") {
+		if s, err := h.spending(time.Now().Add(-spendWindow), "u", nil); err != nil || !strings.Contains(strings.Join(s.unknownMine, " "), "not a valid entry") {
 			t.Fatalf("%q: %+v %v", usd, s, err)
 		}
 		os.Remove(path)
