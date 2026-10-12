@@ -123,8 +123,8 @@ func TestSpendingCountsAttemptsAndOldRuns(t *testing.T) {
 	// day ago, and whose second spent $0.40 today: only today's counts.
 	yesterday := time.Now().Add(-25 * time.Hour)
 	for _, e := range []spendEntry{
-		{Run: "r", Turn: 2, Attempt: 1, Profile: "p", At: yesterday.UTC(), USD: 10},
-		{Run: "r", Turn: 2, Attempt: 2, Profile: "p", At: time.Now().UTC(), USD: 0.4},
+		{Run: "r", Created: yesterday.UTC(), Turn: 2, Attempt: 1, Profile: "p", At: yesterday.UTC(), USD: dollars(10)},
+		{Run: "r", Created: yesterday.UTC(), Turn: 2, Attempt: 2, Profile: "p", At: time.Now().UTC(), USD: dollars(0.4)},
 	} {
 		if err := h.writeSpend("close", &e); err != nil {
 			t.Fatal(err)

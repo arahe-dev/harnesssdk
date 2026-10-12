@@ -176,14 +176,30 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	}
 	if drop && made {
 		// The run never ran, so its worktree should hold nothing of
-		// anyone's: it is removed only once git finds it clean.
-		status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain", "--ignored")
+		// anyone's: it is removed only once git finds it clean, every
+		// untracked and ignored file shown whatever the configuration.
+		status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain", "--ignored", "--untracked-files=all")
 		if err != nil {
 			return fmt.Errorf("cannot tell whether worktree %s holds changes, so it is kept: %w", run.Worktree, err)
 		}
 		if status != "" {
 			return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
 		}
+	}
+	if drop && exists && !made {
+		// Not a worktree: the folder addWorktree made goes if it is empty,
+		// and anything in it is kept.
+		entries, err := os.ReadDir(run.Worktree)
+		switch {
+		case err != nil:
+			return fmt.Errorf("worktree %s cannot be inspected, so it is kept: %w", run.Worktree, err)
+		case len(entries) > 0:
+			return fmt.Errorf("worktree folder %s holds files but no worktree, so it is kept", run.Worktree)
+		}
+		if err := os.Remove(run.Worktree); err != nil {
+			return err
+		}
+		exists = false
 	}
 	if !drop && exists {
 		if head, err := git(ctx, "-C", run.Worktree, "symbolic-ref", "-q", "HEAD"); err != nil || head != "refs/heads/"+run.Branch {
@@ -195,9 +211,6 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	}
 	at, err := repo(ctx, run)
 	if err != nil {
-		if drop && exists && !made {
-			return os.RemoveAll(run.Worktree) // never a worktree: nothing in git to undo
-		}
 		return err
 	}
 	if exists {
@@ -209,7 +222,7 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 			if !drop {
 				return fmt.Errorf("worktree %s is kept: %w", run.Worktree, err)
 			}
-			// Found clean, or never a worktree (above): what is left goes.
+			// Found clean (above): what is left of it goes.
 			if err := os.RemoveAll(run.Worktree); err != nil {
 				return err
 			}

@@ -48,19 +48,24 @@ type spendEntry struct {
 	Turn    int       `json:"turn"`
 	Attempt int       `json:"attempt"`
 	Profile string    `json:"profile"`
-	At      time.Time `json:"at"` // when the attempt started, or, once its cost is in, ended
-	USD     float64   `json:"usd"`
+	Created time.Time `json:"created"` // the run's, which tells it from a later run with its id
+	At      time.Time `json:"at"`      // when the attempt started, or, once its cost is in, ended
+	USD     *float64  `json:"usd,omitempty"`
 	Running bool      `json:"running,omitempty"`
 	path    string    // where it is written
 }
 
 // valid reports whether e is an entry spending can count: one that names
-// its run, turn, attempt (0 for a cost moved from a v1 record), profile
-// and time, with a cost that is a number of dollars.
+// its run (and when the run was created), turn, attempt (0 for a cost moved
+// from a v1 record), profile and time, and, once it is not running, its
+// cost: a number of dollars.
 func (e *spendEntry) valid() bool {
-	return validName(e.Run) && e.Turn >= 1 && (e.Attempt >= 1 || e.Attempt == 0 && !e.Running) &&
-		validName(e.Profile) && !e.At.IsZero() && e.USD >= 0 && !math.IsInf(e.USD, 0)
+	cost := e.Running || e.USD != nil && *e.USD >= 0 && !math.IsInf(*e.USD, 0)
+	return validName(e.Run) && !e.Created.IsZero() && e.Turn >= 1 && (e.Attempt >= 1 || e.Attempt == 0 && !e.Running) &&
+		validName(e.Profile) && !e.At.IsZero() && cost
 }
+
+func dollars(usd float64) *float64 { return &usd }
 
 func (h *Home) spendDir() string { return spendDirOf(h.Dir) }
 
@@ -97,7 +102,7 @@ func (h *Home) writeSpend(stage string, e *spendEntry) error {
 // openSpend makes the running entry of turn t's next attempt. Entries are
 // numbered as they are made, so none is ever written over by another.
 func (h *Home) openSpend(t *Turn) error {
-	e := &spendEntry{Run: t.Run.ID, Turn: t.N, Attempt: t.opened + 1, Profile: t.Profile.Name, At: now().UTC(), Running: true}
+	e := &spendEntry{Run: t.Run.ID, Created: t.Run.Created, Turn: t.N, Attempt: t.opened + 1, Profile: t.Profile.Name, At: now().UTC(), Running: true}
 	if err := h.writeSpend("open", e); err != nil {
 		return err
 	}
@@ -113,7 +118,7 @@ func (h *Home) closeSpend(t *Turn) error {
 	}
 	cost := finiteMetrics(t.metrics)["cost_usd"]
 	e := *t.entry
-	e.At, e.USD, e.Running = now().UTC(), cost-t.spendSaved, false
+	e.At, e.USD, e.Running = now().UTC(), dollars(cost-t.spendSaved), false
 	if err := h.writeSpend("close", &e); err != nil {
 		return err
 	}
@@ -212,14 +217,14 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 		}
 		switch {
 		case e.At.Before(since):
-		case e.Running && h.turnRunning(e.Run, e.Turn):
+		case e.Running && h.turnRunning(&e):
 			// Its cost is not known yet; turns already running finish.
 		case e.Running:
 			unknown(e.Profile == profile, fmt.Sprintf("what run %s turn %d attempt %d cost is unknown (it ended before its cost was written to %s)", e.Run, e.Turn, e.Attempt, path))
 		default:
-			s.all += e.USD
+			s.all += *e.USD
 			if e.Profile == profile {
-				s.mine += e.USD
+				s.mine += *e.USD
 			}
 		}
 	}
@@ -241,37 +246,53 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 			continue
 		}
 		for _, t := range run.Turns {
-			if !t.Ended.Before(since) {
-				c := t.Metrics["cost_usd"]
-				s.all += c
-				if run.Profile == profile {
-					s.mine += c
-				}
+			if t.Ended.Before(since) {
+				continue
+			}
+			// A cost already moved to the ledger, by a save or a gc that
+			// did not finish, counts there.
+			_, err := os.Stat(v1SpendPath(h.Dir, run.ID, t.N))
+			switch {
+			case err == nil:
+				continue
+			case !errors.Is(err, fs.ErrNotExist):
+				unknown(run.Profile == profile, fmt.Sprintf("whether run %s turn %d's cost is in the ledger cannot be told (%v)", run.ID, t.N, err))
+				continue
+			}
+			c := t.Metrics["cost_usd"]
+			s.all += c
+			if run.Profile == profile {
+				s.mine += c
 			}
 		}
 	}
 	return s, nil
 }
 
-// turnRunning reports whether turn n of run id is executing.
-func (h *Home) turnRunning(id string, n int) bool {
-	run, err := h.LoadRun(id)
-	if err != nil || n < 1 || len(run.Turns) != n || run.Turns[n-1].Outcome != "running" {
+// turnRunning reports whether the turn of entry e is executing: in the
+// run e names, not a later run with its id.
+func (h *Home) turnRunning(e *spendEntry) bool {
+	run, err := h.LoadRun(e.Run)
+	if err != nil || !run.Created.Equal(e.Created) || e.Turn < 1 || len(run.Turns) != e.Turn || run.Turns[e.Turn-1].Outcome != "running" {
 		return false
 	}
 	return run.executing()
 }
 
-// moveV1Spend writes the costs of a v1 record's turns into the ledger of
-// the data folder home, under names of their own, so writing them again
-// changes nothing.
+func v1SpendPath(home, run string, turn int) string {
+	return filepath.Join(spendDirOf(home), fmt.Sprintf("%s-%d-v1.json", run, turn))
+}
+
+// moveV1Spend writes the costs of a v1 record's recent turns into the
+// ledger of the data folder home, under names of their own, so writing
+// them again changes nothing.
 func moveV1Spend(home string, r *Run) error {
 	for _, t := range r.Turns {
 		cost := t.Metrics["cost_usd"]
-		if t.Ended.IsZero() || !(cost > 0) || math.IsInf(cost, 0) {
+		if t.Ended.IsZero() || time.Since(t.Ended) > 2*spendWindow || !(cost > 0) || math.IsInf(cost, 0) {
 			continue
 		}
-		e := &spendEntry{Run: r.ID, Turn: t.N, Profile: r.Profile, At: t.Ended, USD: cost}
+		e := &spendEntry{Run: r.ID, Created: r.Created, Turn: t.N, Profile: r.Profile, At: t.Ended, USD: dollars(cost)}
 		data, err := json.Marshal(e)
 		if err != nil {
 			return err
@@ -279,7 +300,7 @@ func moveV1Spend(home string, r *Run) error {
 		if err := os.MkdirAll(spendDirOf(home), 0o700); err != nil {
 			return err
 		}
-		if err := writeFileAtomic(filepath.Join(spendDirOf(home), fmt.Sprintf("%s-%d-v1.json", r.ID, t.N)), append(data, '\n')); err != nil {
+		if err := writeFileAtomic(v1SpendPath(home, r.ID, t.N), append(data, '\n')); err != nil {
 			return err
 		}
 	}

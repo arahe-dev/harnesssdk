@@ -155,6 +155,14 @@ func (h *Home) collect(ctx context.Context, id string, cutoff time.Time, dryRun,
 		release()
 		return size, err
 	}
+	// A v1 record counts its turns' costs itself: they move to the
+	// spending ledger before it goes, or it stays.
+	if r.Format < runFormat {
+		if err := moveV1Spend(h.Dir, r); err != nil {
+			release()
+			return -1, fmt.Errorf("run %s: moving its turns' costs to the spending ledger: %w", id, err)
+		}
+	}
 	// The worktree goes first, its work committed to its branch, which
 	// stays; a worktree whose work cannot be kept keeps its run too.
 	if err := removeWorktree(ctx, r, abandoned); err != nil {

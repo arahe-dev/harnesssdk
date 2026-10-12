@@ -103,8 +103,9 @@ branch included, whatever its age. Only what is known is acted on: a mark
 or commit file that cannot be read leaves the run alone (and `Execute`
 refuses it), a run that ever started a turn is never treated as abandoned,
 and a rollback removes a worktree only when git finds it clean (`status
---porcelain --ignored`), or when git never made it one (no `.git`):
-anything it cannot inspect is kept.
+--porcelain --ignored --untracked-files=all`), and a folder that is not a
+worktree (no `.git`) only when it is empty: anything it cannot inspect is
+kept.
 
 A `--worktree` run gets its worktree and branch while staged. Each name is
 claimed by an operation that fails if the name is taken (`mkdir` of the
@@ -131,18 +132,21 @@ turn is stopped; a stopped one lets go of its execution lock before its
 ticket.
 
 Spending sums the entries in the window. A `running` entry counts nothing
-while its turn executes (its run's execution lock is held and its record
-says the turn is running): turns already running finish, as before. Once
+while its turn executes (its run's execution lock is held, its record says
+the turn is running, and the run is the one the entry names: same id and
+creation time): turns already running finish, as before. Once
 that turn is over, a `running` entry's cost is unknown, and so is an entry
-that cannot be read, or that is not a valid entry (one naming its run,
-turn, attempt, profile and time, with a cost of zero or more dollars);
+that cannot be read, or that is not a valid entry (one naming its run and
+its creation time, turn, attempt, profile and time, and, once closed, a
+cost of zero or more dollars);
 files being written, `.tmp-*`, are not entries. An
 unknown cost refuses turns under any limit it falls under (the machine's,
 and its profile's) until it is out of the window, or someone removes it:
 spending limits fail closed. Turns recorded before v2 count by their run
-records until v2 saves the record, which first moves their costs into the
-ledger (`<run>-<turn>-v1.json`, the same name each time). Entries go once
-they are two windows old.
+records until v2 saves the record, or `gc` removes it, either of which
+first moves their costs into the ledger (`<run>-<turn>-v1.json`, the same
+name each time); a turn whose cost is there counts only there. Entries go
+once they are two windows old.
 
 ## The repeat guard
 

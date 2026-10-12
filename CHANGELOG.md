@@ -158,6 +158,17 @@ regression tests:
 - Ledger entries are validated (run, turn, attempt, profile, time, cost);
   an invalid one is unknown, and a turn number of 0 no longer panics.
 
+Its eighth review found 2 high and 4 medium issues, also fixed with
+regression tests:
+- A rollback asks git for every untracked and ignored file whatever the
+  repository's configuration, and removes a folder that is not a worktree
+  only when it is empty.
+- A v1 turn's cost counts once, in the ledger once it is there, and moves
+  there before `gc` removes its record too.
+- A ledger entry names its run's creation time, so a later run with the
+  same id cannot make an earlier unknown entry look like it is running.
+- A closed entry without a cost, or with a null one, is not valid.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now
