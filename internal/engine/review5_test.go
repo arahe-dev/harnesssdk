@@ -170,8 +170,7 @@ func TestStopTakenOnlyWhileWatchLives(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	paused, resume := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	testHookTake = func() { once.Do(func() { close(paused); <-resume }) }
-	defer func() { testHookTake = nil }()
+	w.hook = func() { once.Do(func() { close(paused); <-resume }) }
 	took := make(chan bool)
 	go func() { took <- w.take(ctx) }()
 	<-paused // past its context check

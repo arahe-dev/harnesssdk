@@ -346,7 +346,8 @@ func TestExpiredWaitLeavesAtOnce(t *testing.T) {
 	done := make(chan Report)
 	go func() { done <- f.start(ctx, "q", "x")[0] }()
 	time.Sleep(400 * time.Millisecond) // queued
-	lk, err := lockOpen(filepath.Join(g.ledger("b"), "state.lock"))
+	// Taken between the waiting turn's passes, which lock it briefly.
+	lk, err := lockWaitOpen(filepath.Join(g.ledger("b"), "state.lock"), 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

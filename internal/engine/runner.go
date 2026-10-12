@@ -1163,13 +1163,11 @@ func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait tim
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
-// Test hooks, when set: testHookTurnEnd runs when execute returns,
-// testHookFinalize before a worktree turn's commit, and testHookTake in a
-// stop watch's take.
+// Test hooks, when set: testHookTurnEnd runs when execute returns, and
+// testHookFinalize before a worktree turn's commit.
 var (
 	testHookFinalize func(ctx context.Context)
 	testHookTurnEnd  func()
-	testHookTake     func()
 )
 
 // saveMetrics records the turn's metrics so far in its run record, for
@@ -1246,6 +1244,7 @@ type stopWatch struct {
 	path    string
 	mu      sync.Mutex
 	handled string // the stamp of the last request acted on
+	hook    func() // for tests: runs in take, after its context check
 }
 
 // watch cancels when a request not acted on yet appears, until ctx ends.
@@ -1273,8 +1272,8 @@ func (w *stopWatch) take(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	if testHookTake != nil {
-		testHookTake()
+	if w.hook != nil {
+		w.hook()
 	}
 	s := fileStamp(w.path)
 	if s == "" || s == w.handled {
