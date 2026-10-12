@@ -65,6 +65,13 @@ var runID = func() string { return time.Now().Format("060102-150405") + "-" + ra
 // it, its creator holds runs/.new-<id>.lock, outside the folder (Windows
 // cannot rename a folder with a file open inside); gc removes a staging
 // folder only when that lock is free, that is when its creator is gone.
+//
+// Those lock files come and go, so taking one and removing one must never
+// interleave: on Unix, a lock taken on a file just before it is unlinked
+// would no longer exclude a lock on the file created next under its name.
+// So creators take their lock, and anyone removes a lock file, only while
+// holding <home>/create.lock, which is never removed and held only for a
+// moment.
 
 // stagePrefix names a run being prepared and its lock; it is not a run id.
 const stagePrefix = ".new-"
@@ -72,8 +79,14 @@ const stagePrefix = ".new-"
 // stagedRun is a run being prepared.
 type stagedRun struct {
 	*Run
+	home  *Home
 	final string
 	lock  *os.File
+}
+
+// creationLock coordinates creation locks; see above.
+func (h *Home) creationLock() (unlock func(), err error) {
+	return lockFileWait(filepath.Join(h.Dir, "create.lock"), 10*time.Second)
 }
 
 // stageRun prepares a new run, with its record, under a staging name.
@@ -82,7 +95,12 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 	for range 8 {
 		id := runID()
 		stage := filepath.Join(runs, stagePrefix+id)
+		unlock, err := h.creationLock()
+		if err != nil {
+			return nil, err
+		}
 		lock, err := lockOpen(stage + ".lock")
+		unlock()
 		if errors.Is(err, errBusy) {
 			continue // another creator chose this id
 		}
@@ -104,7 +122,7 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 			return nil, err
 		}
 		s := &stagedRun{Run: &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
-			Created: time.Now().UTC(), dir: stage}, final: final, lock: lock}
+			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock}
 		if err := createStage("record"); err != nil {
 			s.abort()
 			return nil, err
@@ -138,8 +156,13 @@ func (s *stagedRun) abort() {
 }
 
 func (s *stagedRun) release() {
+	unlock, err := s.home.creationLock()
 	s.lock.Close()
+	if err != nil {
+		return // the lock file stays; gc removes it once it can
+	}
 	os.Remove(s.lock.Name())
+	unlock()
 }
 
 // NewRun creates a run with no turn yet.

@@ -474,3 +474,68 @@ func TestRunIDCollisions(t *testing.T) {
 		t.Fatal("the first run was replaced")
 	}
 }
+
+// Round five of the review.
+
+// Taking a creation lock and removing a lock file never interleave: a
+// creator waits while cleanup holds the coordination lock.
+func TestCreationWaitsForCleanup(t *testing.T) {
+	h := newGateHome(t)
+	unlock, err := h.creationLock() // cleanup, between unlocking and removing a lock file
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan error, 1)
+	go func() {
+		_, err := h.NewRun("p", "h", ".", "")
+		created <- err
+	}()
+	select {
+	case err := <-created:
+		t.Fatalf("a run was created during cleanup: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	unlock()
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(h.Dir, "create.lock")); err != nil {
+		t.Fatal("the coordination lock file was removed")
+	}
+}
+
+// After cleanup removes an abandoned creation, a creator reusing its id
+// holds a lock that another cleanup respects.
+func TestReusedCreationIDIsProtected(t *testing.T) {
+	h := newGateHome(t)
+	runs := filepath.Join(h.Dir, "runs")
+	id := "261012-000000-dddd"
+	stage := filepath.Join(runs, stagePrefix+id)
+	os.Mkdir(stage, 0o700) // abandoned: its lock file exists, unlocked
+	os.WriteFile(stage+".lock", nil, 0o600)
+	h.collectStage(stagePrefix + id)
+	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("abandoned creation kept")
+	}
+	defer func() {
+		testHookCreate = nil
+		runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) }
+	}()
+	runID = func() string { return id }
+	testHookCreate = func(s string) error {
+		if s == "record" { // the creator holds its lock and its folder exists
+			h.collectStage(stagePrefix + id)
+			h.collectStage(stagePrefix + id + ".lock")
+			if _, err := os.Stat(stage); err != nil {
+				t.Error("a live creation was removed")
+			}
+		}
+		return nil
+	}
+	if r, err := h.NewRun("p", "h", ".", ""); err != nil || r.ID != id {
+		t.Fatalf("%v %v", r, err)
+	}
+	if _, err := os.Stat(stage + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the creation lock file was left behind")
+	}
+}

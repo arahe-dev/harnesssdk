@@ -119,9 +119,15 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 
 // collectStage removes a run being prepared whose creator is gone: its
 // lock is free. A live creator holds the lock from before it makes the
-// folder until it has published or removed it.
+// folder until it has published or removed it. The lock file is removed
+// under the creation lock (see stageRun).
 func (h *Home) collectStage(name string) {
 	lockPath := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock")+".lock")
+	coord, err := h.creationLock()
+	if err != nil {
+		return
+	}
+	defer coord()
 	unlock, err := lockFile(lockPath)
 	if err != nil {
 		return // its creator is alive

@@ -4,8 +4,8 @@
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in
 its review of v1.6.0, and 5 more in its review of the first version of
-this release, 2 in its third review and 2 in its fourth. Every code fix has
-a regression test. **v1.6.0 is
+this release, then 2, 2 and 1 in its next three. Every code fix has a
+regression test. **v1.6.0 is
 retracted** (`go.mod`), since it broke code written for v1.5.
 
 - **API compatibility restored.** v1.6.0 added map fields to `Result` and
@@ -48,7 +48,10 @@ retracted** (`go.mod`), since it broke code written for v1.5.
   a run is prepared under a staging name, with its record and first turn,
   and renamed into `runs/` whole, while its creator holds a lock beside
   it; gc removes a staging folder only once that lock is free (its creator
-  is gone), however old the folder. A run whose turn still waits for its
+  is gone), however old the folder. Creation locks are taken, and their
+  files removed, only under one permanent coordination lock, so on Unix a
+  lock can never be split between a file and the one recreated under its
+  name. A run whose turn still waits for its
   worker is left alone until the turn counts as lost. A folder without a
   record (an interrupted removal) is removed only if untouched since the
   cutoff. Run ids that collide with a published run or a creation in
