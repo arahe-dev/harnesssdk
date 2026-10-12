@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,9 @@ import (
 // no cost (Codex) is not limited by them.
 //
 // What turns spent is kept in a ledger, <home>/spend, with one entry per
-// attempt, <run>-<turn>-<attempt>.json, written whole. The entry is made,
+// attempt, <run>-<turn>-<attempt>-<random>.json, written whole (the random
+// part keeps a run id used again, after its run is gone, from writing over
+// the entries of the first). The entry is made,
 // "running", before the attempt runs, and rewritten with what the attempt
 // cost before the attempt's admission is released; a turn under a limit
 // whose entry cannot be made does not run, and one whose cost cannot be
@@ -32,8 +35,10 @@ import (
 // whose turn is over (its process died, or it was stopped before its cost
 // could be written) has an unknown cost, and so does an entry that cannot
 // be read: turns under a limit it falls under are refused until it leaves
-// the window, or someone removes it. Turns recorded before v2 count by
-// their run records. Entries go once they are two windows old.
+// the window, or someone removes it; an entry is never removed because its
+// cost could not be written. Turns recorded before v2 count by their run
+// records, until v2 saves the record: their costs then move to the ledger
+// first (<run>-<turn>-v1.json). Entries go once they are two windows old.
 
 const spendWindow = 24 * time.Hour
 
@@ -46,12 +51,27 @@ type spendEntry struct {
 	At      time.Time `json:"at"` // when the attempt started, or, once its cost is in, ended
 	USD     float64   `json:"usd"`
 	Running bool      `json:"running,omitempty"`
+	path    string    // where it is written
 }
 
-func (h *Home) spendDir() string { return filepath.Join(h.Dir, "spend") }
+// valid reports whether e is an entry spending can count: one that names
+// its run, turn, attempt (0 for a cost moved from a v1 record), profile
+// and time, with a cost that is a number of dollars.
+func (e *spendEntry) valid() bool {
+	return validName(e.Run) && e.Turn >= 1 && (e.Attempt >= 1 || e.Attempt == 0 && !e.Running) &&
+		validName(e.Profile) && !e.At.IsZero() && e.USD >= 0 && !math.IsInf(e.USD, 0)
+}
 
+func (h *Home) spendDir() string { return spendDirOf(h.Dir) }
+
+func spendDirOf(home string) string { return filepath.Join(home, "spend") }
+
+// spendPath is where e is written: a new name for a new entry.
 func (h *Home) spendPath(e *spendEntry) string {
-	return filepath.Join(h.spendDir(), fmt.Sprintf("%s-%d-%d.json", e.Run, e.Turn, e.Attempt))
+	if e.path == "" {
+		e.path = filepath.Join(h.spendDir(), fmt.Sprintf("%s-%d-%d-%s.json", e.Run, e.Turn, e.Attempt, randHex(8)))
+	}
+	return e.path
 }
 
 // testHookSpend, when set, runs as an entry is opened or closed ("open",
@@ -183,6 +203,9 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 		if err == nil {
 			err = json.Unmarshal(data, &e)
 		}
+		if err == nil && !e.valid() {
+			err = errors.New("it is not a valid entry")
+		}
 		if err != nil {
 			unknown(true, fmt.Sprintf("the spending entry %s cannot be read (%v)", path, err))
 			continue
@@ -233,10 +256,34 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 // turnRunning reports whether turn n of run id is executing.
 func (h *Home) turnRunning(id string, n int) bool {
 	run, err := h.LoadRun(id)
-	if err != nil || len(run.Turns) != n || run.Turns[n-1].Outcome != "running" {
+	if err != nil || n < 1 || len(run.Turns) != n || run.Turns[n-1].Outcome != "running" {
 		return false
 	}
 	return run.executing()
+}
+
+// moveV1Spend writes the costs of a v1 record's turns into the ledger of
+// the data folder home, under names of their own, so writing them again
+// changes nothing.
+func moveV1Spend(home string, r *Run) error {
+	for _, t := range r.Turns {
+		cost := t.Metrics["cost_usd"]
+		if t.Ended.IsZero() || !(cost > 0) || math.IsInf(cost, 0) {
+			continue
+		}
+		e := &spendEntry{Run: r.ID, Turn: t.N, Profile: r.Profile, At: t.Ended, USD: cost}
+		data, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(spendDirOf(home), 0o700); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(filepath.Join(spendDirOf(home), fmt.Sprintf("%s-%d-v1.json", r.ID, t.N)), append(data, '\n')); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pruneSpend removes ledger entries two windows old.

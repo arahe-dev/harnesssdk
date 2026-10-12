@@ -264,9 +264,10 @@ func dirSize(dir string) (int64, []os.DirEntry, error) {
 	return size, entries, nil
 }
 
-// ran reports whether any turn of the run started.
+// ran reports whether any turn of the run started executing. (A queued
+// turn that was never started can be ended as lost without running.)
 func (r *Run) ran() bool {
-	return slices.ContainsFunc(r.Turns, func(t TurnRecord) bool { return t.Outcome != "queued" })
+	return slices.ContainsFunc(r.Turns, func(t TurnRecord) bool { return !t.Started.IsZero() })
 }
 
 // settling reports whether a run may still be taking shape without

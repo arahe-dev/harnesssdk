@@ -162,8 +162,29 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	if run.Worktree == "" {
 		return nil
 	}
-	_, statErr := os.Stat(run.Worktree)
-	exists := statErr == nil
+	// made: git made a worktree in the folder (it has its .git). A folder
+	// without one is only what addWorktree made itself. Whatever cannot be
+	// inspected is kept.
+	_, err := os.Stat(run.Worktree)
+	exists, made := err == nil, false
+	if exists {
+		_, err = os.Lstat(filepath.Join(run.Worktree, ".git"))
+		made = err == nil
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("worktree %s cannot be inspected, so it is kept: %w", run.Worktree, err)
+	}
+	if drop && made {
+		// The run never ran, so its worktree should hold nothing of
+		// anyone's: it is removed only once git finds it clean.
+		status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain", "--ignored")
+		if err != nil {
+			return fmt.Errorf("cannot tell whether worktree %s holds changes, so it is kept: %w", run.Worktree, err)
+		}
+		if status != "" {
+			return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
+		}
+	}
 	if !drop && exists {
 		if head, err := git(ctx, "-C", run.Worktree, "symbolic-ref", "-q", "HEAD"); err != nil || head != "refs/heads/"+run.Branch {
 			return fmt.Errorf("worktree %s is not on its branch %s (HEAD %s); it is kept so that no work is lost", run.Worktree, run.Branch, or(head, "detached"))
@@ -174,20 +195,10 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	}
 	at, err := repo(ctx, run)
 	if err != nil {
-		if drop && exists {
-			return os.RemoveAll(run.Worktree)
+		if drop && exists && !made {
+			return os.RemoveAll(run.Worktree) // never a worktree: nothing in git to undo
 		}
 		return err
-	}
-	if exists && drop {
-		// The run never ran, so its worktree holds nothing of anyone's;
-		// one that holds changes all the same is kept. (A folder without
-		// its .git is a worktree git never finished making.)
-		if _, err := os.Lstat(filepath.Join(run.Worktree, ".git")); err == nil {
-			if status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain"); err == nil && status != "" {
-				return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
-			}
-		}
 	}
 	if exists {
 		args := append(at, "worktree", "remove")
@@ -198,7 +209,8 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 			if !drop {
 				return fmt.Errorf("worktree %s is kept: %w", run.Worktree, err)
 			}
-			if err := os.RemoveAll(run.Worktree); err != nil { // a half-made worktree of a run that never ran
+			// Found clean, or never a worktree (above): what is left goes.
+			if err := os.RemoveAll(run.Worktree); err != nil {
 				return err
 			}
 		}

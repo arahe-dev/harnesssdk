@@ -142,8 +142,21 @@ regression tests:
   replaces the per-turn `spend` records and the files written apart in the
   fifth round. A cost that never reached the ledger is unknown and, like an
   unreadable entry, refuses turns under a limit until it leaves the 24-hour
-  window or is removed: spending limits fail closed. A v1 run continued by v2
-  loses the v1 turns' costs from the window.
+  window or is removed: spending limits fail closed.
+
+Its seventh review found 1 high and 5 medium issues, also fixed with
+regression tests:
+- A rollback removes a worktree only when git finds it clean, or never made
+  it one; one it cannot inspect is kept.
+- A v1 record's turn costs move into the ledger before v2 first saves the
+  record, so a follow-up on an old run still counts them.
+- Ledger entries have names of their own, so a run id used again cannot
+  write over earlier costs, and an entry whose cost could not be written is
+  kept even when no limit applies.
+- A run counts as having run only when a turn started, so an uncommitted
+  creation whose queued turn was ended as lost is still rolled back.
+- Ledger entries are validated (run, turn, attempt, profile, time, cost);
+  an invalid one is unknown, and a turn number of 0 no longer panics.
 
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered

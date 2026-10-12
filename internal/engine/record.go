@@ -298,6 +298,13 @@ func executingAt(dir string) bool {
 
 // Save writes run.json.
 func (r *Run) Save() error {
+	// A v1 record counts its turns' costs itself, and a v2 one does not:
+	// before it is saved as v2, they move to the spending ledger.
+	if r.Format != 0 && r.Format < runFormat {
+		if err := moveV1Spend(filepath.Dir(filepath.Dir(r.dir)), r); err != nil {
+			return fmt.Errorf("run %s: moving its turns' costs to the spending ledger: %w", r.ID, err)
+		}
+	}
 	r.Format = runFormat // a record this harness saves may hold what v1 would misread
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {

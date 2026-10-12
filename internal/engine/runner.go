@@ -1075,7 +1075,9 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 				if limited(cfg, p) {
 					unrecorded, executed = true, false
 				} else {
-					os.Remove(r.home.spendPath(t.entry)) // its cost goes to the next entry
+					// Its entry stays, with its cost unknown: under no limit
+					// now, that matters only if one is set while it is in
+					// the window. A next attempt's entry takes the cost too.
 					t.entry = nil
 				}
 			}
