@@ -215,6 +215,18 @@ func TestCLIConfigAndGC(t *testing.T) {
 	if code, _, errs := harnessCLI(t, "", "config", "set", "retention_days", "0"); code != 0 {
 		t.Fatalf("config set: %d %s", code, errs)
 	}
+	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !regexp.MustCompile(`spend_unknown +warn `).MatchString(out) {
+		t.Fatalf("spend_unknown's default: %q", out)
+	}
+	if code, _, errs := harnessCLI(t, "", "config", "set", "spend_unknown", "1.5"); code != 0 {
+		t.Fatalf("config set spend_unknown: %d %s", code, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !regexp.MustCompile(`spend_unknown +1\.5 `).MatchString(out) {
+		t.Fatalf("spend_unknown set: %q", out)
+	}
+	if code, _, errs := harnessCLI(t, "", "config", "set", "spend_unknown", "sometimes"); code != 2 || !strings.Contains(errs, "warn, refuse") {
+		t.Fatalf("config set spend_unknown sometimes: %d %s", code, errs)
+	}
 	if code, _, errs := harnessCLI(t, "", "gc"); code != 2 || !strings.Contains(errs, "--days") {
 		t.Fatalf("gc with retention off: %d %s", code, errs)
 	}

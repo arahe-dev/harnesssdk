@@ -20,7 +20,7 @@ import (
 func TestUnknownCostRefusesLimitedTurns(t *testing.T) {
 	f := newFixture(t, map[string]int64{"b": 1})
 	usageDef(f) // $0.50 a turn
-	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 5")
+	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 5\nspend_unknown: refuse")
 	runs, err := f.r.Prepare("u", []string{"first", "second", "third"}, f.cwd, TurnOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestUnknownCostRefusesLimitedTurns(t *testing.T) {
 func TestUnreadableLedgerEntryRefuses(t *testing.T) {
 	f := newFixture(t, nil)
 	usageDef(f)
-	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 5")
+	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 5\nspend_unknown: refuse")
 	f.profile("free", "harness: fakeusage\neffect: pure\nmode: usage")
 	os.MkdirAll(f.home.spendDir(), 0o700)
 	os.WriteFile(filepath.Join(f.home.spendDir(), ".tmp-123"), []byte("{half"), 0o600)

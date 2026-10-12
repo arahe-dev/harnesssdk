@@ -40,6 +40,7 @@ type Turn struct {
 	entry       *spendEntry        // the attempt's ledger entry, while its cost is not in it
 	opened      int                // ledger entries made for the turn
 	held        *Ticket            // admission kept until finish records the cost
+	spendHint   string             // how spending limits counted unknown costs
 	changes     string             // the worktree branch's changes after the turn
 	check       string             // the check command run, if any
 	checked     string             // passed or failed
@@ -584,7 +585,7 @@ func (r *Runner) check(profile string, tasks []string, cwd string, o TurnOptions
 	if err != nil {
 		return nil, err
 	}
-	if err := r.home.checkSpend(p); err != nil {
+	if _, err := r.home.checkSpend(p); err != nil {
 		return nil, fmt.Errorf("profile %s: %w", p.Name, err)
 	}
 	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, o: o, depth: depth, parent: r.kin().Parent}
@@ -729,7 +730,7 @@ func (r *Runner) PrepareSend(id, prompt string, o TurnOptions) (int, error) {
 		if err := r.home.checkRepeat(fp); err != nil {
 			return err
 		}
-		if err := r.home.checkSpend(p); err != nil {
+		if _, err := r.home.checkSpend(p); err != nil {
 			return err
 		}
 		if p.Harness != run.Harness {
@@ -928,7 +929,10 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	}
 	if t != nil && t.held != nil && t.entry != nil && err == nil {
 		err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf(
-			"what the turn cost could not be written to the spending ledger, so it is unknown: turns under a spending limit are refused until it is 24 hours old, or until you remove %s", r.home.spendPath(t.entry)))
+			"what the turn cost could not be written to the spending ledger, so it is unknown; with spend_unknown refuse, turns under a spending limit are refused until it is 24 hours old, or until you remove %s", r.home.spendPath(t.entry)))
+	}
+	if t != nil && t.spendHint != "" {
+		rep.Hint = strings.TrimPrefix(rep.Hint+"; "+t.spendHint, "; ")
 	}
 	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
 	if run != nil {
@@ -1038,7 +1042,11 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, t, err
 		}
 		if err = r.home.checkRepeat(t.repeat); err == nil {
-			err = r.home.checkSpend(p)
+			var hint string
+			if hint, err = r.home.checkSpend(p); hint != "" && hint != t.spendHint {
+				t.spendHint = hint
+				t.logf("== harness: hint: %s", hint)
+			}
 		}
 		executed := err == nil // a refusal of harness's own is final, never retried
 		if executed {
@@ -1046,7 +1054,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			// under a spending limit whose spending cannot be recorded
 			// does not run.
 			if oerr := r.home.openSpend(t); oerr != nil {
-				if limited(cfg, p) {
+				if limited(cfg, p) && unknownPolicyOf(cfg, p).refuse {
 					err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("the spending ledger cannot be written, so a turn under a spending limit does not run: %w", oerr))
 					executed = false
 				} else {
@@ -1072,12 +1080,12 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			// and stays admitted (here and in Execute).
 			if cerr := r.home.closeSpend(t); cerr != nil {
 				t.logf("== harness warning: writing what the attempt cost to the spending ledger: %v", cerr)
-				if limited(cfg, p) {
+				if limited(cfg, p) && unknownPolicyOf(cfg, p).refuse {
 					unrecorded, executed = true, false
 				} else {
-					// Its entry stays, with its cost unknown: under no limit
-					// now, that matters only if one is set while it is in
-					// the window. A next attempt's entry takes the cost too.
+					// Its entry stays, with its cost unknown, for limits to
+					// count as spend_unknown says. A next attempt's entry
+					// takes the cost too.
 					t.entry = nil
 				}
 			}

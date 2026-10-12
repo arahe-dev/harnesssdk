@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,9 +35,9 @@ import (
 // ended. An entry still running counts nothing while its turn runs; one
 // whose turn is over (its process died, or it was stopped before its cost
 // could be written) has an unknown cost, and so does an entry that cannot
-// be read: turns under a limit it falls under are refused until it leaves
-// the window, or someone removes it; an entry is never removed because its
-// cost could not be written. Turns recorded before v2 count by their run
+// be read. How limits count an unknown cost is the user's to choose (see
+// unknownPolicy); an entry is never removed because its cost could not be
+// written. Turns recorded before v2 count by their run
 // records, until v2 saves the record: their costs then move to the ledger
 // first (<run>-<created>-<turn>-v1.json). Entries go once they are two
 // windows old.
@@ -130,45 +131,102 @@ func (h *Home) closeSpend(t *Turn) error {
 // limited reports whether a spending limit applies to turns of p.
 func limited(cfg Config, p *Profile) bool { return cfg.SpendLimitUSD > 0 || p.SpendLimit > 0 }
 
+// unknownPolicy is how spending limits count a cost harness could not
+// record (spend_unknown, in config.json or a profile, whose wins):
+//
+//   - warn (the default): as $0, with a hint that says so and how to
+//     change it;
+//   - a number of dollars: as that much each;
+//   - refuse: turns under a limit it falls under are refused until it
+//     leaves the window, or its ledger entry is removed.
+//
+// Only refuse also stops a turn under a limit whose ledger entry cannot be
+// made, and keeps one admitted while its cost cannot be written.
+type unknownPolicy struct {
+	refuse bool
+	assume float64
+}
+
+func parseUnknown(s string) (unknownPolicy, error) {
+	switch v := strings.TrimSpace(s); v {
+	case "", "warn":
+		return unknownPolicy{}, nil
+	case "refuse":
+		return unknownPolicy{refuse: true}, nil
+	default:
+		n, err := strconv.ParseFloat(strings.TrimPrefix(v, "$"), 64)
+		if err != nil || n < 0 || !finite(n) {
+			return unknownPolicy{}, fmt.Errorf("spend_unknown is warn, refuse, or the dollars a cost harness could not record counts as; not %q", s)
+		}
+		return unknownPolicy{assume: n}, nil
+	}
+}
+
+// unknownPolicyOf is p's spend_unknown, or else the machine's.
+func unknownPolicyOf(cfg Config, p *Profile) unknownPolicy {
+	s := cfg.SpendUnknown
+	if p.SpendUnknown != "" {
+		s = p.SpendUnknown
+	}
+	pol, _ := parseUnknown(s) // validated as config.json and the profile were read
+	return pol
+}
+
+// spendUnknownHow says how to choose what unknown costs count as.
+const spendUnknownHow = "choose how they count with: harness config set spend_unknown <warn|refuse|dollars>, or spend_unknown in the profile"
+
 // checkSpend refuses a turn of p as throttled once p, or the machine, has
-// spent its limit, or may have: while what an attempt under that limit
-// cost is unknown.
-func (h *Home) checkSpend(p *Profile) error {
+// spent its limit, counting the costs harness could not record as
+// spend_unknown says. hint, when there are such costs, says what they were
+// counted as.
+func (h *Home) checkSpend(p *Profile) (hint string, err error) {
 	cfg, err := h.Config()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !limited(cfg, p) {
-		return nil
+		return "", nil
 	}
 	s, err := h.spending(now().Add(-spendWindow), p.Name)
 	if err != nil {
-		return err
+		return "", err
 	}
-	unknown := func(what string) error {
-		return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"%s, so turns under a spending limit are refused until it is 24 hours old, or until you remove it", what))
+	// The unknown costs under the limits that apply: the machine's covers
+	// every profile's.
+	unknown := s.unknownMine
+	if cfg.SpendLimitUSD > 0 {
+		unknown = s.unknownAll
+	}
+	pol := unknownPolicyOf(cfg, p)
+	if pol.refuse && len(unknown) > 0 {
+		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"%s, and spend_unknown is refuse: turns under a spending limit are refused until it is 24 hours old, or its entry is removed; %s", unknown[0], spendUnknownHow))
+	}
+	all := s.all + pol.assume*float64(len(s.unknownAll))
+	mine := s.mine + pol.assume*float64(len(s.unknownMine))
+	counted := ""
+	if len(unknown) > 0 {
+		counted = fmt.Sprintf(" (%d cost(s) harness could not record counted as $%.2f each)", len(unknown), pol.assume)
 	}
 	switch {
-	case cfg.SpendLimitUSD > 0 && s.unknownAll != "":
-		return unknown(s.unknownAll)
-	case cfg.SpendLimitUSD > 0 && s.all >= float64(cfg.SpendLimitUSD):
-		return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"turns on this machine have spent $%.2f in the last 24 hours, and spend_limit_usd is $%d; raise it with: harness config set spend_limit_usd <dollars>", s.all, cfg.SpendLimitUSD))
-	case p.SpendLimit > 0 && s.unknownMine != "":
-		return unknown(s.unknownMine)
-	case p.SpendLimit > 0 && s.mine >= p.SpendLimit:
-		return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"profile %s has spent $%.2f in the last 24 hours, and its spend_limit_usd is $%.2f", p.Name, s.mine, p.SpendLimit))
+	case cfg.SpendLimitUSD > 0 && all >= float64(cfg.SpendLimitUSD):
+		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"turns on this machine have spent $%.2f in the last 24 hours%s, and spend_limit_usd is $%d; raise it with: harness config set spend_limit_usd <dollars>", all, counted, cfg.SpendLimitUSD))
+	case p.SpendLimit > 0 && mine >= p.SpendLimit:
+		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"profile %s has spent $%.2f in the last 24 hours%s, and its spend_limit_usd is $%.2f", p.Name, mine, counted, p.SpendLimit))
 	}
-	return nil
+	if len(unknown) > 0 {
+		hint = fmt.Sprintf("spending limits count %d cost(s) harness could not record as $%.2f each (%s); %s", len(unknown), pol.assume, unknown[0], spendUnknownHow)
+	}
+	return hint, nil
 }
 
-// spent is what turns spent in a window: on the machine, and by one
-// profile, with the first entry of each whose cost is unknown.
+// spent is what turns spent in a window, on the machine and by one
+// profile, with why each cost that could not be told is unknown.
 type spent struct {
 	all, mine               float64
-	unknownAll, unknownMine string
+	unknownAll, unknownMine []string
 }
 
 // spending sums what attempts cost since then, by when each ended: so a
@@ -177,11 +235,9 @@ type spent struct {
 // count because a later one is in it.
 func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 	unknown := func(mine bool, what string) {
-		if s.unknownAll == "" {
-			s.unknownAll = what
-		}
-		if mine && s.unknownMine == "" {
-			s.unknownMine = what
+		s.unknownAll = append(s.unknownAll, what)
+		if mine {
+			s.unknownMine = append(s.unknownMine, what)
 		}
 	}
 	add := func(p string, usd float64) {

@@ -100,6 +100,7 @@ func TestUnlimitedTurnKeepsUnknownEntry(t *testing.T) {
 		t.Fatalf("%s %v", rep.Outcome, rep.Err)
 	}
 	f.home.SetConfig("spend_limit_usd", 5)
+	f.home.SetConfigValue("spend_unknown", "refuse")
 	if _, err := f.r.Start(context.Background(), "u", []string{"y"}, f.cwd, TurnOptions{}, nil); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("a limit set later did not see the unknown cost: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestLostQueuedTurnIsStillAbandoned(t *testing.T) {
 func TestInvalidLedgerEntriesAreUnknown(t *testing.T) {
 	f := newFixture(t, nil)
 	usageDef(f)
-	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 5")
+	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 5\nspend_unknown: refuse")
 	empty, err := f.home.NewRun("u", "fakeusage", f.cwd, "") // a run with no turn
 	if err != nil {
 		t.Fatal(err)

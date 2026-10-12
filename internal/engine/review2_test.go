@@ -140,7 +140,7 @@ func TestSpendingCountsAttemptsAndOldRuns(t *testing.T) {
 	now := time.Now()
 	os.Chtimes(legacy.Dir(), now, now)
 	s, err := h.spending(time.Now().Add(-spendWindow), "p")
-	if err != nil || math.Abs(s.all-0.7) > 1e-9 || math.Abs(s.mine-0.4) > 1e-9 || s.unknownAll != "" {
+	if err != nil || math.Abs(s.all-0.7) > 1e-9 || math.Abs(s.mine-0.4) > 1e-9 || len(s.unknownAll) != 0 {
 		t.Fatalf("spent %+v %v, want 0.7 in all, 0.4 by p", s, err)
 	}
 }

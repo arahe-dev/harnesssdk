@@ -84,7 +84,7 @@ func TestNoHooksFolderCannotBePlanted(t *testing.T) {
 func TestUnrecordedCostKeepsAdmission(t *testing.T) {
 	f := newFixture(t, map[string]int64{"b": 1})
 	usageDef(f) // $0.50 a turn
-	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
+	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4\nspend_unknown: refuse")
 	var closes atomic.Int32
 	testHookSpend = func(stage string) error {
 		if stage == "close" && closes.Add(1) <= 2 {

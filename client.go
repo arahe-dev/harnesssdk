@@ -282,6 +282,9 @@ type Config struct {
 	// SpendLimitUSD caps the machine's reported spend over 24 hours. 0
 	// means no limit.
 	MaxWaitMinutes, MaxQueue, SpendLimitUSD int
+	// SpendUnknown is how spending limits count a cost harness could not
+	// record: "warn" (also ""), "refuse", or a number of dollars.
+	SpendUnknown string
 }
 
 // Config reads the limits.
@@ -289,13 +292,17 @@ func (c *Client) Config() (Config, error) {
 	cfg, err := c.home.Config()
 	return Config{MaxDepth: cfg.MaxDepth, MaxRunning: cfg.MaxRunning, RetentionDays: cfg.RetentionDays,
 		RepeatWarn: cfg.RepeatWarn, RepeatRefuse: cfg.RepeatRefuse,
-		MaxWaitMinutes: cfg.MaxWaitMinutes, MaxQueue: cfg.MaxQueue, SpendLimitUSD: cfg.SpendLimitUSD}, err
+		MaxWaitMinutes: cfg.MaxWaitMinutes, MaxQueue: cfg.MaxQueue, SpendLimitUSD: cfg.SpendLimitUSD, SpendUnknown: cfg.SpendUnknown}, err
 }
 
 // SetConfig sets one limit: max_depth, max_running, retention_days,
 // repeat_warn, repeat_refuse, max_wait_minutes, max_queue or
 // spend_limit_usd.
 func (c *Client) SetConfig(key string, value int) error { return c.home.SetConfig(key, value) }
+
+// SetConfigValue sets one key from its text: a whole number for the
+// limits, or warn, refuse or a number of dollars for spend_unknown.
+func (c *Client) SetConfigValue(key, value string) error { return c.home.SetConfigValue(key, value) }
 
 // GC removes runs last active before olderThan ago that are not running,
 // and runs whose creation was abandoned, and returns their ids. With dryRun

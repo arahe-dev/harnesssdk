@@ -10,7 +10,7 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v2.0.0-next**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
+> **Status: v2.0.0-next.1**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
 > v1.7.0 is the stable v1). Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35, Codex 0.162.1 and Hermes Agent 0.20.5, including a Codex agent that starts a Pi
 > agent through harness. The test suite passes in CI on Ubuntu and Windows; no
@@ -127,7 +127,7 @@ rather than misread it, and reads files from earlier releases as they are.
 | **Profile** (`profiles/<name>.md`) | Header: harness, placeholder values, and the Herta policy (`effect`, `retry`, `timeout`, `budget`, `admission`, `serialize`). Body: the system prompt. |
 | **Project** (`.harness/` in a repository) | Definitions and profiles for one project, taking precedence there. Used only once trusted; any change needs trusting again. |
 | **Budget** (`budgets.json`) | A named capacity, e.g. `pi: 2`, enforced across every harness process through a FIFO ledger in the data folder. Nested runs (an agent that runs harness itself) know their parent and never deadlock on their ancestors, even under a harness that strips its agents' environment. |
-| **Config** (`config.json`) | Machine-wide limits: `max_depth` (3) for how deep runs nest, `max_running` (16) for turns running at once, `retention_days` (30) before finished runs are removed, `repeat_warn` / `repeat_refuse` (3 / 5) for a request that keeps failing the same way, and optional `max_wait_minutes`, `max_queue` and `spend_limit_usd` (dollars per 24 hours, as the CLIs report it). `harness config` lists and sets them. |
+| **Config** (`config.json`) | Machine-wide limits: `max_depth` (3) for how deep runs nest, `max_running` (16) for turns running at once, `retention_days` (30) before finished runs are removed, `repeat_warn` / `repeat_refuse` (3 / 5) for a request that keeps failing the same way, and optional `max_wait_minutes`, `max_queue` and `spend_limit_usd` (dollars per 24 hours, as the CLIs report it), with `spend_unknown` choosing how a cost harness could not record counts (`warn`, `refuse` or dollars). `harness config` lists and sets them. |
 | **Checks and worktrees** | A profile's `check` (or `--check`) is a command, such as `go test ./...`, that must pass in the agent's folder for the turn to succeed, so success means the work is right. `--worktree` gives a run its own git worktree and branch, so agents that edit files run side by side and `compare` can set them against each other. |
 | **Metrics** (`output.metrics` in a definition) | Numbers read from the CLI's own output with every turn: tokens, cost, model calls, tool calls. `harness stats` sums them up per profile and model (and per `--kind` of task) with success rates and times; `harness compare a,b "task"` runs one task on several profiles side by side. The guide's section on choosing a harness and model turns a 2026 study of harness design into starting points to check this way. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
