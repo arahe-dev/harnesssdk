@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/arahe-dev/hertasdk"
 )
@@ -46,6 +47,11 @@ type Definition struct {
 	// Failures classify a failed run by matching its stderr and stdout.
 	// The first match wins; anything unmatched is permanent.
 	Failures []FailureRule `json:"failures,omitempty"`
+	// RetryAfter is a regex over a failed attempt's stderr and stdout whose
+	// one group is how long the provider asked to wait: seconds ("30") or
+	// a duration ("1m30s"). A retry waits at least that long.
+	RetryAfter string `json:"retry_after,omitempty"`
+	retryAfter *regexp.Regexp
 }
 
 // OutputRule locates the final answer in the CLI's stdout.
@@ -203,7 +209,38 @@ func (d *Definition) validate() error {
 		}
 		f.re = re
 	}
+	if d.RetryAfter != "" {
+		if j := strings.IndexFunc(d.RetryAfter, func(r rune) bool { return r < 0x20 && r != '\t' }); j >= 0 {
+			return fmt.Errorf("retry_after has a control character (%q) at byte %d; in JSON write \\\\d for a digit", d.RetryAfter[j], j)
+		}
+		re, err := regexp.Compile(d.RetryAfter)
+		if err != nil {
+			return fmt.Errorf("retry_after: %w", err)
+		}
+		if re.NumSubexp() != 1 {
+			return fmt.Errorf("retry_after needs exactly one group, the wait (it has %d)", re.NumSubexp())
+		}
+		d.retryAfter = re
+	}
 	return nil
+}
+
+// retryAfterIn is the wait a failed attempt's output asked for, or 0.
+func (d *Definition) retryAfterIn(text string) time.Duration {
+	if d.retryAfter == nil {
+		return 0
+	}
+	m := d.retryAfter.FindStringSubmatch(text)
+	if m == nil {
+		return 0
+	}
+	if s, err := strconv.ParseFloat(strings.TrimSpace(m[1]), 64); err == nil && finite(s) && s > 0 {
+		return time.Duration(min(s, maxRetryAfter.Seconds()) * float64(time.Second))
+	}
+	if dur, err := time.ParseDuration(strings.TrimSpace(m[1])); err == nil && dur > 0 {
+		return dur
+	}
+	return 0
 }
 
 // Dropped is an argument group left out because a placeholder was empty.

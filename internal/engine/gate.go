@@ -49,7 +49,13 @@ type Claim struct {
 	// NoWait refuses the request at once, with errNoWait, when this claim
 	// does not fit.
 	NoWait bool
+	// MaxQueue, if positive, refuses a request with errQueueFull rather
+	// than queue it behind that many waiters.
+	MaxQueue int
 }
+
+// errQueueFull refuses a request whose queue is full.
+var errQueueFull = errors.New("too many turns are waiting")
 
 // runningGate is the gate name of max_running. No budget can be named so.
 const runningGate = "_running"
@@ -240,6 +246,12 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 			}
 			if c.NoWait && c.Capacity-used < c.Units {
 				verdict = fmt.Errorf("%s: all %d units are in use: %w", c.Name, c.Capacity, errNoWait)
+				return
+			}
+			// Checked when the request joins the queue: one already queued
+			// keeps its place however long the queue behind it grows.
+			if first && c.MaxQueue > 0 && len(st.Queue) > c.MaxQueue && (c.Capacity-used < c.Units || !nested && st.Queue[0].ID != me.ID) {
+				verdict = fmt.Errorf("%s: %d turns are waiting already: %w", c.Name, len(st.Queue)-1, errQueueFull)
 				return
 			}
 			head := len(st.Queue) > 0 && st.Queue[0].ID == me.ID

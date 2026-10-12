@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,6 +35,7 @@ type Turn struct {
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
+	retryAfter  time.Duration      // what the last failed attempt's CLI asked to wait
 	hint        string             // the repeat guard's advice, once noted
 	noted       bool               // the outcome was counted while the turn was admitted
 	argv        []string
@@ -205,17 +207,77 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	}
 }
 
+// policyFor is the Herta policy of one attempt. Herta makes a single
+// attempt per call; the retries, with backoff and throttled outcomes that
+// Herta 1.0-next cannot express yet, are harness's own (execute).
 func policyFor(p *Profile) hertasdk.Policy[*Turn] {
-	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: p.Retry}
+	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
+}
+
+// retryable reports whether a failed attempt may be repeated: its outcome
+// is in the profile's retry list and safe for its effect. Transient means
+// the attempt took no effect. Uncertain and throttled may have done part
+// of the work (a rate limit can stop an agent half way through its
+// changes), so a non-idempotent profile never repeats them.
+func retryable(p *Profile, err error) bool {
+	o := hertasdk.OutcomeOf(err)
+	if err == nil || !p.Retry.On[o] {
+		return false
+	}
+	switch o {
+	case hertasdk.Transient:
+		return true
+	case hertasdk.Uncertain, hertasdk.Throttled:
+		return p.Effect != hertasdk.NonIdempotent
+	}
+	return false
+}
+
+const (
+	defaultBackoff = 2 * time.Second
+	maxBackoff     = 5 * time.Minute
+	maxRetryAfter  = time.Hour
+)
+
+// backoffDelay is the wait before retry number k (1 for the second
+// attempt): the profile's backoff doubled k-1 times, capped at maxBackoff,
+// half of it random so that turns failing together do not retry together;
+// and at least what the provider asked for (retryAfter), up to an hour.
+func backoffDelay(base time.Duration, k int, retryAfter time.Duration) time.Duration {
+	if base <= 0 {
+		base = defaultBackoff
+	}
+	d := base
+	for i := 1; i < k && d < maxBackoff; i++ {
+		d *= 2
+	}
+	d = min(d, maxBackoff)
+	d = d/2 + time.Duration(rand.Int64N(int64(d/2)+1))
+	return max(d, min(retryAfter, maxRetryAfter))
 }
 
 // checkPolicy validates a profile's contract: Herta checks its effect and
 // retry table (an unsafe retry fails here, not under load), and every budget
 // it claims must exist, once, and fit.
 func checkPolicy(p *Profile, budgets map[string]int64) error {
+	// Herta validates the effect and the retry table it knows; throttled,
+	// which it cannot retry yet, is checked here by the same rule as
+	// uncertain.
+	herta := hertasdk.RetryPolicy{MaxAttempts: p.Retry.MaxAttempts, On: map[hertasdk.Outcome]bool{}}
+	for o, on := range p.Retry.On {
+		if o != hertasdk.Throttled {
+			herta.On[o] = on
+		}
+	}
 	noop := func(context.Context, *Turn) (*Result, error) { return nil, nil }
-	if _, err := hertasdk.NewOperation(newRuntime(), p.Name, noop, policyFor(p)); err != nil {
+	policy := policyFor(p)
+	policy.Retry = herta
+	if _, err := hertasdk.NewOperation(newRuntime(), p.Name, noop, policy); err != nil {
 		return fmt.Errorf("profile %s: %w", p.Name, err)
+	}
+	if p.Retry.On[hertasdk.Throttled] && p.Effect == hertasdk.NonIdempotent {
+		return fmt.Errorf("profile %s: %w: a non-idempotent profile cannot retry throttled turns (a rate limit can stop an agent part way through its changes); continue the session with harness send instead",
+			p.Name, hertasdk.ErrUnsafeRetry)
 	}
 	seen := map[string]bool{}
 	for _, req := range p.Budget {
@@ -393,7 +455,19 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		cause = fmt.Errorf("%s reported an error: %s", t.Def.Name, firstLine(answer))
 	}
 	evidence := t.stderrTail + "\n" + readTail(stdoutPath, 0, 8<<10)
+	t.retryAfter = t.Def.retryAfterIn(evidence)
 	return nil, hertasdk.Fail(t.Def.classify(evidence), cause)
+}
+
+// logf appends a line to the turn's stderr log, where its attempts are
+// traced.
+func (t *Turn) logf(format string, a ...any) {
+	f, err := os.OpenFile(t.Run.Path(fmt.Sprintf("turn-%d.stderr.log", t.N)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, format+"\n", a...)
 }
 
 func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
@@ -804,35 +878,83 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		nested := len(r.kin().Lineage) > 0
 		claims = append(claims, Claim{Name: runningGate, Units: 1, Capacity: int64(cfg.MaxRunning), NoWait: nested})
 	}
+	for i := range claims {
+		claims[i].MaxQueue = cfg.MaxQueue
+	}
+	maxWait := p.MaxWait
+	if maxWait == 0 {
+		maxWait = time.Duration(cfg.MaxWaitMinutes) * time.Minute
+	}
+	// Each attempt is admitted on its own: between attempts, while it
+	// backs off, a turn holds no budget, key or slot.
+	for {
+		var ticket *Ticket
+		if ticket, err = r.admit(ctx, t, claims, maxWait); err != nil {
+			return nil, t, err
+		}
+		if err = r.home.checkRepeat(t.repeat); err == nil {
+			// On Unix the agent inherits these locks: while any process of
+			// its tree runs, the turn counts as executing and its budget
+			// stays held, even if this process dies.
+			t.inherit = []*os.File{execLock}
+			if ticket.Live != nil {
+				t.inherit = append(t.inherit, ticket.Live)
+			}
+			res, err = op.Do(ctx, t)
+		}
+		again := retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
+		if !again {
+			// Counted while the turn still holds its budget, before a
+			// waiting turn of the same request is admitted and checks it.
+			if !errors.Is(err, ErrRepeated) {
+				t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
+			}
+			ticket.Release()
+			return res, t, err
+		}
+		ticket.Release()
+		delay := backoffDelay(p.Backoff, t.attempts, t.retryAfter)
+		t.logf("== %s; retrying in %s (attempt %d of %d)", OutcomeName(err), delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts)
+		select {
+		case <-ctx.Done():
+			return nil, t, ctx.Err()
+		case <-r.closingCtx.Done():
+			return nil, t, hertasdk.ErrRuntimeStopping
+		case <-time.After(delay):
+		}
+	}
+}
+
+// admit passes the gate for one attempt and records the turn's lineage.
+// A turn waits for its claims at most maxWait, if set.
+func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait time.Duration) (*Ticket, error) {
+	p, run, n := t.Profile, t.Run, t.N
 	gctx, gcancel := context.WithCancel(ctx)
+	defer gcancel()
+	if maxWait > 0 {
+		var cancel context.CancelFunc
+		gctx, cancel = context.WithTimeout(gctx, maxWait)
+		defer cancel()
+	}
 	stopWatch := context.AfterFunc(r.closingCtx, gcancel)
 	ticket, err := r.home.Gate(r.kin().Lineage).Acquire(gctx, claims, p.Admission == hertasdk.Reject, run.ID)
 	stopWatch()
-	gcancel()
 	switch {
 	case errors.Is(err, errNoWait):
-		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"all %d turns max_running allows are running, and a nested run does not wait for one; raise it with: harness config set max_running <n>", cfg.MaxRunning))
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"%w; a nested run does not wait for a running slot (its ancestors hold slots while they wait for it); raise it with: harness config set max_running <n>", err))
+	case errors.Is(err, errQueueFull):
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: %w; raise it with: harness config set max_queue <n>", p.Name, err))
 	case errors.Is(err, errBusy):
-		return nil, t, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: its budget or key is in use and admission is reject", p.Name))
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s: its budget or key is in use and admission is reject", p.Name))
 	case errors.Is(err, ErrWouldDeadlock):
-		return nil, t, hertasdk.Fail(hertasdk.Permanent, err)
+		return nil, hertasdk.Fail(hertasdk.Permanent, err)
 	case err != nil && r.closingCtx.Err() != nil && ctx.Err() == nil:
-		return nil, t, hertasdk.ErrRuntimeStopping
+		return nil, hertasdk.ErrRuntimeStopping
+	case err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
+		return nil, hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("profile %s waited max_wait (%s) for its budgets, keys or a running slot", p.Name, maxWait))
 	case err != nil:
-		return nil, t, err
-	}
-	defer ticket.Release()
-	// Deferred after the release, so it runs first: the outcome is counted
-	// while the turn still holds its budget, before a waiting turn of the
-	// same request is admitted and checks it.
-	defer func() {
-		if !errors.Is(err, ErrRepeated) {
-			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
-		}
-	}()
-	if err := r.home.checkRepeat(t.repeat); err != nil {
-		return nil, t, err
+		return nil, err
 	}
 	t.lineage = slices.Clone(r.kin().Lineage)
 	if ticket.ID != "" {
@@ -844,17 +966,10 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		run.Turns[n-1].Lineage, run.Turns[n-1].Repeat = t.lineage, t.repeat
 		return nil
 	}); err != nil {
-		return nil, t, err
+		ticket.Release()
+		return nil, err
 	}
-	// On Unix the agent inherits these locks: while any process of its tree
-	// runs, the turn counts as executing and its budget stays held, even if
-	// this process dies.
-	t.inherit = []*os.File{execLock}
-	if ticket.Live != nil {
-		t.inherit = append(t.inherit, ticket.Live)
-	}
-	res, err = op.Do(ctx, t)
-	return res, t, err
+	return ticket, nil
 }
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }

@@ -79,10 +79,17 @@ type Config struct {
 	// refused; 0 turns either off.
 	RepeatWarn   int `json:"repeat_warn"`
 	RepeatRefuse int `json:"repeat_refuse"`
+	// MaxWaitMinutes bounds how long a turn waits at the gate unless its
+	// profile sets max_wait; 0 means as long as it takes.
+	MaxWaitMinutes int `json:"max_wait_minutes"`
+	// MaxQueue is how many turns may wait for one budget, key or slot; a
+	// turn that would wait behind more fails at once as throttled. 0
+	// means no limit.
+	MaxQueue int `json:"max_queue"`
 }
 
 // ConfigKeys are the settable keys, in display order.
-var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse"}
+var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse", "max_wait_minutes", "max_queue"}
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
@@ -107,7 +114,7 @@ func (h *Home) Config() (Config, error) {
 	if err := checkFormat("config.json", c.Format); err != nil {
 		return c, err
 	}
-	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 {
+	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 || c.MaxWaitMinutes < 0 || c.MaxQueue < 0 {
 		return c, errors.New("config.json: limits must be ≥ 0")
 	}
 	return c, nil
@@ -141,6 +148,10 @@ func (h *Home) SetConfig(key string, value int) error {
 		c.RepeatWarn = value
 	case "repeat_refuse":
 		c.RepeatRefuse = value
+	case "max_wait_minutes":
+		c.MaxWaitMinutes = value
+	case "max_queue":
+		c.MaxQueue = value
 	}
 	c.Format = formatVersion
 	data, _ := json.MarshalIndent(c, "", "  ")

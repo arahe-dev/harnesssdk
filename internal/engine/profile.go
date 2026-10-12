@@ -24,12 +24,18 @@ type Profile struct {
 	Admission   hertasdk.AdmissionMode
 	Timeout     time.Duration
 	Retry       hertasdk.RetryPolicy
-	Budget      []hertasdk.Requirement
-	Serialize   string // key template; runs sharing a key run one at a time
-	Vars        Vars
-	System      string
-	Scope       string // project or global, once loaded
-	Path        string
+	// Backoff is the wait before the first retry; it doubles for each
+	// retry after, up to maxBackoff, with jitter.
+	Backoff time.Duration
+	// MaxWait bounds how long a turn waits at the gate for its budgets,
+	// keys and slot; 0 takes config max_wait_minutes.
+	MaxWait   time.Duration
+	Budget    []hertasdk.Requirement
+	Serialize string // key template; runs sharing a key run one at a time
+	Vars      Vars
+	System    string
+	Scope     string // project or global, once loaded
+	Path      string
 
 	header []headerLine // kept in order so Set preserves the file
 }
@@ -43,6 +49,7 @@ type headerLine struct {
 var reservedKeys = map[string]bool{
 	"harness": true, "description": true, "effect": true, "admission": true,
 	"timeout": true, "retry": true, "budget": true, "serialize": true,
+	"backoff": true, "max_wait": true,
 }
 
 // builtinVars are filled in by HarnessSDK for every attempt; a profile
@@ -174,6 +181,10 @@ func (p *Profile) apply(key, value string) error {
 		p.Timeout, err = parseTimeout(value)
 	case "retry":
 		p.Retry, err = parseRetry(value)
+	case "backoff":
+		p.Backoff, err = parseTimeout(value)
+	case "max_wait":
+		p.MaxWait, err = parseTimeout(value)
 	case "budget":
 		p.Budget, err = parseBudget(value)
 	case "serialize":

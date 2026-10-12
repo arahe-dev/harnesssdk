@@ -85,6 +85,13 @@ func fakeHarness(args []string) int {
 			return 1
 		}
 		fmt.Println("ok after retry")
+	case "ratelimited":
+		if _, err := os.Stat(opts["state"]); err != nil {
+			os.WriteFile(opts["state"], nil, 0o644)
+			fmt.Fprintln(os.Stderr, "429: rate limit reached; retry after 1 seconds")
+			return 1
+		}
+		fmt.Println("ok after waiting")
 	case "sleep":
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		fmt.Println("slept")
