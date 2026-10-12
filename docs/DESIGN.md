@@ -45,8 +45,10 @@ through process ancestry). They skip the queues for budgets their ancestors
 hold, fail at once (`ErrWouldDeadlock`) when only their ancestors' release
 would let them in, and never wait for a `max_running` slot.
 
-`max_wait` bounds a wait, lock waits included, and a grant that arrives
-after it is given back; `max_queue` refuses a request that would join a
+`max_wait` bounds a wait, each lock wait included, and a grant that arrives
+after it is given back; a request whose wait ran out leaves at once (it
+withdraws from ledgers it can lock without waiting, and the others drop
+its dead ticket); `max_queue` refuses a request that would join a
 queue already that long. Waiters re-read a ledger only when its file changes,
 or once a second to reclaim dead tickets.
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,9 +83,16 @@ func TestV2Formats(t *testing.T) {
 	if !strings.Contains(string(cfg), `"format": 2`) {
 		t.Fatalf("config is not format 2: %s", cfg)
 	}
-	old := oldRun(t, f.home, 1, "v1v1") // written as format 1
-	if _, err := f.home.LoadRun(old.ID); err != nil {
+	// Records and config as v1.7 wrote them, format 1, still read.
+	dir := filepath.Join(f.home.Dir, "runs", "261001-120000-v1v1")
+	os.Mkdir(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "run.json"), []byte(`{"format": 1, "id": "261001-120000-v1v1", "profile": "p", "harness": "fake", "turns": []}`), 0o600)
+	if r, err := f.home.LoadRun("261001-120000-v1v1"); err != nil || r.Format != 1 {
 		t.Fatalf("a format 1 record no longer reads: %v", err)
+	}
+	os.WriteFile(f.home.configPath(), []byte(`{"format": 1, "max_depth": 2}`), 0o600)
+	if c, err := f.home.Config(); err != nil || c.MaxDepth != 2 {
+		t.Fatalf("a format 1 config no longer reads: %+v %v", c, err)
 	}
 }
 
@@ -111,8 +119,10 @@ func TestSpendRefusalIsNotRetried(t *testing.T) {
 func TestSpendingCountsAttemptsAndOldRuns(t *testing.T) {
 	h := newGateHome(t)
 	old := oldRun(t, h, 3, "spnd") // created three days ago
-	old.Turns = append(old.Turns, TurnRecord{N: 2, Outcome: "running", Spent: time.Now().UTC(),
-		Metrics: map[string]float64{"cost_usd": 0.4}}) // an attempt of a follow-up, today
+	// A follow-up whose first attempt spent $10 yesterday, more than a
+	// day ago, and whose second spent $0.40 today: only today's counts.
+	old.Turns = append(old.Turns, TurnRecord{N: 2, Outcome: "running", Metrics: map[string]float64{"cost_usd": 10.4},
+		Spend: []Spend{{At: time.Now().Add(-25 * time.Hour).UTC(), USD: 10}, {At: time.Now().UTC(), USD: 0.4}}})
 	if err := old.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -246,5 +256,135 @@ func TestWorktreeSubfolderWithSpace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(run.Workdir, "out.txt")); err != nil {
 		t.Fatalf("the agent did not work in %q: %v", run.Workdir, err)
+	}
+}
+
+// Round two of the review.
+
+// H1: a branch or folder that already has the worktree's name is never
+// touched: the run is refused.
+func TestWorktreeNamesInUseAreLeftAlone(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("writer", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
+	repo := gitRepo(t)
+	defer func() { runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) } }()
+	runID = func() string { return "261012-000000-eeee" }
+	if _, err := git(context.Background(), "-C", repo, "branch", "harness/261012-000000-eeee"); err != nil {
+		t.Fatal(err)
+	}
+	tip, _ := git(context.Background(), "-C", repo, "rev-parse", "harness/261012-000000-eeee")
+	if _, err := f.r.Start(context.Background(), "writer", []string{"x"}, repo, TurnOptions{Worktree: true}, nil); err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("a branch in use was not refused: %v", err)
+	}
+	if now, err := git(context.Background(), "-C", repo, "rev-parse", "harness/261012-000000-eeee"); err != nil || now != tip {
+		t.Fatalf("the existing branch was changed: %q %v", now, err)
+	}
+}
+
+// H2: a worktree whose HEAD left its branch is kept, with its run.
+func TestDetachedWorktreeIsKept(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("writer", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
+	run, _ := worktreeRun(t, f, "writer", "sub")
+	if _, err := git(context.Background(), "-C", run.Worktree, "checkout", "-q", "--detach"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.home.GC(time.Now().Add(time.Hour), false); err == nil || !strings.Contains(err.Error(), "not on its branch") {
+		t.Fatalf("gc removed a detached worktree: %v", err)
+	}
+	if _, err := os.Stat(run.Worktree); err != nil {
+		t.Fatal("the detached worktree was removed")
+	}
+}
+
+// H3: harness's commits run no hook, and a removal that would lose work is
+// refused rather than forced.
+func TestHarnessCommitsRunNoHooks(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("writer", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
+	repo := gitRepo(t)
+	hooks := filepath.Join(repo, ".git", "hooks")
+	os.MkdirAll(hooks, 0o755)
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	os.WriteFile(filepath.Join(hooks, "post-commit"), []byte("#!/bin/sh\necho ran > '"+filepath.ToSlash(marker)+"'\n"), 0o755)
+	os.WriteFile(filepath.Join(hooks, "prepare-commit-msg"), []byte("#!/bin/sh\necho ran > '"+filepath.ToSlash(marker)+"'\n"), 0o755)
+	reps, err := f.r.Start(context.Background(), "writer", []string{"x"}, repo, TurnOptions{Worktree: true}, nil)
+	if err != nil || !strings.Contains(reps[0].Changes, "1 file changed") {
+		t.Fatalf("%v %+v", err, reps)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a hook ran on harness's commit")
+	}
+}
+
+// M3: a turn whose wait ends while it is queued, and a ledger lock is held,
+// leaves at once.
+func TestExpiredWaitLeavesAtOnce(t *testing.T) {
+	f := newFixture(t, map[string]int64{"b": 1})
+	f.profile("q", "harness: fake\neffect: pure\nbudget: b=1\nmode: echo")
+	g := f.home.Gate(nil)
+	held, err := g.Acquire(context.Background(), []Claim{{Name: "b", Units: 1, Capacity: 1}}, false, "outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan Report)
+	go func() { done <- f.start(ctx, "q", "x")[0] }()
+	time.Sleep(400 * time.Millisecond) // queued
+	lk, err := lockOpen(filepath.Join(g.ledger("b"), "state.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Close()
+	start := time.Now()
+	cancel()
+	select {
+	case rep := <-done:
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("left after %s", d)
+		}
+		if rep.Outcome != "cancelled" {
+			t.Fatalf("%s %v", rep.Outcome, rep.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not leave")
+	}
+}
+
+// M4: a rollback that cannot remove what it made keeps the staged record,
+// and gc finishes it later.
+func TestFailedRollbackIsFinishedByGC(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("writer", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
+	repo := gitRepo(t)
+	defer func() {
+		testHookCreate = nil
+		runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) }
+	}()
+	runID = func() string { return "261012-000000-dddd" }
+	refLock := filepath.Join(repo, ".git", "refs", "heads", "harness", "261012-000000-dddd.lock")
+	testHookCreate = func(stage string) error {
+		if stage == "queue" {
+			os.WriteFile(refLock, nil, 0o644) // git cannot delete the branch now
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	if _, err := f.r.Start(context.Background(), "writer", []string{"x"}, repo, TurnOptions{Worktree: true}, nil); err == nil {
+		t.Fatal("failed creation reported success")
+	}
+	testHookCreate = nil
+	stage := filepath.Join(f.home.Dir, "runs", stagePrefix+"261012-000000-dddd")
+	if _, err := os.Stat(stage); err != nil {
+		t.Fatal("the record of what to undo was removed with the rollback unfinished")
+	}
+	os.Remove(refLock)
+	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("gc did not finish the rollback")
+	}
+	if out, _ := git(context.Background(), "-C", repo, "branch", "--list", "harness/*"); out != "" {
+		t.Fatalf("branch left behind: %q", out)
 	}
 }

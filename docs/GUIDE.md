@@ -387,7 +387,6 @@ the last part of the final message:
  "session": "mint",
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "turn_end"}, "field": "message.content.-1.text"},
-   "error": {"where": {"type": "turn_end", "message.stopReason": "error"}},
    "metrics": {
      "input_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.input+message.usage.cacheRead+message.usage.cacheWrite", "pick": "sum"},
      "cached_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.cacheRead", "pick": "sum"},
@@ -400,6 +399,10 @@ the last part of the final message:
 ```
 
 `--tools` keeps MCP tools; a read-only profile also needs `no_mcp: true`.
+The definition has no `error` selector on purpose: Pi recovers from errors
+within a run (a dropped connection on one model call), and exits non-zero
+when it cannot, so an error event would mark a run that recovered as
+failed.
 Without `--mode json`, Pi prints only the answer (`"output": {"format": "text"}`),
 and reports no tokens or cost.
 

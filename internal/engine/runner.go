@@ -36,6 +36,7 @@ type Turn struct {
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
 	retryAfter  time.Duration      // what the last failed attempt's CLI asked to wait
+	spendSaved  float64            // the cost_usd recorded in Spend so far
 	changes     string             // the worktree branch's changes after the turn
 	check       string             // the check command run, if any
 	checked     string             // passed or failed
@@ -538,7 +539,7 @@ func (r *Runner) Prepare(profile string, tasks []string, cwd string, o TurnOptio
 		return nil, err
 	}
 	r.home.AutoGC()
-	return r.create(nr)
+	return r.create(r.closingCtx, nr)
 }
 
 // newRuns are runs that passed every check and are about to be created.
@@ -602,7 +603,7 @@ func createStage(stage string) error {
 
 // create records the runs, all of them or none: a failure removes the
 // runs already created.
-func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
+func (r *Runner) create(ctx context.Context, nr *newRuns) (runs []*Run, err error) {
 	defer func() {
 		if err != nil {
 			removeRuns(runs)
@@ -618,7 +619,7 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 		// never appears without it.
 		s.Depth, s.Kind = nr.depth, nr.o.Kind
 		if nr.o.Worktree || nr.p.Worktree {
-			err = r.home.addWorktree(context.Background(), s.Run)
+			err = r.home.addWorktree(ctx, s.Run)
 		}
 		if err == nil {
 			err = createStage("queue")
@@ -645,11 +646,13 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 }
 
 // removeRuns undoes runs that were created but never ran, with their
-// worktrees and branches.
+// worktrees and branches. A run whose worktree cannot be removed is kept,
+// with the record of what was made, for gc to finish.
 func removeRuns(runs []*Run) {
 	for _, run := range runs {
-		removeWorktree(context.Background(), run, true)
-		os.RemoveAll(run.Dir())
+		if removeWorktree(context.Background(), run, true) == nil {
+			os.RemoveAll(run.Dir())
+		}
 	}
 }
 
@@ -824,7 +827,13 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	res, t, err := r.execute(ctx, run, n, execLock)
 	if run.Worktree != "" && t != nil {
 		// The branch keeps the turn's work, whatever its outcome.
-		changes, cerr := commitTurn(context.Background(), run, n)
+		// Stopped by the caller or a shutdown like the turn; the work then
+		// stays in the worktree, which gc commits before removing.
+		cctx, cancel := context.WithCancel(ctx)
+		stopOnClose := context.AfterFunc(r.closingCtx, cancel)
+		changes, cerr := commitTurn(cctx, run, n)
+		stopOnClose()
+		cancel()
 		if cerr != nil {
 			t.logf("== harness warning: committing the worktree: %v", cerr)
 			changes = fmt.Sprintf("NOT committed (%v); the work is in %s", cerr, run.Worktree)
@@ -961,8 +970,12 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			}
 			// Saved before the budget is released, so the spending limit
 			// counts this attempt for the next turn admitted, and for this
-			// one's own retries.
-			r.saveMetrics(run.ID, n, t)
+			// one's own retries. A turn whose spending cannot be recorded
+			// is not retried.
+			if serr := r.saveMetrics(run.ID, n, t); serr != nil {
+				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
+				executed = false
+			}
 		}
 		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
 		if !again {
@@ -1036,17 +1049,25 @@ func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait tim
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
-// saveMetrics records the turn's metrics so far, and when they were last
-// added to, in its run record.
-func (r *Runner) saveMetrics(id string, n int, t *Turn) {
+// saveMetrics records the turn's metrics so far in its run record, with
+// what this attempt cost and when.
+func (r *Runner) saveMetrics(id string, n int, t *Turn) error {
 	if len(t.metrics) == 0 {
-		return
+		return nil
 	}
-	r.home.updateRun(id, func(run *Run) error {
+	cost := finiteMetrics(t.metrics)["cost_usd"]
+	_, err := r.home.updateRun(id, func(run *Run) error {
 		rec := &run.Turns[n-1]
-		rec.Metrics, rec.Model, rec.Spent = finiteMetrics(t.metrics), t.vars()["model"], now().UTC()
+		rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
+		if d := cost - t.spendSaved; d != 0 {
+			rec.Spend = append(rec.Spend, Spend{At: now().UTC(), USD: d})
+		}
 		return nil
 	})
+	if err == nil {
+		t.spendSaved = cost
+	}
+	return err
 }
 
 // claimsFor are the gate claims of a turn: its budgets, at their current
@@ -1093,6 +1114,9 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
 			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 			rec.Check, rec.Checked, rec.Changes = t.check, t.checked, t.changes
+			if d := finiteMetrics(t.metrics)["cost_usd"] - t.spendSaved; d != 0 {
+				rec.Spend = append(rec.Spend, Spend{At: now().UTC(), USD: d}) // what saveMetrics could not record
+			}
 		}
 		return nil // always save: the record must leave "running"
 	})
@@ -1151,7 +1175,7 @@ func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd strin
 	r.home.AutoGC()
 	var runs []*Run
 	for _, nr := range all {
-		rs, err := r.create(nr)
+		rs, err := r.create(ctx, nr)
 		if err != nil {
 			removeRuns(runs) // all or nothing
 			return nil, err

@@ -71,6 +71,22 @@ fixed with regression tests:
   tree bounded.
 - Each attempt has its own `{report_file}`.
 
+Its second review found 3 high, 5 medium and 1 low issues, also fixed with
+regression tests: worktrees claim only free branch and folder names, and a
+rollback never deletes what it did not make; gc keeps a worktree whose HEAD
+left its branch; harness's commits run no hook at all (an empty hooks
+folder), and gc's removal is never forced, so a change it did not commit is
+kept; each attempt's cost is a timestamped entry, so the rolling window
+counts only what was spent in it, and a turn whose spending cannot be
+recorded is not retried; every ledger lock waits only what remains of
+`max_wait`, and an expired turn leaves without waiting for locks; a rollback
+that cannot finish keeps its staged record for gc to finish; git honors
+cancellation and shutdown.
+
+- **Pi definition fix.** v1.6's Pi example had an `error` selector that
+  marked a run failed when any model call errored, even one Pi recovered
+  from; it is gone (the review agent's own long run hit it).
+
 Not done: the Codex `workspace-write` sandbox (with the data folder writable
 and network on) could not be verified, because Codex's Windows sandbox fails
 to start any command on the machine used; the guide describes it as

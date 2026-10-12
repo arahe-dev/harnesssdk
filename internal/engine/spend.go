@@ -45,11 +45,12 @@ func (h *Home) checkSpend(p *Profile) error {
 	return nil
 }
 
-// spending sums the cost_usd of turns whose cost was recorded since then:
-// by every profile, and by profile. It counts by when each attempt spent,
-// not when its run was created, so a follow-up today on yesterday's run
-// counts, and a turn still running counts its finished attempts. Only run
-// folders changed since then are read.
+// spending sums what attempts cost since then: by every profile, and by
+// profile. Each attempt counts by when it spent, not when its run was
+// created or its turn ended, so a follow-up today on yesterday's run
+// counts, a turn still running counts its finished attempts, and an
+// attempt from before the window does not count because a later one is in
+// it. Only run folders changed since then are read.
 func (h *Home) spending(since time.Time, profile string) (all, mine float64, err error) {
 	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
 	if err != nil {
@@ -67,14 +68,16 @@ func (h *Home) spending(since time.Time, profile string) (all, mine float64, err
 			continue
 		}
 		for _, t := range run.Turns {
-			when := t.Spent
-			if when.IsZero() {
-				when = t.Ended // recorded before v2
+			var c float64
+			if len(t.Spend) > 0 {
+				for _, s := range t.Spend {
+					if !s.At.Before(since) {
+						c += s.USD
+					}
+				}
+			} else if !t.Ended.Before(since) {
+				c = t.Metrics["cost_usd"] // recorded before v2: by when it ended
 			}
-			if when.Before(since) {
-				continue
-			}
-			c := t.Metrics["cost_usd"]
 			all += c
 			if run.Profile == profile {
 				mine += c

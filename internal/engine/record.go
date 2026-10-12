@@ -58,13 +58,19 @@ type TurnRecord struct {
 	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
 	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
 	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
-	// Spent is when its metrics were last added to, by an attempt; the
-	// spending limits count them from then.
-	Spent   time.Time `json:"spent,omitzero"`
-	Check   string    `json:"check,omitempty"`   // the check command it ran
-	Checked string    `json:"checked,omitempty"` // passed or failed
+	// Spend is what each attempt cost (cost_usd) and when, for the
+	// spending limits' rolling window.
+	Spend   []Spend `json:"spend,omitempty"`
+	Check   string  `json:"check,omitempty"`   // the check command it ran
+	Checked string  `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
+}
+
+// Spend is one attempt's reported cost.
+type Spend struct {
+	At  time.Time `json:"at"`
+	USD float64   `json:"usd"`
 }
 
 // finished reports whether the turn has a final outcome.
@@ -165,7 +171,10 @@ func (s *stagedRun) publish() error {
 
 // abort removes the prepared run, with the worktree and branch made for it.
 func (s *stagedRun) abort() {
-	removeWorktree(context.Background(), s.Run, true)
+	if err := removeWorktree(context.Background(), s.Run, true); err != nil {
+		s.release() // the staged run stays, the record of what to undo, for gc
+		return
+	}
 	os.RemoveAll(s.dir)
 	s.release()
 }

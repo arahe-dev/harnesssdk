@@ -171,9 +171,28 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		live.Close()
 		os.Remove(g.liveFile(id))
 	}
+	// expire leaves at once, when the wait has run out: closing the ticket
+	// is enough, since the next reader of each ledger drops a ticket whose
+	// owner let go, and waiting for ledger locks to withdraw it would
+	// outlast the wait.
+	expire := func() {
+		if entered {
+			// One try, without waiting: a ledger locked by another is left
+			// to drop the dead ticket itself.
+			now, cancel := context.WithDeadline(context.Background(), time.Now())
+			g.update(now, claims, func(sts []*gateState) {
+				for _, st := range sts {
+					st.remove(id)
+				}
+			})
+			cancel()
+		}
+		live.Close()
+		os.Remove(g.liveFile(id)) // a missing liveness file reads as dead too
+	}
 	for queued := false; ; {
 		if err := ctx.Err(); err != nil {
-			leave()
+			expire()
 			return nil, err
 		}
 		// Stamped before the pass, so a change during it is not missed.
@@ -193,7 +212,7 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		case granted && ctx.Err() != nil:
 			// The wait ended (max_wait, or the caller) while the pass was
 			// waiting for a ledger: a late grant is given back.
-			leave()
+			expire()
 			return nil, ctx.Err()
 		case granted:
 			return &Ticket{ID: id, Live: live, release: leave}, nil
@@ -204,7 +223,7 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 			queued = true
 		}
 		if err := g.waitChange(ctx, claims, stamps); err != nil {
-			leave()
+			expire()
 			return nil, err
 		}
 	}
@@ -296,12 +315,7 @@ func (g *Gate) try(ctx context.Context, claims []Claim, me gateEntry, first, rej
 // update changes ledgers under their locks, taken in name order, after
 // dropping dead tickets.
 func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateState)) error {
-	// A ledger lock is waited for up to two seconds, and never past the
-	// caller's deadline.
-	wait := 2 * time.Second
-	if d, ok := ctx.Deadline(); ok {
-		wait = max(0, min(wait, time.Until(d)))
-	}
+
 	var locks []*os.File
 	defer func() {
 		for i := len(locks) - 1; i >= 0; i-- {
@@ -314,6 +328,12 @@ func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateSt
 		dir := g.ledger(c.Name)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
+		}
+		// Each ledger lock is waited for up to two seconds, and never past
+		// the caller's deadline, counted afresh for each.
+		wait := 2 * time.Second
+		if d, ok := ctx.Deadline(); ok {
+			wait = max(0, min(wait, time.Until(d)))
 		}
 		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), wait)
 		if err != nil {
