@@ -31,6 +31,13 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 	var errs []error
 	for _, e := range entries {
 		id := e.Name()
+		// A staging folder older than an hour is a creation that crashed.
+		if strings.HasPrefix(id, stagePrefix) {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour && !dryRun {
+				os.RemoveAll(filepath.Join(h.Dir, "runs", id))
+			}
+			continue
+		}
 		// Ids start with their creation time: a run clearly created after
 		// the cutoff was active after it, and is not read at all.
 		if created, ok := idTime(id); !e.IsDir() || !ok || !created.Add(-idSlack).Before(cutoff) {
@@ -57,11 +64,11 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 // turn or executed meanwhile.
 func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) {
 	dir := filepath.Join(h.Dir, "runs", id)
-	// A folder without a record is what an interrupted removal leaves, or
-	// a run being created right now: only one untouched since the cutoff
-	// is removed. Nothing executes without a record, so it takes no locks,
-	// which would also touch the folder and make it look new.
-	if _, err := os.Stat(filepath.Join(dir, "run.json")); err != nil {
+	// Runs appear with their record (NewRun renames them into place), so
+	// a folder without one is what an interrupted removal leaves: removed
+	// once untouched since the cutoff. Nothing executes without a record,
+	// so it takes no locks, which would also make the folder look new.
+	if _, err := os.Stat(filepath.Join(dir, "run.json")); errors.Is(err, fs.ErrNotExist) {
 		fi, err := os.Stat(dir)
 		if err != nil || !fi.ModTime().Before(cutoff) {
 			return -1, nil
@@ -84,8 +91,8 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	locks := []string{"exec.lock", "state.lock"}
 	release := func() { state.Close(); exec.Close() }
 	// Under the locks, the record decides; one this harness cannot read is
-	// left alone.
-	if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) {
+	// left alone, and so is a run still taking shape.
+	if r, err := h.LoadRun(id); err != nil || !r.lastActive().Before(cutoff) || r.settling() {
 		release()
 		return -1, nil
 	}
@@ -124,6 +131,17 @@ func dirSize(dir string) (int64, []os.DirEntry, error) {
 		}
 	}
 	return size, entries, nil
+}
+
+// settling reports whether a run may still be taking shape without
+// holding a lock: just created with no turn yet, or with a turn queued for
+// a worker that may still start. Its age alone does not make it debris.
+func (r *Run) settling() bool {
+	if len(r.Turns) == 0 {
+		return time.Since(r.Created) < lostAfter
+	}
+	last := r.Turns[len(r.Turns)-1]
+	return last.Outcome == "queued" && time.Since(last.Queued) < lostAfter
 }
 
 // lastActive is when the run was created or a turn last queued, started or

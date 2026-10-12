@@ -320,8 +320,10 @@ func TestLostTurnCountedOnce(t *testing.T) {
 	}
 }
 
-// Counting from many processes at once, with cleanup running, loses
-// nothing: one lock guards every record.
+// Counting from many goroutines at once, with cleanup running, loses
+// nothing: one lock guards every record. Each lockOpen is its own open
+// file, and the locks belong to the open file, so goroutines contend for
+// it as processes do.
 func TestRepeatCountingIsAtomic(t *testing.T) {
 	h := newGateHome(t)
 	h.SetConfig("repeat_refuse", 0)
@@ -339,5 +341,68 @@ func TestRepeatCountingIsAtomic(t *testing.T) {
 	}
 	if n := len(h.failures("fp")); n != 20 {
 		t.Fatalf("counted %d of 20 failures", n)
+	}
+}
+
+// Round three of the review.
+
+// A counted turn whose end is observed again, after an identical request
+// succeeded and cleared the failures, is not counted again.
+func TestCountedTurnNotRecounted(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("bad", "harness: fake\neffect: pure\nmode: fail\nopts: code=3 msg=boom")
+	rep := f.start(context.Background(), "bad", "x")[0]
+	fp := runFingerprint(t, f, "bad", "x")
+	if len(f.home.failures(fp)) != 1 {
+		t.Fatal("failure not counted")
+	}
+	// Its final save is lost: the record still says running.
+	f.home.updateRun(rep.Run.ID, func(run *Run) error {
+		run.Turns[0].Outcome, run.Turns[0].Ended = "running", time.Time{}
+		return nil
+	})
+	f.home.noteRepeat(fp, "other/1", "success") // an identical request succeeded
+	if _, done, err := f.r.WaitTurn(context.Background(), rep.Run.ID, 1); !done || err != nil {
+		t.Fatalf("reap: %v %v", done, err)
+	}
+	if n := len(f.home.failures(fp)); n != 0 {
+		t.Fatalf("the turn was counted again: %d", n)
+	}
+}
+
+// gc, even with a cutoff in the future, never removes a run being
+// created or one whose turn waits for its worker.
+func TestGCSparesRunsTakingShape(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
+	future := time.Now().Add(time.Hour)
+	defer func() { testHookCreate = nil }()
+	testHookCreate = func(stage string) error {
+		if stage == "record" { // the folder exists, its record does not yet
+			if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+				t.Errorf("gc during creation: %+v %v", rep, err)
+			}
+		}
+		return nil
+	}
+	runs, err := f.r.Prepare("ok", []string{"x"}, f.cwd, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testHookCreate = nil
+	if rep, err := f.home.GC(future, false); err != nil || len(rep.Runs) != 0 {
+		t.Fatalf("gc of a queued run: %+v %v", rep, err)
+	}
+	if _, err := f.home.LoadRun(runs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	// A staging folder left by a crash is removed after an hour.
+	stale := filepath.Join(f.home.Dir, "runs", stagePrefix+"crashed")
+	os.Mkdir(stale, 0o700)
+	old := time.Now().Add(-2 * time.Hour)
+	os.Chtimes(stale, old, old)
+	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stale staging folder kept")
 	}
 }

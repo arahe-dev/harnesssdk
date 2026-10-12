@@ -45,9 +45,10 @@ type TurnRecord struct {
 	Lineage  []string  `json:"lineage,omitempty"` // gate tickets of this turn and its ancestors
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
-	Model    string    `json:"model,omitempty"`  // the model placeholder's value
-	Hint     string    `json:"hint,omitempty"`   // advice for the caller, such as the repeat guard's
-	Repeat   string    `json:"repeat,omitempty"` // the fingerprint of the request as it executed
+	Model    string    `json:"model,omitempty"`   // the model placeholder's value
+	Hint     string    `json:"hint,omitempty"`    // advice for the caller, such as the repeat guard's
+	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
+	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -55,31 +56,46 @@ type TurnRecord struct {
 // finished reports whether the turn has a final outcome.
 func (t TurnRecord) finished() bool { return t.Outcome != "queued" && t.Outcome != "running" }
 
-// NewRun creates a run directory with a fresh, time-ordered id.
+// NewRun creates a run directory with a fresh, time-ordered id. The
+// directory is prepared under a staging name and renamed into runs/ only
+// once its record is saved, so runs/ never holds a run without a record
+// that gc could mistake for debris.
 func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
+	runs := filepath.Join(h.Dir, "runs")
 	for range 8 {
 		id := time.Now().Format("060102-150405") + "-" + randHex(2)
-		dir := filepath.Join(h.Dir, "runs", id)
-		err := os.Mkdir(dir, 0o700)
-		if errors.Is(err, fs.ErrExist) {
+		final := filepath.Join(runs, id)
+		if _, err := os.Stat(final); err == nil {
 			continue
 		}
+		stage, err := os.MkdirTemp(runs, stagePrefix)
 		if err != nil {
 			return nil, err
 		}
-		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
+		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: stage}
 		if err := createStage("record"); err != nil {
-			os.RemoveAll(dir)
+			os.RemoveAll(stage)
 			return nil, err
 		}
 		if err := r.Save(); err != nil {
-			os.RemoveAll(dir) // never leave a folder without its record
+			os.RemoveAll(stage)
 			return nil, err
 		}
+		if err := os.Rename(stage, final); err != nil {
+			os.RemoveAll(stage)
+			if _, serr := os.Stat(final); serr == nil {
+				continue // the id was taken meanwhile
+			}
+			return nil, err
+		}
+		r.dir = final
 		return r, nil
 	}
 	return nil, errors.New("could not allocate a run id")
 }
+
+// stagePrefix names a run directory being prepared; it is not a run id.
+const stagePrefix = ".new-"
 
 // idSlack bounds how far a run id's time can be from when the run was
 // created: ids are local wall-clock time without a zone, and the zone can

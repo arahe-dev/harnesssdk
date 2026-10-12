@@ -544,13 +544,19 @@ func removeRuns(runs []*Run) {
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 	// A lost last turn is recorded as ended on its own first, so its end
 	// is kept (and counted once) even if this follow-up is refused below.
+	reaped := false
 	if _, err := r.home.updateRun(id, func(run *Run) error {
-		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() && !r.reapLost(run) {
-			return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
+		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() {
+			if reaped = r.reapLost(run); !reaped {
+				return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
+			}
 		}
 		return nil
 	}); err != nil {
 		return 0, err
+	}
+	if reaped {
+		r.countReaped(id)
 	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
@@ -599,17 +605,55 @@ func (r *Runner) reapLost(run *Run) bool {
 		return false
 	}
 	rec.Ended = time.Now().UTC()
-	// The turn's end is recorded once, here, so it counts for the repeat
-	// guard like any other.
-	var req request
-	if data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", rec.N))); err == nil && json.Unmarshal(data, &req) == nil {
-		fp := rec.Repeat // what executed; a turn that never did is the request as queued
-		if fp == "" {
+	return true // the caller counts it with countReaped, once this is saved
+}
+
+// countTurn counts turn n's outcome for the repeat guard, once ever: the
+// turn is marked counted in its run record first, so observing its end
+// again (its final save failed, its worker died) never counts it again,
+// even after a success or the window cleared the request's failures. A
+// crash between the two undercounts; it never overcounts.
+func (r *Runner) countTurn(id string, n int, fp, outcome string) string {
+	if fp == "" {
+		return ""
+	}
+	already := false
+	if _, err := r.home.updateRun(id, func(run *Run) error {
+		rec := &run.Turns[n-1]
+		already, rec.Counted = rec.Counted, true
+		return nil
+	}); err != nil || already {
+		return ""
+	}
+	return r.home.noteRepeat(fp, turnID(id, n), outcome)
+}
+
+// countReaped counts a run's last turn after reapLost ended it and the
+// record was saved, and keeps any hint with it. It returns the run as
+// saved, or nil.
+func (r *Runner) countReaped(id string) *Run {
+	run, err := r.home.LoadRun(id)
+	if err != nil || len(run.Turns) == 0 {
+		return nil
+	}
+	rec := run.Turns[len(run.Turns)-1]
+	if !rec.finished() {
+		return run // not ended: nothing to count
+	}
+	fp := rec.Repeat // what executed; a turn that never did is the request as queued
+	if fp == "" {
+		var req request
+		if data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", rec.N))); err == nil && json.Unmarshal(data, &req) == nil {
 			fp = req.Repeat
 		}
-		rec.Hint = r.home.noteRepeat(fp, turnID(run.ID, rec.N), rec.Outcome)
 	}
-	return true
+	if hint := r.countTurn(id, rec.N, fp, rec.Outcome); hint != "" {
+		run, _ = r.home.updateRun(id, func(run *Run) error {
+			run.Turns[rec.N-1].Hint = hint
+			return nil
+		})
+	}
+	return run
 }
 
 // Execute runs queued turn n of a run: it is what harness run does in
@@ -662,7 +706,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	if t != nil && t.repeat != "" {
 		rep.Hint = t.hint
 		if !t.noted && !errors.Is(err, ErrRepeated) { // a refusal is not another failure
-			rep.Hint = r.home.noteRepeat(t.repeat, turnID(id, n), OutcomeName(err))
+			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err))
 		}
 	}
 	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
@@ -776,7 +820,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// same request is admitted and checks it.
 	defer func() {
 		if !errors.Is(err, ErrRepeated) {
-			t.hint, t.noted = r.home.noteRepeat(t.repeat, turnID(run.ID, n), OutcomeName(err)), true
+			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err)), true
 		}
 	}()
 	if err := r.home.checkRepeat(t.repeat); err != nil {
@@ -992,13 +1036,19 @@ func (r *Runner) WaitTurn(ctx context.Context, id string, n int) (rep Report, fi
 			// Only the last turn can be unfinished: a turn is queued only
 			// after the one before it finished.
 			if !run.Turns[n-1].finished() && !run.executing() {
+				reaped := false
 				if run, err = r.home.updateRun(id, func(run *Run) error {
 					if !run.Turns[len(run.Turns)-1].finished() {
-						r.reapLost(run)
+						reaped = r.reapLost(run)
 					}
 					return nil
 				}); err != nil {
 					return Report{}, false, err
+				}
+				if reaped {
+					if saved := r.countReaped(id); saved != nil {
+						run = saved
+					}
 				}
 			}
 			if run.Turns[n-1].finished() {
