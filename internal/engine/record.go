@@ -60,9 +60,11 @@ type TurnRecord struct {
 	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
 	// Spend is what each attempt cost (cost_usd) and when, for the
 	// spending limits' rolling window.
-	Spend   []Spend `json:"spend,omitempty"`
-	Check   string  `json:"check,omitempty"`   // the check command it ran
-	Checked string  `json:"checked,omitempty"` // passed or failed
+	Spend []Spend `json:"spend,omitempty"`
+	// SpentApart is what was recorded apart, in <home>/spend, instead.
+	SpentApart float64 `json:"spent_apart,omitempty"`
+	Check      string  `json:"check,omitempty"`   // the check command it ran
+	Checked    string  `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -102,20 +104,25 @@ type stagedRun struct {
 	home  *Home
 	final string
 	lock  *os.File
+	ctx   context.Context // the creation's, for its waits
 }
 
 // creationLock coordinates creation locks; see above.
-func (h *Home) creationLock() (unlock func(), err error) {
-	return lockFileWait(filepath.Join(h.Dir, "create.lock"), 10*time.Second)
+func (h *Home) creationLock(ctx context.Context) (unlock func(), err error) {
+	f, err := lockWaitCtx(ctx, filepath.Join(h.Dir, "create.lock"), 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return func() { f.Close() }, nil
 }
 
 // stageRun prepares a new run, with its record, under a staging name.
-func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error) {
+func (h *Home) stageRun(ctx context.Context, profile, harness, cwd, parent string) (*stagedRun, error) {
 	runs := filepath.Join(h.Dir, "runs")
 	for range 8 {
 		id := runID()
 		stage := filepath.Join(runs, stagePrefix+id)
-		unlock, err := h.creationLock()
+		unlock, err := h.creationLock(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +149,7 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 			return nil, err
 		}
 		s := &stagedRun{Run: &Run{Format: runFormat, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
-			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock}
+			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock, ctx: ctx}
 		if err := createStage("record"); err != nil {
 			s.abort()
 			return nil, err
@@ -179,8 +186,11 @@ func (s *stagedRun) abort() {
 	s.release()
 }
 
+// release lets go of the creation lock. Its file is removed under the
+// coordinating lock, unless the creation was cancelled waiting for it: the
+// file then stays, for gc to remove.
 func (s *stagedRun) release() {
-	unlock, err := s.home.creationLock()
+	unlock, err := s.home.creationLock(s.ctx)
 	s.lock.Close()
 	if err != nil {
 		return // the lock file stays; gc removes it once it can
@@ -191,7 +201,7 @@ func (s *stagedRun) release() {
 
 // NewRun creates a run with no turn yet.
 func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
-	s, err := h.stageRun(profile, harness, cwd, parent)
+	s, err := h.stageRun(context.Background(), profile, harness, cwd, parent)
 	if err != nil {
 		return nil, err
 	}

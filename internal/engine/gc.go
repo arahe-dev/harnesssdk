@@ -34,6 +34,7 @@ func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport,
 		return rep, err
 	}
 	var errs []error
+	refs := map[string]bool{} // creations that marked runs still refer to
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
@@ -49,17 +50,23 @@ func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport,
 		if !e.IsDir() {
 			continue
 		}
-		// A run still marked as being created is left to its creator; once
-		// the creator is gone (it can then no longer remove the mark), it
-		// was abandoned, and goes whatever its age, as its rollback would.
-		marker := filepath.Join(h.Dir, "runs", id, creatingFile)
+		// A run whose creation has not committed is left to its creator;
+		// once the creator is gone (it can then no longer commit), it was
+		// abandoned, and goes whatever its age, as its rollback would.
+		dir := filepath.Join(h.Dir, "runs", id)
 		abandoned := false
-		if _, err := os.Stat(marker); err == nil {
-			if !h.creatorGone(id) {
-				continue
+		if tx, marked := readMark(dir); marked {
+			if h.committed(tx) {
+				if os.Remove(filepath.Join(dir, creatingFile)) != nil { // only clutter now
+					refs[tx] = true
+				}
+			} else {
+				refs[tx] = true
+				if !h.creatorGone(ctx, id) {
+					continue
+				}
+				abandoned = h.creating(dir)
 			}
-			_, err := os.Stat(marker)
-			abandoned = err == nil
 		}
 		// Ids start with their creation time: a run clearly created after
 		// the cutoff was active after it, and is not read at all.
@@ -78,6 +85,10 @@ func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport,
 	sort.Strings(rep.Runs)
 	h.pruneLive(cutoff)
 	h.pruneRepeats()
+	h.pruneSpend()
+	if ctx.Err() == nil {
+		h.pruneCommits(refs)
+	}
 	return rep, errors.Join(errs...)
 }
 
@@ -156,7 +167,7 @@ func (h *Home) collect(ctx context.Context, id string, cutoff time.Time, dryRun,
 func (h *Home) collectStage(ctx context.Context, name string) {
 	stage := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock"))
 	lockPath := stage + ".lock"
-	coord, err := h.creationLock()
+	coord, err := h.creationLock(ctx)
 	if err != nil {
 		return
 	}
@@ -168,7 +179,7 @@ func (h *Home) collectStage(ctx context.Context, name string) {
 	// Its creator is gone, and this lock keeps any other from the id while
 	// what it left is undone: a worktree and branch it made, then the folder.
 	release := func(removeLock bool) {
-		coord, err := h.creationLock()
+		coord, err := h.creationLock(ctx)
 		lk.Close()
 		if err == nil {
 			if removeLock {
@@ -190,8 +201,8 @@ func (h *Home) collectStage(ctx context.Context, name string) {
 // creatorGone reports whether the creator of published run id has let go
 // of its creation lock, which it holds until the run is committed or
 // rolled back, and then removes the lock file.
-func (h *Home) creatorGone(id string) bool {
-	coord, err := h.creationLock()
+func (h *Home) creatorGone(ctx context.Context, id string) bool {
+	coord, err := h.creationLock(ctx)
 	if err != nil {
 		return false
 	}

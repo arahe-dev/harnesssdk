@@ -481,7 +481,7 @@ func TestRunIDCollisions(t *testing.T) {
 // creator waits while cleanup holds the coordination lock.
 func TestCreationWaitsForCleanup(t *testing.T) {
 	h := newGateHome(t)
-	unlock, err := h.creationLock() // cleanup, between unlocking and removing a lock file
+	unlock, err := h.creationLock(context.Background()) // cleanup, between unlocking and removing a lock file
 	if err != nil {
 		t.Fatal(err)
 	}

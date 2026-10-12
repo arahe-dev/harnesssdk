@@ -56,7 +56,7 @@ func TestRunsBeingCreatedAreNotTouched(t *testing.T) {
 	}
 }
 
-// 2: a commit that cannot remove a mark rolls every run back.
+// 2: a creation whose commit cannot be recorded rolls every run back.
 func TestFailedCommitRollsBackEveryRun(t *testing.T) {
 	f := newFixture(t, nil)
 	f.profile("w1", "harness: fake\neffect: non-idempotent\nmode: write\nopts: file=out.txt")
@@ -64,7 +64,7 @@ func TestFailedCommitRollsBackEveryRun(t *testing.T) {
 	repo := gitRepo(t)
 	var commits atomic.Int32
 	testHookCreate = func(stage string) error {
-		if stage == "commit" && commits.Add(1) == 2 {
+		if stage == "commit" && commits.Add(1) == 1 {
 			return errors.New("disk full")
 		}
 		return nil

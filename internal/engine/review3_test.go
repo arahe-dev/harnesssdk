@@ -112,8 +112,10 @@ func TestUnrecordedCostKeepsAdmission(t *testing.T) {
 		for _, rep := range reps {
 			outcomes = append(outcomes, rep.Outcome)
 		}
-		if !strings.Contains(strings.Join(outcomes, " "), "success") || !strings.Contains(strings.Join(outcomes, " "), "throttled") {
-			t.Fatalf("%d failed final saves: both turns ran, or neither: %v", finishFailures, outcomes)
+		// The first turn's cost is recorded apart, so the second is refused
+		// (the first fails too when its own record cannot be saved).
+		if !strings.Contains(strings.Join(outcomes, " "), "throttled") {
+			t.Fatalf("%d failed final saves: the second turn was admitted: %v", finishFailures, outcomes)
 		}
 		if _, spent, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || spent != 0.5 {
 			t.Fatalf("%d failed final saves: spent %v, %v", finishFailures, spent, err)

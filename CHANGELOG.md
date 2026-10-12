@@ -119,6 +119,17 @@ Its fourth review found 5 medium issues, also fixed with regression tests:
   whichever sees it first, so one that arrives in between is not lost.
 - A rollback does not delete a branch that another worktree has checked out.
 
+Its fifth review found 4 medium issues, also fixed with regression tests:
+- A cost that cannot go into its run record is recorded apart, in
+  `<home>/spend`, and counts at once, so a turn stopped while its record
+  cannot be saved leaves its cost on record.
+- A creation commits by one decision, a file in `<home>/created`, instead of
+  removing its runs' marks one by one, so a crash part way cannot leave some
+  runs created and others not.
+- Waits for `create.lock` end with the caller, in creation and in `gc`.
+- A stop watch ends between takes of a stop request, so a request is never
+  taken by a watch that has ended.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now

@@ -21,7 +21,7 @@ the same name, which splits one lock into two.
 | `gate/<name>/state.lock` | one gate ledger |
 | `gate/live/<ticket>.live` | a gate ticket's owner is alive |
 | `runs/.new-<id>.lock` | a run being created; removed only under `create.lock` |
-| `create.lock` | taking and removing creation locks (never removed) |
+| `create.lock` | taking and removing creation locks (never removed); waits for it end with the caller |
 | `repeats.lock` | every repeat-guard record (never removed) |
 | `budgets.lock`, `config.lock`, `trust.lock` | those files |
 | `worktrees.lock` | adding git worktrees, one at a time |
@@ -67,10 +67,14 @@ or once a second to reclaim dead tickets.
    cannot retry `throttled`: a retryable failure releases its ticket, waits
    the backoff (at least the CLI's `retry_after`), and is admitted again. A
    turn backing off holds no budget, key or slot. An attempt's cost is
-   recorded before its ticket is released; if that fails, the turn stays
-   admitted, saving its record again (1 s, doubling to 30 s), until the
-   cost is on record or the turn is stopped (`harness stop`, the caller, a
-   shutdown).
+   recorded before its ticket is released: in the run record, or, when
+   that cannot be saved (its lock held too long, the file not replaceable),
+   apart, in a file of its own in `spend/`, which needs no lock and counts
+   all the same. A turn whose cost is on record nowhere stays admitted,
+   trying both again (1 s, doubling to 30 s), until it is, or until the
+   turn is stopped (`harness stop`, the caller, a shutdown): harness cannot
+   record a cost when it can write nothing in its data folder, and the
+   turn's error then says so.
 5. **Finished**: the outcome is counted for the repeat guard before the last
    ticket is released (so the next identical turn sees it), a worktree's
    changes are committed, and the record is saved.
@@ -86,14 +90,18 @@ locks are taken, and their files removed, only while holding `create.lock`,
 briefly, so a lock can never be split.
 
 A creation is all or nothing: `start` with several tasks, or `compare`
-(which validates every profile first). Each run is marked `creating` in its
-staged folder, so it is published marked, and a run whose mark cannot be
-written is never published. Once every run is published, the creator
-removes the marks, then releases the locks; a mark it cannot remove rolls
-every run back. A marked run never executes. `gc` leaves a marked run alone
-while its creation lock is held; once it is free, the creator is gone and
-can no longer remove the mark, so a run still marked was abandoned (a crash,
-or a rollback that could not finish), and `gc` removes it as its rollback
+(which validates every profile first). Each run is marked `creating`, with
+the creation's id, in its staged folder, so it is published marked, and a
+run whose mark cannot be written is never published. Once every run is
+published, the creator commits: it makes one file, `created/<creation>`, a
+single decision that a crash cannot leave half made. A marked run executes
+only if its creation committed; if the commit cannot be made, every run is
+rolled back. After the commit the marks, then the commit file, are removed
+as clutter (`gc` removes a mark left behind, and a commit file no mark
+names once it is an hour old). `gc` leaves a run of an uncommitted creation
+alone while its creation lock is held; once it is free, the creator is gone
+and can no longer commit, so the creation was abandoned (a crash, or a
+rollback that could not finish), and `gc` removes the run as its rollback
 would have, branch included, whatever its age.
 
 A `--worktree` run gets its worktree and branch while staged. Each name is

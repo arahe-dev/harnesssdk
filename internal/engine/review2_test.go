@@ -191,7 +191,7 @@ func TestFailedWorktreeAddIsUndone(t *testing.T) {
 func TestGCUndoesCrashedWorktreeCreation(t *testing.T) {
 	h := newGateHome(t)
 	repo := gitRepo(t)
-	s, err := h.stageRun("p", "fake", repo, "")
+	s, err := h.stageRun(context.Background(), "p", "fake", repo, "")
 	if err != nil {
 		t.Fatal(err)
 	}
