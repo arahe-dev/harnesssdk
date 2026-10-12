@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ type Turn struct {
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
+	hint        string             // the repeat guard's advice, once noted
+	noted       bool               // the outcome was counted while the turn was admitted
 	argv        []string
 	exitCode    int
 	lastSession string
@@ -365,7 +368,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
 		}
-		t.metrics[k] += n
+		t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
@@ -409,7 +412,11 @@ func (r *Runner) load(profile, cwd string) (*Profile, *Definition, error) {
 type request struct {
 	Resume bool   `json:"resume"`
 	Extra  Vars   `json:"extra,omitempty"`
-	Repeat string `json:"repeat,omitempty"` // the request's fingerprint
+	Repeat string `json:"repeat,omitempty"` // the request's fingerprint when queued
+	// Caller is "run:<parent>" or "send:<run>": with the profile and
+	// definition loaded when the turn executes, it gives the fingerprint
+	// of what actually runs.
+	Caller string `json:"caller,omitempty"`
 }
 
 // queue appends a queued turn with its prompt and request. The caller owns
@@ -451,10 +458,18 @@ type newRuns struct {
 	parent string
 }
 
-// check loads the profile and applies max_depth and the repeat guard.
+// check loads the profile, validates its policy, and applies max_depth
+// and the repeat guard: everything that can refuse a run before it exists.
 func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, kind string) (*newRuns, error) {
 	p, d, err := r.load(profile, cwd)
 	if err != nil {
+		return nil, err
+	}
+	budgets, err := r.home.Budgets()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPolicy(p, budgets); err != nil {
 		return nil, err
 	}
 	if kind != "" && !validName(kind) {
@@ -466,7 +481,7 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	}
 	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, extra: extra, kind: kind, depth: depth, parent: r.kin().Parent}
 	for _, task := range tasks {
-		fp := fingerprint("run", nr.parent, p.Name, cwd, task, varsKey(extra))
+		fp := requestFingerprint("run", nr.parent, p, d, cwd, task, extra)
 		if err := r.home.checkRepeat(fp); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", p.Name, err)
 		}
@@ -475,36 +490,90 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	return nr, nil
 }
 
-func (r *Runner) create(nr *newRuns) ([]*Run, error) {
-	var runs []*Run
-	for i, task := range nr.tasks {
-		run, err := r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent)
+// testHookCreate, when set, runs at each stage of creating a run
+// ("record", "queue", "save"); an error fails that stage.
+var testHookCreate func(stage string) error
+
+func createStage(stage string) error {
+	if testHookCreate != nil {
+		return testHookCreate(stage)
+	}
+	return nil
+}
+
+// create records the runs, all of them or none: a failure removes the
+// runs already created.
+func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
+	defer func() {
 		if err != nil {
-			return nil, err
+			removeRuns(runs)
+			runs = nil
 		}
-		run.Depth, run.Kind = nr.depth, nr.kind
-		if _, err := queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i]}); err != nil {
-			return nil, err
+	}()
+	for i, task := range nr.tasks {
+		var s *stagedRun
+		if s, err = r.home.stageRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
+			return runs, err
 		}
-		if err := run.Save(); err != nil {
-			return nil, err
+		// The first turn is queued before the run is published, so a run
+		// never appears without it.
+		s.Depth, s.Kind = nr.depth, nr.kind
+		err = createStage("queue")
+		if err == nil {
+			_, err = queue(s.Run, task, request{Extra: nr.extra, Repeat: nr.fps[i], Caller: "run:" + nr.parent})
 		}
-		runs = append(runs, run)
+		if err == nil {
+			err = createStage("save")
+		}
+		if err == nil {
+			err = s.Save()
+		}
+		if err != nil {
+			s.abort()
+			return runs, err
+		}
+		if err = s.publish(); err != nil {
+			return runs, err
+		}
+		runs = append(runs, s.Run)
 	}
 	return runs, nil
+}
+
+func removeRuns(runs []*Run) {
+	for _, run := range runs {
+		os.RemoveAll(run.Dir())
+	}
 }
 
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
-	fp := fingerprint("send", id, prompt, varsKey(extra))
-	if err := r.home.checkRepeat(fp); err != nil {
+	// A lost last turn is recorded as ended on its own first, so its end
+	// is kept (and counted once) even if this follow-up is refused below.
+	reaped := 0
+	if _, err := r.home.updateRun(id, func(run *Run) error {
+		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() {
+			if !r.reapLost(run) {
+				return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
+			}
+			reaped = k
+		}
+		return nil
+	}); err != nil {
 		return 0, err
+	}
+	if reaped > 0 {
+		r.countReaped(id, reaped)
 	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
-		p, _, err := r.load(run.Profile, run.Cwd)
+		p, d, err := r.load(run.Profile, run.Cwd)
 		if err != nil {
+			return err
+		}
+		fp := requestFingerprint("send", id, p, d, run.Cwd, prompt, extra)
+		if err := r.home.checkRepeat(fp); err != nil {
 			return err
 		}
 		if p.Harness != run.Harness {
@@ -512,14 +581,12 @@ func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 				id, run.Harness, p.Name, p.Harness)
 		}
 		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() {
-			if !r.reapLost(run) {
-				return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
-			}
+			return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
 		}
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp})
+		n, err = queue(run, prompt, request{Resume: true, Extra: extra, Repeat: fp, Caller: "send:" + id})
 		return err
 	})
 	return n, err
@@ -546,7 +613,55 @@ func (r *Runner) reapLost(run *Run) bool {
 		return false
 	}
 	rec.Ended = time.Now().UTC()
-	return true
+	return true // the caller counts it with countReaped, once this is saved
+}
+
+// countTurn counts turn n's outcome for the repeat guard, once ever: the
+// turn is marked counted in its run record first, so observing its end
+// again (its final save failed, its worker died) never counts it again,
+// even after a success or the window cleared the request's failures. A
+// crash between the two undercounts; it never overcounts.
+func (r *Runner) countTurn(id string, n int, fp, outcome string, ended time.Time) string {
+	if fp == "" {
+		return ""
+	}
+	already := false
+	if _, err := r.home.updateRun(id, func(run *Run) error {
+		rec := &run.Turns[n-1]
+		already, rec.Counted = rec.Counted, true
+		return nil
+	}); err != nil || already {
+		return ""
+	}
+	return r.home.noteRepeat(fp, turnID(id, n), outcome, ended)
+}
+
+// countReaped counts turn n after reapLost ended it and the record was
+// saved, and keeps any hint with it. It names the turn, since another may
+// have been queued after it meanwhile. It returns the run as saved, or nil.
+func (r *Runner) countReaped(id string, n int) *Run {
+	run, err := r.home.LoadRun(id)
+	if err != nil || n > len(run.Turns) {
+		return nil
+	}
+	rec := run.Turns[n-1]
+	if !rec.finished() {
+		return run // not ended: nothing to count
+	}
+	fp := rec.Repeat // what executed; a turn that never did is the request as queued
+	if fp == "" {
+		var req request
+		if data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", rec.N))); err == nil && json.Unmarshal(data, &req) == nil {
+			fp = req.Repeat
+		}
+	}
+	if hint := r.countTurn(id, rec.N, fp, rec.Outcome, rec.Ended); hint != "" {
+		run, _ = r.home.updateRun(id, func(run *Run) error {
+			run.Turns[rec.N-1].Hint = hint
+			return nil
+		})
+	}
+	return run
 }
 
 // Execute runs queued turn n of a run: it is what harness run does in
@@ -597,7 +712,10 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 
 	res, t, err := r.execute(ctx, run, n, execLock)
 	if t != nil && t.repeat != "" {
-		rep.Hint = r.home.noteRepeat(t.repeat, OutcomeName(err))
+		rep.Hint = t.hint
+		if !t.noted && !errors.Is(err, ErrRepeated) { // a refusal is not another failure
+			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err), now())
+		}
 	}
 	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
 	if run != nil {
@@ -610,7 +728,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	rep.Duration = time.Since(start)
 	if t != nil {
 		rep.Attempts, rep.StderrTail = t.attempts, t.stderrTail
-		rep.Model, rep.Metrics = t.vars()["model"], t.metrics
+		rep.Model, rep.Metrics = t.vars()["model"], finiteMetrics(t.metrics)
 	}
 	if res != nil && err == nil {
 		rep.Output = res.Output
@@ -621,7 +739,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 // execute loads the turn's profile and request, passes the gate, and runs
 // the Herta operation. A stop file for the turn cancels it; Shutdown
 // withdraws it while it waits at the gate.
-func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (*Result, *Turn, error) {
+func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (res *Result, t *Turn, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go watchStop(ctx, run.Path(fmt.Sprintf("stop-%d", n)), cancel)
@@ -650,7 +768,12 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, nil, err
 		}
 	}
-	t := &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	// The repeat guard follows what runs: the profile and definition as
+	// loaded now, which may have been edited since the turn was queued.
+	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
+		t.repeat = requestFingerprint(kind, caller, p, d, run.Cwd, t.Prompt, req.Extra)
+	}
 
 	// Validate the policy before waiting anywhere: a project file reaches
 	// here without passing through SaveProfile.
@@ -667,6 +790,11 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	}
 	cfg, err := r.home.Config()
 	if err != nil {
+		return nil, t, err
+	}
+	// Checked again here, and after admission below: turns queued before
+	// the request reached the limit are refused too.
+	if err := r.home.checkRepeat(t.repeat); err != nil {
 		return nil, t, err
 	}
 	claims := claimsFor(p, budgets, t)
@@ -695,6 +823,17 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		return nil, t, err
 	}
 	defer ticket.Release()
+	// Deferred after the release, so it runs first: the outcome is counted
+	// while the turn still holds its budget, before a waiting turn of the
+	// same request is admitted and checks it.
+	defer func() {
+		if !errors.Is(err, ErrRepeated) {
+			t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
+		}
+	}()
+	if err := r.home.checkRepeat(t.repeat); err != nil {
+		return nil, t, err
+	}
 	t.lineage = slices.Clone(r.kin().Lineage)
 	if ticket.ID != "" {
 		t.lineage = append(t.lineage, ticket.ID)
@@ -702,7 +841,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// Record the lineage, so a nested run that only finds this turn through
 	// process ancestry still learns which tickets its ancestors hold.
 	if _, err := r.home.updateRun(run.ID, func(run *Run) error {
-		run.Turns[n-1].Lineage = t.lineage
+		run.Turns[n-1].Lineage, run.Turns[n-1].Repeat = t.lineage, t.repeat
 		return nil
 	}); err != nil {
 		return nil, t, err
@@ -714,9 +853,11 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if ticket.Live != nil {
 		t.inherit = append(t.inherit, ticket.Live)
 	}
-	res, err := op.Do(ctx, t)
+	res, err = op.Do(ctx, t)
 	return res, t, err
 }
+
+func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
 // claimsFor are the gate claims of a turn: its budgets, at their current
 // capacities (checkPolicy has verified them), and its serialize key.
@@ -760,7 +901,7 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 		}
 		if t != nil {
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
-			rec.Metrics, rec.Model = t.metrics, t.vars()["model"]
+			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 		}
 		return nil // always save: the record must leave "running"
 	})
@@ -821,6 +962,7 @@ func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd strin
 	for _, nr := range all {
 		rs, err := r.create(nr)
 		if err != nil {
+			removeRuns(runs) // all or nothing
 			return nil, err
 		}
 		runs = append(runs, rs...)
@@ -902,13 +1044,19 @@ func (r *Runner) WaitTurn(ctx context.Context, id string, n int) (rep Report, fi
 			// Only the last turn can be unfinished: a turn is queued only
 			// after the one before it finished.
 			if !run.Turns[n-1].finished() && !run.executing() {
+				reaped := 0
 				if run, err = r.home.updateRun(id, func(run *Run) error {
-					if !run.Turns[len(run.Turns)-1].finished() {
-						r.reapLost(run)
+					if k := len(run.Turns); !run.Turns[k-1].finished() && r.reapLost(run) {
+						reaped = k
 					}
 					return nil
 				}); err != nil {
 					return Report{}, false, err
+				}
+				if reaped > 0 {
+					if saved := r.countReaped(id, reaped); saved != nil {
+						run = saved
+					}
 				}
 			}
 			if run.Turns[n-1].finished() {

@@ -1155,10 +1155,6 @@ func (c *cli) stats(args []string) error {
 		for k, m := range s.Metrics {
 			mean[k] = m.Mean()
 		}
-		perOK := "-"
-		if m, has := s.Metrics["cost_usd"]; has && ok > 0 {
-			perOK = fmt.Sprintf("$%.4f", m.Sum/float64(ok))
-		}
 		var failed []string
 		for _, o := range slices.Sorted(maps.Keys(s.Outcomes)) {
 			if o != "success" {
@@ -1168,10 +1164,23 @@ func (c *cli) stats(args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d%%\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n",
 			s.Profile, or(s.Model, "-"), or(s.Kind, "-"), s.Turns, 100*ok/s.Turns,
 			s.Median.Round(time.Second), s.P90.Round(time.Second), float64(s.Attempts)/float64(s.Turns),
-			tokens(mean, "input_tokens"), tokens(mean, "output_tokens"), money(mean, "cost_usd"), perOK, dash(failed))
+			tokens(mean, "input_tokens"), tokens(mean, "output_tokens"), money(mean, "cost_usd"), costPerSuccess(s), dash(failed))
 	}
-	fmt.Fprintln(w, "\nIN, OUT and COST are means per turn, over the turns whose harness reports them.")
+	fmt.Fprintln(w, "\nIN, OUT and COST are means per turn, over the turns whose harness reports them;")
+	fmt.Fprintln(w, "COST/OK is shown only when every turn reported its cost.")
 	return w.Flush()
+}
+
+// costPerSuccess is what the group spent per successful turn. A turn that
+// did not report its cost would count as free, so a group with any such
+// turn has no figure.
+func costPerSuccess(s harness.Stats) string {
+	m, has := s.Metrics["cost_usd"]
+	ok := s.Outcomes["success"]
+	if !has || ok == 0 || m.Turns < s.Turns {
+		return "-"
+	}
+	return fmt.Sprintf("$%.4f", m.Sum/float64(ok))
 }
 
 // spend renders a turn's tokens and cost, when its harness reports them.

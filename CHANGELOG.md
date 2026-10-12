@@ -1,5 +1,69 @@
 # Changelog
 
+## v1.7.0 (2026-10-12)
+
+Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in
+its review of v1.6.0, and 5 more in its review of the first version of
+this release, then 2, 2, 1 and 1 in its next four. Every code fix has a
+regression test. **v1.6.0 is
+retracted** (`go.mod`), since it broke code written for v1.5.
+
+- **API compatibility restored.** v1.6.0 added map fields to `Result` and
+  `Turn`, which made them impossible to compare with `==` or use as map
+  keys, breaking code written for v1.5. `Result.Metrics` and
+  `Turn.Metrics` are now a comparable `Metrics` value (with `Get`, `Map`,
+  `String` and JSON support; equal numbers, `-0` and `0` included, compare
+  equal). v1.6.0 is retracted for this; code that used its map fields calls
+  `Map()`. `gorelease` against v1.5.0 reports only additions. A test
+  compiles v1.5-style uses of every comparable type, and the compatibility
+  notes now state Go's rules: struct types may gain fields (use keyed
+  literals), and comparable types stay comparable. `Stats` gains
+  `Reported`, how many turns reported each metric.
+- **Metrics.** The extraction pre-filter no longer skips a line whose
+  `where` value contains a character JSON escapes briefly (tab, newline,
+  carriage return, backspace, form feed); a metric that reads as NaN or
+  infinity, or whose sum overflows, is dropped instead of making the turn's
+  record impossible to save (which left the turn "running").
+- **Repeat guard.** A request is identified by its profile and definition
+  as they are when the turn executes (editing a refused profile makes a new
+  request, also for turns already queued); turns queued before the limit
+  was reached are refused, checked again once admitted past their budgets,
+  and a turn's outcome is counted before it releases its budget, so the
+  next identical turn sees it; a refusal is not counted as a failure; a
+  background turn whose worker died counts. Each turn is counted once ever:
+  it is marked in its own record before it is counted, so observing its
+  end again (after a lost final save, a success or the window cleared the
+  failures) never counts it again; a lost turn's end is saved even when
+  the follow-up that found it is refused, and the turn counted is the one
+  that was found lost, even if another was queued after it meanwhile.
+  Outcomes are ordered by when their turns ended: a failure counted late
+  does not undo a success that came after it. "In a row within an hour" is now
+  a true sliding window, not an
+  inactivity timeout; one lock guards every record, so cleanup can no
+  longer remove a lock in use.
+- **compare** checks every profile's policy and budgets before creating
+  any run, and removes the runs it created if creating a later one fails
+  at any stage. A run whose first save fails no longer leaves its folder.
+  An invalid policy is now refused before any run is created, by `run` and
+  `start` too.
+- **gc** can no longer remove a run being created, whatever its cutoff:
+  a run is prepared under a staging name, with its record and first turn,
+  and renamed into `runs/` whole, while its creator holds a lock beside
+  it; gc removes a staging folder only once that lock is free (its creator
+  is gone), however old the folder. Creation locks are taken, and their
+  files removed, only under one permanent coordination lock, so on Unix a
+  lock can never be split between a file and the one recreated under its
+  name. A run whose turn still waits for its
+  worker is left alone until the turn counts as lost. A folder without a
+  record (an interrupted removal) is removed only if untouched since the
+  cutoff. Run ids that collide with a published run or a creation in
+  progress are skipped, never replaced.
+- **stats** no longer misses runs when the time zone differs from when they
+  were created (run ids spell local time); `COST/OK` is shown only when
+  every turn of the group reported its cost.
+- **Guide:** `compare` is for read-only profiles; agents that edit files are
+  compared with `run --kind` in separate checkouts and `stats`.
+
 ## v1.6.0 (2026-10-12)
 
 Choosing a harness and model from evidence, after *An Empirical Study of

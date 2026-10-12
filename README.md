@@ -10,7 +10,7 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v1.6.0**, with a stable Go API. Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
+> **Status: v1.7.0**, with a stable Go API. Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35 and Codex 0.162.1, including a Codex agent that starts a Pi
 > agent through harness. The test suite passes in CI on Ubuntu and Windows; no
 > real harness CLI has been run on Linux or macOS yet. See

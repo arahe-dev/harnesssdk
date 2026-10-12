@@ -83,12 +83,11 @@ func TestInvalidProjectPolicyFailsFast(t *testing.T) {
 	defer holder.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Since v1.7 the policy is checked before the run is created.
+	start := time.Now()
 	reps, err := f.r.Start(ctx, "unsafe", []string{"x"}, repo, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reps[0].Outcome == "cancelled" || !strings.Contains(reps[0].Err.Error(), "unsafe retry") {
-		t.Fatalf("want an immediate policy error, got %+v", reps[0])
+	if err == nil || !strings.Contains(err.Error(), "unsafe retry") || reps != nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("want an immediate policy error, got %+v %v", reps, err)
 	}
 }
 

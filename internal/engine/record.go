@@ -45,8 +45,10 @@ type TurnRecord struct {
 	Lineage  []string  `json:"lineage,omitempty"` // gate tickets of this turn and its ancestors
 	Error    string    `json:"error,omitempty"`
 	Command  []string  `json:"command,omitempty"`
-	Model    string    `json:"model,omitempty"` // the model placeholder's value
-	Hint     string    `json:"hint,omitempty"`  // advice for the caller, such as the repeat guard's
+	Model    string    `json:"model,omitempty"`   // the model placeholder's value
+	Hint     string    `json:"hint,omitempty"`    // advice for the caller, such as the repeat guard's
+	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
+	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -54,22 +56,134 @@ type TurnRecord struct {
 // finished reports whether the turn has a final outcome.
 func (t TurnRecord) finished() bool { return t.Outcome != "queued" && t.Outcome != "running" }
 
-// NewRun creates a run directory with a fresh, time-ordered id.
-func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
+// runID makes a fresh, time-ordered run id; tests replace it.
+var runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) }
+
+// A run is prepared in runs/.new-<id> and renamed to runs/<id> once it is
+// complete: with its record and, from Prepare, its first turn queued. So a
+// run appears whole, and runs/ never holds one half made. While preparing
+// it, its creator holds runs/.new-<id>.lock, outside the folder (Windows
+// cannot rename a folder with a file open inside); gc removes a staging
+// folder only when that lock is free, that is when its creator is gone.
+//
+// Those lock files come and go, so taking one and removing one must never
+// interleave: on Unix, a lock taken on a file just before it is unlinked
+// would no longer exclude a lock on the file created next under its name.
+// So creators take their lock, and anyone removes a lock file, only while
+// holding <home>/create.lock, which is never removed and held only for a
+// moment.
+
+// stagePrefix names a run being prepared and its lock; it is not a run id.
+const stagePrefix = ".new-"
+
+// stagedRun is a run being prepared.
+type stagedRun struct {
+	*Run
+	home  *Home
+	final string
+	lock  *os.File
+}
+
+// creationLock coordinates creation locks; see above.
+func (h *Home) creationLock() (unlock func(), err error) {
+	return lockFileWait(filepath.Join(h.Dir, "create.lock"), 10*time.Second)
+}
+
+// stageRun prepares a new run, with its record, under a staging name.
+func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error) {
+	runs := filepath.Join(h.Dir, "runs")
 	for range 8 {
-		id := time.Now().Format("060102-150405") + "-" + randHex(2)
-		dir := filepath.Join(h.Dir, "runs", id)
-		err := os.Mkdir(dir, 0o700)
-		if errors.Is(err, fs.ErrExist) {
-			continue
+		id := runID()
+		stage := filepath.Join(runs, stagePrefix+id)
+		unlock, err := h.creationLock()
+		if err != nil {
+			return nil, err
+		}
+		lock, err := lockOpen(stage + ".lock")
+		unlock()
+		if errors.Is(err, errBusy) {
+			continue // another creator chose this id
 		}
 		if err != nil {
 			return nil, err
 		}
-		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: dir}
-		return r, r.Save()
+		// Checked under the lock: a creator publishes before it releases
+		// the lock, so a run with this id is visible by now.
+		final := filepath.Join(runs, id)
+		if _, err := os.Stat(final); err == nil {
+			lock.Close()
+			continue
+		}
+		if err := os.Mkdir(stage, 0o700); err != nil {
+			lock.Close()
+			if errors.Is(err, fs.ErrExist) {
+				continue // a crashed creation's leftover; gc removes it
+			}
+			return nil, err
+		}
+		s := &stagedRun{Run: &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
+			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock}
+		if err := createStage("record"); err != nil {
+			s.abort()
+			return nil, err
+		}
+		if err := s.Save(); err != nil {
+			s.abort()
+			return nil, err
+		}
+		return s, nil
 	}
 	return nil, errors.New("could not allocate a run id")
+}
+
+// publish renames the prepared run into runs/. It cannot replace a run:
+// a published run is never empty, and a rename replaces only an empty
+// folder on Unix and none on Windows. On failure the run is removed.
+func (s *stagedRun) publish() error {
+	if err := os.Rename(s.dir, s.final); err != nil {
+		s.abort()
+		return err
+	}
+	s.dir = s.final
+	s.release()
+	return nil
+}
+
+// abort removes the prepared run.
+func (s *stagedRun) abort() {
+	os.RemoveAll(s.dir)
+	s.release()
+}
+
+func (s *stagedRun) release() {
+	unlock, err := s.home.creationLock()
+	s.lock.Close()
+	if err != nil {
+		return // the lock file stays; gc removes it once it can
+	}
+	os.Remove(s.lock.Name())
+	unlock()
+}
+
+// NewRun creates a run with no turn yet.
+func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
+	s, err := h.stageRun(profile, harness, cwd, parent)
+	if err != nil {
+		return nil, err
+	}
+	return s.Run, s.publish()
+}
+
+// idSlack bounds how far a run id's time can be from when the run was
+// created: ids are local wall-clock time without a zone, and the zone can
+// differ between the writer and a later reader by up to 26 hours.
+const idSlack = 26 * time.Hour
+
+// idTime is the creation time a run id spells, read in this zone; it is
+// within idSlack of the truth.
+func idTime(id string) (time.Time, bool) {
+	t, err := time.ParseInLocation("060102-150405", id[:min(len(id), 13)], time.Local)
+	return t, err == nil
 }
 
 // LoadRun reads a run record.

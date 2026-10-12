@@ -238,12 +238,15 @@ and how it was found.
   turn. harness does this at most once a day as runs start;
   `harness gc [--days n] [--dry-run]` does it now.
 - `repeat_warn` (default 3) and `repeat_refuse` (default 5), 0 to turn either
-  off: when the same request (profile, prompt, `--set` values and parent run;
-  for `send`, the same run and prompt) fails that many times in a row within
-  an hour, harness adds a `hint` telling you to change approach, and then
-  refuses it (exit 3). A success clears the count; throttled and cancelled
-  turns do not count. Do not loop on a failing request: read the error,
-  change the prompt, the profile or the plan.
+  off: when the same request fails that many times in a row, counting the
+  failures of the last hour, harness adds a `hint` telling you to change
+  approach, and then refuses it (exit 3), including turns already queued.
+  A request is the profile and its definition as they are now (editing
+  either makes a new request), the folder, the prompt, the `--set` values
+  and the parent run; for `send`, the run instead of the parent. A success
+  clears the failures; throttled and cancelled turns do not count; a
+  background turn whose worker died does. Do not loop on a failing request:
+  read the error, change the prompt, the profile or the plan.
 
 ## Per-project profiles
 
@@ -281,9 +284,11 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
 - `--kind` labels runs (lower-case, such as `review`) so `harness stats` can
   compare profiles per kind of task.
 - `compare` runs the same task on each profile at once, prints each answer,
-  then a table of outcome, time, attempts, tokens and cost. The agents share
-  the working folder: compare profiles that edit files only in separate
-  checkouts (`--cwd`), one compare per checkout.
+  then a table of outcome, time, attempts, tokens and cost. Every agent in a
+  compare works in the same folder at the same time, so compare read-only
+  profiles. To compare agents that edit files, give each its own checkout
+  and use `harness run --kind <label> --cwd <checkout>` per profile instead;
+  `harness stats --kind <label>` then compares them.
 - `--json` prints `{run, turn, profile, harness, model, kind, outcome, exit_code, attempts, session, duration_ms, metrics, output, error, hint}`
   (an array for several tasks, and for `compare`).
 - A `hint` (also printed as `harness: hint: ...`) is advice to act on, such

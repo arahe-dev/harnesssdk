@@ -49,8 +49,8 @@ type Result struct {
 	Duration time.Duration
 	// StderrTail is the end of the CLI's stderr when the turn failed.
 	StderrTail string
-	Model      string             // the profile's model placeholder, if any
-	Metrics    map[string]float64 // the definition's metrics, such as tokens and cost
+	Model      string  // the profile's model placeholder, if any
+	Metrics    Metrics // the definition's metrics, such as tokens and cost
 	// Hint is advice for the caller, such as to stop repeating a request
 	// that keeps failing.
 	Hint string
@@ -62,7 +62,7 @@ type Result struct {
 func resultOf(rep engine.Report) *Result {
 	res := &Result{Turn: rep.Turn, Outcome: Outcome(rep.Outcome), Output: rep.Output,
 		Attempts: rep.Attempts, Duration: rep.Duration, StderrTail: rep.StderrTail,
-		Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint}
+		Model: rep.Model, Metrics: metricsOf(rep.Metrics), Hint: rep.Hint}
 	if rep.Err != nil {
 		res.Error = rep.Err.Error()
 	}
@@ -113,7 +113,7 @@ type Turn struct {
 	Ended    time.Time
 	Error    string
 	Model    string
-	Metrics  map[string]float64
+	Metrics  Metrics
 	Hint     string
 }
 
@@ -123,7 +123,7 @@ func runOf(r *engine.Run) Run {
 	for _, t := range r.Turns {
 		out.Turns = append(out.Turns, Turn{N: t.N, Outcome: Outcome(t.Outcome), Attempts: t.Attempts,
 			ExitCode: t.ExitCode, Queued: t.Queued, Started: t.Started, Ended: t.Ended, Error: t.Error,
-			Model: t.Model, Metrics: t.Metrics, Hint: t.Hint})
+			Model: t.Model, Metrics: metricsOf(t.Metrics), Hint: t.Hint})
 	}
 	return out
 }

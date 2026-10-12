@@ -152,6 +152,25 @@ func TestCLICompareAndStats(t *testing.T) {
 	}
 }
 
+func TestCostPerSuccess(t *testing.T) {
+	cost := func(turns int) map[string]harness.MetricStats {
+		return map[string]harness.MetricStats{"cost_usd": {Sum: 1, Turns: turns}}
+	}
+	for _, c := range []struct {
+		s    harness.Stats
+		want string
+	}{
+		{harness.Stats{Turns: 2, Outcomes: map[string]int{"success": 2}, Metrics: cost(2)}, "$0.5000"},
+		{harness.Stats{Turns: 2, Outcomes: map[string]int{"success": 2}, Metrics: cost(1)}, "-"}, // one turn did not report
+		{harness.Stats{Turns: 2, Outcomes: map[string]int{"permanent": 2}, Metrics: cost(2)}, "-"},
+		{harness.Stats{Turns: 2, Outcomes: map[string]int{"success": 2}}, "-"},
+	} {
+		if got := costPerSuccess(c.s); got != c.want {
+			t.Errorf("%+v: %s, want %s", c.s, got, c.want)
+		}
+	}
+}
+
 func TestCLIConfigAndGC(t *testing.T) {
 	t.Setenv("HARNESS_HOME", t.TempDir())
 	if code, out, _ := harnessCLI(t, "", "config"); code != 0 || !strings.Contains(out, "max_depth") || !strings.Contains(out, "retention_days  30") {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -421,8 +422,8 @@ func newCollector(s *Selector) *collector {
 		return c
 	}
 	for _, want := range s.Where {
-		if _, err := strconv.ParseFloat(want, 64); err == nil || want == "" || strings.ContainsAny(want, "\"\\/") {
-			continue // a number may be spelled many ways; these may be escaped
+		if _, err := strconv.ParseFloat(want, 64); err == nil || want == "" || !literalSafe(want) {
+			continue // a number may be spelled many ways; the rest may be escaped
 		}
 		c.literal = append(c.literal, []byte(want))
 	}
@@ -453,7 +454,7 @@ func metricValues(cs map[string]*collector) map[string]float64 {
 }
 
 // mayMatch reports whether a raw line can match, without decoding it. A
-// JSON string spells a value without quote, backslash or slash literally,
+// JSON string spells a value made of literalSafe characters literally,
 // unless it uses a \u escape, so a line with neither cannot match.
 func (c *collector) mayMatch(line []byte) bool {
 	if c.s == nil {
@@ -462,6 +463,18 @@ func (c *collector) mayMatch(line []byte) bool {
 	for _, want := range c.literal {
 		if !bytes.Contains(line, want) {
 			return bytes.Contains(line, []byte(`\u`))
+		}
+	}
+	return true
+}
+
+// literalSafe reports whether a JSON string holding s must contain s
+// itself, unless it uses a \u escape: s has no quote, backslash or slash
+// and no control character, the characters with short escapes.
+func literalSafe(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == '"' || c == '\\' || c == '/' {
+			return false
 		}
 	}
 	return true
@@ -518,10 +531,12 @@ func (c *collector) number() (float64, bool) {
 	if c.s.Pick == "count" {
 		return float64(c.matched), true
 	}
-	return c.num, c.found
+	return c.num, c.found && finite(c.num) // a sum can overflow
 }
 
-// numberAt adds up the numbers at one or more paths joined with "+".
+// numberAt adds up the finite numbers at one or more paths joined with "+".
+// A string such as "NaN" or "Inf" parses but is not a number a record can
+// hold (JSON has no such values), so it counts as missing.
 func numberAt(ev any, field string) (float64, bool) {
 	var sum float64
 	found := false
@@ -530,16 +545,41 @@ func numberAt(ev any, field string) (float64, bool) {
 		if !ok {
 			continue
 		}
+		var f float64
 		switch x := v.(type) {
 		case float64:
-			sum, found = sum+x, true
+			f = x
 		case string:
-			if f, err := strconv.ParseFloat(x, 64); err == nil {
-				sum, found = sum+f, true
+			var err error
+			if f, err = strconv.ParseFloat(x, 64); err != nil {
+				continue
 			}
+		default:
+			continue
+		}
+		if finite(f) {
+			sum, found = sum+f, true
 		}
 	}
-	return sum, found
+	return sum, found && finite(sum)
+}
+
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
+
+// finiteMetrics drops values a record cannot hold: JSON has no NaN or
+// infinity, so the record could not be saved and its turn would stay
+// "running".
+func finiteMetrics(m map[string]float64) map[string]float64 {
+	var out map[string]float64
+	for k, v := range m {
+		if finite(v) {
+			if out == nil {
+				out = map[string]float64{}
+			}
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func (s *Selector) matches(ev any) bool {

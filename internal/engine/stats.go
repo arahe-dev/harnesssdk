@@ -58,12 +58,13 @@ func (h *Home) Stats(f StatsFilter) ([]Stats, error) {
 	durations := map[[3]string][]time.Duration{}
 	for _, e := range entries {
 		id := e.Name()
-		// Ids start with their creation time: older runs are not read.
-		if created, err := time.ParseInLocation("060102-150405", id[:min(len(id), 13)], time.Local); !e.IsDir() || err != nil || created.Before(f.Since.Add(-time.Second)) {
+		// Ids start with their creation time: runs clearly older are not
+		// read; the record's own time decides the rest.
+		if created, ok := idTime(id); !e.IsDir() || !ok || created.Add(idSlack).Before(f.Since) {
 			continue
 		}
 		run, err := h.LoadRun(id)
-		if err != nil || f.Profile != "" && run.Profile != f.Profile || f.Kind != "" && run.Kind != f.Kind {
+		if err != nil || run.Created.Before(f.Since) || f.Profile != "" && run.Profile != f.Profile || f.Kind != "" && run.Kind != f.Kind {
 			continue
 		}
 		for _, t := range run.Turns {
