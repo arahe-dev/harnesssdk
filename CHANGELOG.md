@@ -3,8 +3,8 @@
 ## v1.7.0 (2026-10-12)
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in
-its review of v1.6.0, and 5 more in its review of the first version of
-this release, then 2, 2, 1 and 1 in its next four. Every code fix has a
+its review of v1.6.0, and 12 more across its six reviews of this release's
+pull request (5, 2, 2, 1, 1 and 1), until it passed. Every code fix has a
 regression test. **v1.6.0 is
 retracted** (`go.mod`), since it broke code written for v1.5.
 
