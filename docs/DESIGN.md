@@ -123,14 +123,24 @@ Spending limits count `spend/<run>-<turn>-<attempt>-<random>.json`, one
 entry per attempt, each written whole and only by its attempt's process
 (the random part keeps a run id used again, after its run is gone, from
 writing over the first run's entries). The entry is made, `running`, before
-the attempt runs. Once the attempt is over, its cost is written into the
-entry before its ticket is released, so the next turn admitted counts it.
-An entry is never removed because its cost could not be written, limit or
-not. With `spend_unknown` `refuse` (below), a turn under a limit whose
-entry cannot be made does not run, and one whose cost cannot be written
-stays admitted, trying again (1 s, doubling to 30 s), until it is written or
-the turn is stopped; a stopped one lets go of its execution lock before its
-ticket. Otherwise the turn goes on, and its cost is unknown.
+the attempt runs. Once the attempt is over, the entry is given what the
+turn has cost since the last entry given a cost (from then on that cost is
+the entry's alone), and written before the ticket is released, so the next
+turn admitted counts it. An entry that cannot be written, at either step,
+stays with the turn and is written with its next write that succeeds; until
+then the turn's own checks (before a retry) count it as unknown, and other
+turns see its running entry, if that was written. An entry is never removed
+because its cost could not be written, limit or not.
+
+The rule for a turn's spending (whether a limit applies, and
+`spend_unknown`) is read once for each attempt, when its admission is
+checked, and the attempt's ledger handling follows that rule. With
+`refuse`, an attempt under a limit whose entry cannot be made does not run,
+and a turn whose cost cannot be written stays admitted, trying again (1 s,
+doubling to 30 s), until it is written or the turn is stopped; a stopped one
+lets go of its execution lock before its ticket. Otherwise the turn goes
+on, and its hint says that its cost could not be written and how it
+counts.
 
 Spending sums the entries in the window. A `running` entry counts nothing
 while its turn executes (its run's execution lock is held, its record says

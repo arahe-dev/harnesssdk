@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -102,30 +103,48 @@ func (h *Home) writeSpend(stage string, e *spendEntry) error {
 }
 
 // openSpend makes the running entry of turn t's next attempt. Entries are
-// numbered as they are made, so none is ever written over by another.
+// numbered as they are made, so none is ever written over by another. The
+// entry is the attempt's whether or not it could be written.
 func (h *Home) openSpend(t *Turn) error {
 	e := &spendEntry{Run: t.Run.ID, Created: t.Run.Created, Turn: t.N, Attempt: t.opened + 1, Profile: t.Profile.Name, At: now().UTC(), Running: true}
-	if err := h.writeSpend("open", e); err != nil {
-		return err
-	}
 	t.entry, t.opened = e, t.opened+1
-	return nil
+	return h.writeSpend("open", e)
 }
 
-// closeSpend writes what turn t's attempt cost (since the cost last
-// written) into its entry.
+// closeSpend gives the attempt's entry what the turn has cost since the
+// last entry given a cost: from then on that cost is this entry's, and no
+// later entry counts it. An entry that cannot be written waits in
+// t.unwritten, and is written with the next write that can be made; until
+// then its cost is unknown (the turn's own checks count it as such, see
+// checkSpend; others see its running entry, if that was written).
 func (h *Home) closeSpend(t *Turn) error {
-	if t.entry == nil {
-		return nil
+	if e := t.entry; e != nil {
+		cost := finiteMetrics(t.metrics)["cost_usd"]
+		e.At, e.USD, e.Running = now().UTC(), dollars(cost-t.spendSaved), false
+		t.spendSaved, t.entry = cost, nil
+		t.unwritten = append(t.unwritten, e)
 	}
-	cost := finiteMetrics(t.metrics)["cost_usd"]
-	e := *t.entry
-	e.At, e.USD, e.Running = now().UTC(), dollars(cost-t.spendSaved), false
-	if err := h.writeSpend("close", &e); err != nil {
-		return err
+	return h.flushSpend(t)
+}
+
+// flushSpend writes the entries of t that could not be written before.
+func (h *Home) flushSpend(t *Turn) error {
+	var errs []error
+	t.unwritten = slices.DeleteFunc(t.unwritten, func(e *spendEntry) bool {
+		err := h.writeSpend("close", e)
+		errs = append(errs, err)
+		return err == nil
+	})
+	return errors.Join(errs...)
+}
+
+// unwrittenWhy describes the entries of t whose costs are not written.
+func (t *Turn) unwrittenWhy() []string {
+	var out []string
+	for _, e := range t.unwritten {
+		out = append(out, fmt.Sprintf("what attempt %d of run %s turn %d cost could not be written to the spending ledger", e.Attempt, e.Run, e.Turn))
 	}
-	t.spendSaved, t.entry = cost, nil
-	return nil
+	return out
 }
 
 // limited reports whether a spending limit applies to turns of p.
@@ -175,51 +194,65 @@ func unknownPolicyOf(cfg Config, p *Profile) unknownPolicy {
 // spendUnknownHow says how to choose what unknown costs count as.
 const spendUnknownHow = "choose how they count with: harness config set spend_unknown <warn|refuse|dollars>, or spend_unknown in the profile"
 
+// spendRule is what applies to a turn's spending, read once per check: an
+// attempt's ledger handling follows the rule its admission was checked by.
+type spendRule struct {
+	limited bool
+	unknown unknownPolicy
+}
+
+// strict is whether spending that cannot be recorded stops the turn.
+func (r spendRule) strict() bool { return r.limited && r.unknown.refuse }
+
 // checkSpend refuses a turn of p as throttled once p, or the machine, has
 // spent its limit, counting the costs harness could not record as
-// spend_unknown says. hint, when there are such costs, says what they were
-// counted as.
-func (h *Home) checkSpend(p *Profile) (hint string, err error) {
+// spend_unknown says; own are such costs of the turn itself, not in the
+// ledger. hint, when there are such costs, says what they were counted as.
+func (h *Home) checkSpend(p *Profile, own []string) (rule spendRule, hint string, err error) {
 	cfg, err := h.Config()
 	if err != nil {
-		return "", err
+		return rule, "", err
 	}
-	if !limited(cfg, p) {
-		return "", nil
+	rule = spendRule{limited: limited(cfg, p), unknown: unknownPolicyOf(cfg, p)}
+	if !rule.limited {
+		return rule, "", nil
 	}
 	s, err := h.spending(now().Add(-spendWindow), p.Name)
 	if err != nil {
-		return "", err
+		return rule, "", err
 	}
+	unknownAll, unknownMine := slices.Concat(own, s.unknownAll), slices.Concat(own, s.unknownMine)
 	// The unknown costs under the limits that apply: the machine's covers
 	// every profile's.
-	unknown := s.unknownMine
+	unknown := unknownMine
 	if cfg.SpendLimitUSD > 0 {
-		unknown = s.unknownAll
+		unknown = unknownAll
 	}
-	pol := unknownPolicyOf(cfg, p)
+	pol := rule.unknown
 	if pol.refuse && len(unknown) > 0 {
-		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+		return rule, "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
 			"%s, and spend_unknown is refuse: turns under a spending limit are refused until it is 24 hours old, or its entry is removed; %s", unknown[0], spendUnknownHow))
 	}
-	all := s.all + pol.assume*float64(len(s.unknownAll))
-	mine := s.mine + pol.assume*float64(len(s.unknownMine))
-	counted := ""
-	if len(unknown) > 0 {
-		counted = fmt.Sprintf(" (%d cost(s) harness could not record counted as $%.2f each)", len(unknown), pol.assume)
+	all := s.all + pol.assume*float64(len(unknownAll))
+	mine := s.mine + pol.assume*float64(len(unknownMine))
+	counted := func(n int) string {
+		if n == 0 {
+			return ""
+		}
+		return fmt.Sprintf(" (%d cost(s) harness could not record counted as $%.2f each)", n, pol.assume)
 	}
 	switch {
 	case cfg.SpendLimitUSD > 0 && all >= float64(cfg.SpendLimitUSD):
-		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"turns on this machine have spent $%.2f in the last 24 hours%s, and spend_limit_usd is $%d; raise it with: harness config set spend_limit_usd <dollars>", all, counted, cfg.SpendLimitUSD))
+		return rule, "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"turns on this machine have spent $%.2f in the last 24 hours%s, and spend_limit_usd is $%d; raise it with: harness config set spend_limit_usd <dollars>", all, counted(len(unknownAll)), cfg.SpendLimitUSD))
 	case p.SpendLimit > 0 && mine >= p.SpendLimit:
-		return "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
-			"profile %s has spent $%.2f in the last 24 hours%s, and its spend_limit_usd is $%.2f", p.Name, mine, counted, p.SpendLimit))
+		return rule, "", hertasdk.Fail(hertasdk.Throttled, fmt.Errorf(
+			"profile %s has spent $%.2f in the last 24 hours%s, and its spend_limit_usd is $%.2f", p.Name, mine, counted(len(unknownMine)), p.SpendLimit))
 	}
 	if len(unknown) > 0 {
 		hint = fmt.Sprintf("spending limits count %d cost(s) harness could not record as $%.2f each (%s); %s", len(unknown), pol.assume, unknown[0], spendUnknownHow)
 	}
-	return hint, nil
+	return rule, hint, nil
 }
 
 // spent is what turns spent in a window, on the machine and by one
@@ -251,9 +284,7 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 	// upgraded or removed since) is counted from the ledger then, and one
 	// the record counted (byRecord) is not counted again.
 	seen, byRecord := map[string]bool{}, map[string]bool{}
-	if err := h.readLedger(since, profile, seen, byRecord, add, unknown); err != nil {
-		return s, err
-	}
+	h.readLedger(since, profile, seen, byRecord, add, unknown)
 	if testHookSpending != nil {
 		testHookSpending()
 	}
@@ -263,8 +294,8 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 	// its cost is unknown; one that is gone was collected, its cost moved
 	// to the ledger (read again below).
 	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
-	if err != nil {
-		return s, err
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		unknown(true, fmt.Sprintf("the run records cannot be read (%v), so what turns recorded before v2 cost cannot be told", err))
 	}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) || !validName(e.Name()) {
@@ -294,7 +325,8 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 			add(run.Profile, t.Metrics["cost_usd"])
 		}
 	}
-	return s, h.readLedger(since, profile, seen, byRecord, add, unknown)
+	h.readLedger(since, profile, seen, byRecord, add, unknown)
+	return s, nil
 }
 
 // readV1 reads run id's record if it is a v1 one, or returns nil if it is
@@ -327,11 +359,11 @@ func (h *Home) readV1(id string) (*Run, error) {
 var testHookSpending func()
 
 // readLedger counts the ledger's entries not seen yet, nor counted by
-// their v1 records.
-func (h *Home) readLedger(since time.Time, profile string, seen, byRecord map[string]bool, add func(string, float64), unknown func(bool, string)) error {
+// their v1 records. A ledger that cannot be read is an unknown cost.
+func (h *Home) readLedger(since time.Time, profile string, seen, byRecord map[string]bool, add func(string, float64), unknown func(bool, string)) {
 	files, err := os.ReadDir(h.spendDir())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		unknown(true, fmt.Sprintf("the spending ledger %s cannot be read (%v)", h.spendDir(), err))
 	}
 	for _, f := range files {
 		name := f.Name()
@@ -372,7 +404,6 @@ func (h *Home) readLedger(since time.Time, profile string, seen, byRecord map[st
 			add(e.Profile, *e.USD)
 		}
 	}
-	return nil
 }
 
 // turnRunning reports whether the turn of entry e is executing: in the
@@ -422,5 +453,13 @@ func (h *Home) pruneSpend() {
 		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 2*spendWindow {
 			os.Remove(filepath.Join(h.spendDir(), e.Name()))
 		}
+	}
+}
+
+// spendHint adds a hint about the turn's spending, once.
+func (t *Turn) spendHint(hint string) {
+	if hint != "" && !slices.Contains(t.spendHints, hint) {
+		t.spendHints = append(t.spendHints, hint)
+		t.logf("== harness: hint: %s", hint)
 	}
 }

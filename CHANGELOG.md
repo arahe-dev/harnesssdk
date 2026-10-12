@@ -20,6 +20,21 @@
 - `harness config set` takes a value per key (`spend_unknown` is not a
   number); the Go API adds `Config.SpendUnknown` and
   `Client.SetConfigValue`.
+- **Review.** The Pi review agent's first review found 5 medium issues, all
+  in what happens when the spending ledger cannot be written. They were
+  fixed in one change, against stated guarantees: every attempt's cost
+  counts once (its own if written, else as `spend_unknown` says); an
+  attempt's ledger handling follows the rule it was admitted by; an
+  unknown cost is always shown. Concretely:
+  - an attempt whose entry could not be made still has its cost written
+    once the ledger can be;
+  - a cost is given to its own attempt's entry, so a later entry never
+    counts it again;
+  - a retry counts its earlier attempts whose costs are not written;
+  - ledger failures under a limit put a hint on the turn.
+
+  Unreadable ledger or run folders now count as unknown instead of failing
+  the turn.
 
 ## v2.0.0-next (2026-10-12)
 
