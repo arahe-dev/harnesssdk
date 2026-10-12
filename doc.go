@@ -28,7 +28,9 @@
 //
 // From v1.5.0 this package follows semantic versioning: within v1, nothing
 // exported here is removed or changes meaning, and the data folder stays
-// readable. Every file harness writes for itself carries a format number,
+// readable. Struct types may gain fields, so use keyed literals; a type
+// that can be compared with == stays comparable. Every file harness writes
+// for itself carries a format number,
 // and a harness refuses a format newer than it reads rather than misread
 // it. Definitions and profiles written for v1 keep working. The
 // implementation lives in internal packages and may change in any release.

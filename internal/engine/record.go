@@ -72,6 +72,18 @@ func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
 	return nil, errors.New("could not allocate a run id")
 }
 
+// idSlack bounds how far a run id's time can be from when the run was
+// created: ids are local wall-clock time without a zone, and the zone can
+// differ between the writer and a later reader by up to 26 hours.
+const idSlack = 26 * time.Hour
+
+// idTime is the creation time a run id spells, read in this zone; it is
+// within idSlack of the truth.
+func idTime(id string) (time.Time, bool) {
+	t, err := time.ParseInLocation("060102-150405", id[:min(len(id), 13)], time.Local)
+	return t, err == nil
+}
+
 // LoadRun reads a run record.
 func (h *Home) LoadRun(id string) (*Run, error) {
 	if !validName(id) {

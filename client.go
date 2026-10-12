@@ -297,8 +297,11 @@ type Stats struct {
 	Attempts int
 	Median   time.Duration
 	P90      time.Duration
-	// Metrics are each metric's mean over the turns that reported it.
-	Metrics map[string]float64
+	// Metrics are each metric's mean over the turns that reported it, and
+	// Reported how many turns did: a mean over fewer than Turns covers only
+	// some of them.
+	Metrics  map[string]float64
+	Reported map[string]int
 }
 
 // Stats sums up finished turns by profile, model and kind, most used
@@ -317,9 +320,9 @@ func (c *Client) Stats(f StatsFilter) ([]Stats, error) {
 		}
 		for k, m := range s.Metrics {
 			if o.Metrics == nil {
-				o.Metrics = map[string]float64{}
+				o.Metrics, o.Reported = map[string]float64{}, map[string]int{}
 			}
-			o.Metrics[k] = m.Mean()
+			o.Metrics[k], o.Reported[k] = m.Mean(), m.Turns
 		}
 		out[i] = o
 	}

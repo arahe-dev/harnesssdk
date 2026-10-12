@@ -365,7 +365,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
 		}
-		t.metrics[k] += n
+		t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
@@ -451,10 +451,18 @@ type newRuns struct {
 	parent string
 }
 
-// check loads the profile and applies max_depth and the repeat guard.
+// check loads the profile, validates its policy, and applies max_depth
+// and the repeat guard: everything that can refuse a run before it exists.
 func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, kind string) (*newRuns, error) {
 	p, d, err := r.load(profile, cwd)
 	if err != nil {
+		return nil, err
+	}
+	budgets, err := r.home.Budgets()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPolicy(p, budgets); err != nil {
 		return nil, err
 	}
 	if kind != "" && !validName(kind) {
@@ -466,7 +474,7 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	}
 	nr := &newRuns{p: p, d: d, tasks: tasks, cwd: cwd, extra: extra, kind: kind, depth: depth, parent: r.kin().Parent}
 	for _, task := range tasks {
-		fp := fingerprint("run", nr.parent, p.Name, cwd, task, varsKey(extra))
+		fp := requestFingerprint("run", nr.parent, p, d, cwd, task, extra)
 		if err := r.home.checkRepeat(fp); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", p.Name, err)
 		}
@@ -475,36 +483,58 @@ func (r *Runner) check(profile string, tasks []string, cwd string, extra Vars, k
 	return nr, nil
 }
 
-func (r *Runner) create(nr *newRuns) ([]*Run, error) {
-	var runs []*Run
-	for i, task := range nr.tasks {
-		run, err := r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent)
+// testHookCreate, when set, runs before each run is created; an error
+// fails that creation.
+var testHookCreate func() error
+
+// create records the runs, all of them or none: a failure removes the
+// runs already created.
+func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
+	defer func() {
 		if err != nil {
-			return nil, err
+			removeRuns(runs)
+			runs = nil
 		}
-		run.Depth, run.Kind = nr.depth, nr.kind
-		if _, err := queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i]}); err != nil {
-			return nil, err
+	}()
+	for i, task := range nr.tasks {
+		if testHookCreate != nil {
+			if err = testHookCreate(); err != nil {
+				return runs, err
+			}
 		}
-		if err := run.Save(); err != nil {
-			return nil, err
+		var run *Run
+		if run, err = r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
+			return runs, err
 		}
 		runs = append(runs, run)
+		run.Depth, run.Kind = nr.depth, nr.kind
+		if _, err = queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i]}); err != nil {
+			return runs, err
+		}
+		if err = run.Save(); err != nil {
+			return runs, err
+		}
 	}
 	return runs, nil
+}
+
+func removeRuns(runs []*Run) {
+	for _, run := range runs {
+		os.RemoveAll(run.Dir())
+	}
 }
 
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
-	fp := fingerprint("send", id, prompt, varsKey(extra))
-	if err := r.home.checkRepeat(fp); err != nil {
-		return 0, err
-	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
-		p, _, err := r.load(run.Profile, run.Cwd)
+		p, d, err := r.load(run.Profile, run.Cwd)
 		if err != nil {
+			return err
+		}
+		fp := requestFingerprint("send", id, p, d, run.Cwd, prompt, extra)
+		if err := r.home.checkRepeat(fp); err != nil {
 			return err
 		}
 		if p.Harness != run.Harness {
@@ -546,6 +576,12 @@ func (r *Runner) reapLost(run *Run) bool {
 		return false
 	}
 	rec.Ended = time.Now().UTC()
+	// The turn's end is recorded once, here, so it counts for the repeat
+	// guard like any other.
+	var req request
+	if data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", rec.N))); err == nil && json.Unmarshal(data, &req) == nil {
+		rec.Hint = r.home.noteRepeat(req.Repeat, rec.Outcome)
+	}
 	return true
 }
 
@@ -597,7 +633,9 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 
 	res, t, err := r.execute(ctx, run, n, execLock)
 	if t != nil && t.repeat != "" {
-		rep.Hint = r.home.noteRepeat(t.repeat, OutcomeName(err))
+		if !errors.Is(err, ErrRepeated) { // a refusal is not another failure
+			rep.Hint = r.home.noteRepeat(t.repeat, OutcomeName(err))
+		}
 	}
 	run, ferr := r.finish(run.ID, n, t, res, err, rep.Hint)
 	if run != nil {
@@ -610,7 +648,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	rep.Duration = time.Since(start)
 	if t != nil {
 		rep.Attempts, rep.StderrTail = t.attempts, t.stderrTail
-		rep.Model, rep.Metrics = t.vars()["model"], t.metrics
+		rep.Model, rep.Metrics = t.vars()["model"], finiteMetrics(t.metrics)
 	}
 	if res != nil && err == nil {
 		rep.Output = res.Output
@@ -667,6 +705,11 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	}
 	cfg, err := r.home.Config()
 	if err != nil {
+		return nil, t, err
+	}
+	// Checked again here: turns queued before the request reached the
+	// limit are refused too.
+	if err := r.home.checkRepeat(req.Repeat); err != nil {
 		return nil, t, err
 	}
 	claims := claimsFor(p, budgets, t)
@@ -760,7 +803,7 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 		}
 		if t != nil {
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
-			rec.Metrics, rec.Model = t.metrics, t.vars()["model"]
+			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 		}
 		return nil // always save: the record must leave "running"
 	})
@@ -821,6 +864,7 @@ func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd strin
 	for _, nr := range all {
 		rs, err := r.create(nr)
 		if err != nil {
+			removeRuns(runs) // all or nothing
 			return nil, err
 		}
 		runs = append(runs, rs...)

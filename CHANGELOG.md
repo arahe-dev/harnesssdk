@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.7.0 (2026-10-12)
+
+Fixes for the 13 findings of a review of v1.6.0 by a Pi agent (`review`,
+GPT-6.1 Sol), each with a regression test.
+
+- **API compatibility restored.** v1.6.0 added map fields to `Result` and
+  `Turn`, which made them impossible to compare with `==` or use as map
+  keys, breaking code written for v1.5. `Result.Metrics` and
+  `Turn.Metrics` are now a comparable `Metrics` value (with `Get`, `Map`,
+  `String` and JSON support); code that used v1.6.0's map fields must call
+  `Map()`. A test now compiles v1.5-style uses of every comparable type, and
+  the compatibility notes say struct types may gain fields (use keyed
+  literals) and that comparable types stay comparable. `Stats` gains
+  `Reported`, how many turns reported each metric.
+- **Metrics.** The extraction pre-filter no longer skips a line whose
+  `where` value contains a character JSON escapes briefly (tab, newline,
+  carriage return, backspace, form feed); a metric that reads as NaN or
+  infinity, or whose sum overflows, is dropped instead of making the turn's
+  record impossible to save (which left the turn "running").
+- **Repeat guard.** A request now includes its profile and definition as
+  they are (editing a refused profile makes a new request); turns queued
+  before the limit was reached are refused when they execute, without that
+  refusal counting as a failure; a background turn whose worker died
+  counts; "in a row within an hour" is now a true sliding window, not an
+  inactivity timeout; one lock guards every record, so cleanup can no
+  longer remove a lock in use.
+- **compare** checks every profile's policy and budgets before creating
+  any run, and removes the runs it created if creating a later one fails.
+- **stats** no longer misses runs when the time zone differs from when they
+  were created (run ids spell local time); `COST/OK` is shown only when
+  every turn of the group reported its cost.
+- **Guide:** `compare` is for read-only profiles; agents that edit files are
+  compared with `run --kind` in separate checkouts and `stats`.
+
 ## v1.6.0 (2026-10-12)
 
 Choosing a harness and model from evidence, after *An Empirical Study of

@@ -31,9 +31,9 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 	var errs []error
 	for _, e := range entries {
 		id := e.Name()
-		// Ids start with their creation time: a run created after the
-		// cutoff was active after it, and is not read at all.
-		if created, err := time.ParseInLocation("060102-150405", id[:min(len(id), 13)], time.Local); !e.IsDir() || err != nil || !created.Before(cutoff) {
+		// Ids start with their creation time: a run clearly created after
+		// the cutoff was active after it, and is not read at all.
+		if created, ok := idTime(id); !e.IsDir() || !ok || !created.Add(-idSlack).Before(cutoff) {
 			continue
 		}
 		size, err := h.collect(id, cutoff, dryRun)
