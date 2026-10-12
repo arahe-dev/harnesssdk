@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/arahe-dev/harnesssdk/internal/engine"
+	"github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // Client runs agents through one data folder. Its methods are safe for

@@ -22,8 +22,8 @@ import (
 
 	"github.com/arahe-dev/hertasdk"
 
-	sdk "github.com/arahe-dev/harnesssdk"
-	harness "github.com/arahe-dev/harnesssdk/internal/engine"
+	sdk "github.com/arahe-dev/harnesssdk/v2"
+	harness "github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, ...) as subagents.

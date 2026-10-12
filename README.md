@@ -76,7 +76,7 @@ The second time, it is just the last three lines.
 ## Install
 
 ```sh
-go install github.com/arahe-dev/harnesssdk/cmd/harness@latest   # or: go install ./cmd/harness
+go install github.com/arahe-dev/harnesssdk/v2/cmd/harness@latest   # or: go install ./cmd/harness
 mkdir -p ~/.claude/skills/harness ~/.agents/skills/harness
 harness skill > ~/.claude/skills/harness/SKILL.md                # Claude Code
 harness skill > ~/.agents/skills/harness/SKILL.md                # Codex, Pi

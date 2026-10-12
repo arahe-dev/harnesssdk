@@ -1,6 +1,6 @@
 // Package engine is HarnessSDK's implementation. It is internal: its API
 // may change in any release. The stable API is the root package,
-// github.com/arahe-dev/harnesssdk.
+// github.com/arahe-dev/harnesssdk/v2.
 //
 // Layout:
 //

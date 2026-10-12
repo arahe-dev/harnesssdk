@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	harness "github.com/arahe-dev/harnesssdk/internal/engine"
+	harness "github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // SIGTERM to the harness process cancels the run like Ctrl-C: the agent's

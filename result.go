@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/arahe-dev/harnesssdk/internal/engine"
+	"github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // Outcome is how a turn ended, or that it has not.

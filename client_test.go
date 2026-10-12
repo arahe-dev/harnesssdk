@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arahe-dev/harnesssdk/internal/engine"
+	"github.com/arahe-dev/harnesssdk/v2/internal/engine"
 )
 
 // The test binary is also the fake agent CLI (HARNESS_SDK_FAKE=1) and, as
