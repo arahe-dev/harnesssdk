@@ -29,6 +29,11 @@ func TestMain(m *testing.M) {
 		fmt.Printf("answer: %s", strings.TrimSpace(string(in)))
 		os.Exit(0)
 	}
+	// The processes the tests start (guards, fake agents, workers) are this
+	// binary; built with -race, each would sleep a second as it exits.
+	if os.Getenv("GORACE") == "" {
+		os.Setenv("GORACE", "atexit_sleep_ms=0")
+	}
 	os.Exit(m.Run())
 }
 

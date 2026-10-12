@@ -30,6 +30,11 @@ func TestMain(m *testing.M) {
 	case os.Getenv("HARNESS_TEST_CLI") == "1":
 		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
+	// The processes the tests start (guards, fake agents, workers) are this
+	// binary; built with -race, each would sleep a second as it exits.
+	if os.Getenv("GORACE") == "" {
+		os.Setenv("GORACE", "atexit_sleep_ms=0")
+	}
 	os.Exit(m.Run())
 }
 

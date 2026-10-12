@@ -109,12 +109,6 @@ var forceNoJob bool
 // newProcess starts the CLI suspended, so it can be put in a job before it
 // runs. Inherited files are not supported on Windows; the job ties the
 // tree's life to this process instead.
-// newShortProcess is newProcess: a job object contains the tree without a
-// guard process.
-func newShortProcess(path string, args []string) (*exec.Cmd, *tree, error) {
-	return newProcess(path, args, nil)
-}
-
 func newProcess(path string, args []string, _ []*os.File) (*exec.Cmd, *tree, error) {
 	cmd := exec.Command(path, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createSuspended}

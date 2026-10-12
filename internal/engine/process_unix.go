@@ -48,18 +48,8 @@ func newProcess(path string, args []string, extra []*os.File) (*exec.Cmd, *tree,
 	return cmd, &tree{cmd: cmd, watch: w, read: r}, nil
 }
 
-// newShortProcess runs a short command of harness's own without the
-// guard, leading a process group of its own.
-func newShortProcess(path string, args []string) (*exec.Cmd, *tree, error) {
-	cmd := exec.Command(path, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	return cmd, &tree{cmd: cmd}, nil
-}
-
 func (t *tree) started() (warning string, err error) {
-	if t.read != nil {
-		t.read.Close() // the guard has the read end now
-	}
+	t.read.Close() // the guard has the read end now
 	return "", nil
 }
 
@@ -71,10 +61,8 @@ func (t *tree) kill() {
 
 // close ends anything the CLI left running in its group.
 func (t *tree) close() {
-	if t.watch != nil {
-		t.read.Close()
-		t.watch.Close()
-	}
+	t.read.Close()
+	t.watch.Close()
 	t.kill()
 }
 

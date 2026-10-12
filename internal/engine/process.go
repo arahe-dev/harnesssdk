@@ -25,12 +25,6 @@ type procSpec struct {
 	// CmdLine, on Windows, is the exact command line to run Argv[0] with,
 	// for a program such as cmd.exe that parses its own; ignored elsewhere.
 	CmdLine string
-	// Short is for a command of harness's own (git), bounded by its
-	// context: on Unix it runs without the guard (no start of this binary
-	// for each command), in a process group of its own that is killed when
-	// its run ends; it is not killed if this process dies. Inherit must be
-	// empty.
-	Short bool
 }
 
 // runProcess runs the CLI to completion and returns its exit status. A
@@ -43,13 +37,7 @@ func runProcess(ctx context.Context, s procSpec) (exitCode int, warnings []strin
 	if err != nil {
 		return -1, nil, err
 	}
-	var cmd *exec.Cmd
-	var t *tree
-	if s.Short {
-		cmd, t, err = newShortProcess(path, s.Argv[1:])
-	} else {
-		cmd, t, err = newProcess(path, s.Argv[1:], s.Inherit)
-	}
+	cmd, t, err := newProcess(path, s.Argv[1:], s.Inherit)
 	if err != nil {
 		return -1, nil, err
 	}
