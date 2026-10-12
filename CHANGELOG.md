@@ -4,8 +4,8 @@
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in
 its review of v1.6.0, and 5 more in its review of the first version of
-this release, and 2 in its third review. Every code fix has a regression
-test. **v1.6.0 is
+this release, 2 in its third review and 2 in its fourth. Every code fix has
+a regression test. **v1.6.0 is
 retracted** (`go.mod`), since it broke code written for v1.5.
 
 - **API compatibility restored.** v1.6.0 added map fields to `Result` and
@@ -34,7 +34,8 @@ retracted** (`go.mod`), since it broke code written for v1.5.
   it is marked in its own record before it is counted, so observing its
   end again (after a lost final save, a success or the window cleared the
   failures) never counts it again; a lost turn's end is saved even when
-  the follow-up that found it is refused. "In a row within an hour" is now
+  the follow-up that found it is refused, and the turn counted is the one
+  that was found lost, even if another was queued after it meanwhile. "In a row within an hour" is now
   a true sliding window, not an
   inactivity timeout; one lock guards every record, so cleanup can no
   longer remove a lock in use.
@@ -43,12 +44,15 @@ retracted** (`go.mod`), since it broke code written for v1.5.
   at any stage. A run whose first save fails no longer leaves its folder.
   An invalid policy is now refused before any run is created, by `run` and
   `start` too.
-- **gc** can no longer remove a run being created or queued, whatever its
-  cutoff: runs are prepared under a staging name and renamed into `runs/`
-  with their record, and a run whose turn still waits for its worker is
-  left alone. A folder without a record (an interrupted removal) is
-  removed only if untouched since the cutoff; a crashed creation's staging
-  folder after an hour.
+- **gc** can no longer remove a run being created, whatever its cutoff:
+  a run is prepared under a staging name, with its record and first turn,
+  and renamed into `runs/` whole, while its creator holds a lock beside
+  it; gc removes a staging folder only once that lock is free (its creator
+  is gone), however old the folder. A run whose turn still waits for its
+  worker is left alone until the turn counts as lost. A folder without a
+  record (an interrupted removal) is removed only if untouched since the
+  cutoff. Run ids that collide with a published run or a creation in
+  progress are skipped, never replaced.
 - **stats** no longer misses runs when the time zone differs from when they
   were created (run ids spell local time); `COST/OK` is shown only when
   every turn of the group reported its cost.

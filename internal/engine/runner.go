@@ -511,24 +511,31 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 		}
 	}()
 	for i, task := range nr.tasks {
-		var run *Run
-		if run, err = r.home.NewRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
+		var s *stagedRun
+		if s, err = r.home.stageRun(nr.p.Name, nr.d.Name, nr.cwd, nr.parent); err != nil {
 			return runs, err
 		}
-		runs = append(runs, run)
-		run.Depth, run.Kind = nr.depth, nr.kind
-		if err = createStage("queue"); err != nil {
+		// The first turn is queued before the run is published, so a run
+		// never appears without it.
+		s.Depth, s.Kind = nr.depth, nr.kind
+		err = createStage("queue")
+		if err == nil {
+			_, err = queue(s.Run, task, request{Extra: nr.extra, Repeat: nr.fps[i], Caller: "run:" + nr.parent})
+		}
+		if err == nil {
+			err = createStage("save")
+		}
+		if err == nil {
+			err = s.Save()
+		}
+		if err != nil {
+			s.abort()
 			return runs, err
 		}
-		if _, err = queue(run, task, request{Extra: nr.extra, Repeat: nr.fps[i], Caller: "run:" + nr.parent}); err != nil {
+		if err = s.publish(); err != nil {
 			return runs, err
 		}
-		if err = createStage("save"); err != nil {
-			return runs, err
-		}
-		if err = run.Save(); err != nil {
-			return runs, err
-		}
+		runs = append(runs, s.Run)
 	}
 	return runs, nil
 }
@@ -544,19 +551,20 @@ func removeRuns(runs []*Run) {
 func (r *Runner) PrepareSend(id, prompt string, extra Vars) (int, error) {
 	// A lost last turn is recorded as ended on its own first, so its end
 	// is kept (and counted once) even if this follow-up is refused below.
-	reaped := false
+	reaped := 0
 	if _, err := r.home.updateRun(id, func(run *Run) error {
 		if k := len(run.Turns); k > 0 && !run.Turns[k-1].finished() {
-			if reaped = r.reapLost(run); !reaped {
+			if !r.reapLost(run) {
 				return hertasdk.Fail(hertasdk.Throttled, fmt.Errorf("run %s is busy with turn %d (%s): %w", id, k, run.Turns[k-1].Outcome, errBusy))
 			}
+			reaped = k
 		}
 		return nil
 	}); err != nil {
 		return 0, err
 	}
-	if reaped {
-		r.countReaped(id)
+	if reaped > 0 {
+		r.countReaped(id, reaped)
 	}
 	var n int
 	_, err := r.home.updateRun(id, func(run *Run) error {
@@ -628,15 +636,15 @@ func (r *Runner) countTurn(id string, n int, fp, outcome string) string {
 	return r.home.noteRepeat(fp, turnID(id, n), outcome)
 }
 
-// countReaped counts a run's last turn after reapLost ended it and the
-// record was saved, and keeps any hint with it. It returns the run as
-// saved, or nil.
-func (r *Runner) countReaped(id string) *Run {
+// countReaped counts turn n after reapLost ended it and the record was
+// saved, and keeps any hint with it. It names the turn, since another may
+// have been queued after it meanwhile. It returns the run as saved, or nil.
+func (r *Runner) countReaped(id string, n int) *Run {
 	run, err := r.home.LoadRun(id)
-	if err != nil || len(run.Turns) == 0 {
+	if err != nil || n > len(run.Turns) {
 		return nil
 	}
-	rec := run.Turns[len(run.Turns)-1]
+	rec := run.Turns[n-1]
 	if !rec.finished() {
 		return run // not ended: nothing to count
 	}
@@ -1036,17 +1044,17 @@ func (r *Runner) WaitTurn(ctx context.Context, id string, n int) (rep Report, fi
 			// Only the last turn can be unfinished: a turn is queued only
 			// after the one before it finished.
 			if !run.Turns[n-1].finished() && !run.executing() {
-				reaped := false
+				reaped := 0
 				if run, err = r.home.updateRun(id, func(run *Run) error {
-					if !run.Turns[len(run.Turns)-1].finished() {
-						reaped = r.reapLost(run)
+					if k := len(run.Turns); !run.Turns[k-1].finished() && r.reapLost(run) {
+						reaped = k
 					}
 					return nil
 				}); err != nil {
 					return Report{}, false, err
 				}
-				if reaped {
-					if saved := r.countReaped(id); saved != nil {
+				if reaped > 0 {
+					if saved := r.countReaped(id, reaped); saved != nil {
 						run = saved
 					}
 				}

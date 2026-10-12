@@ -31,10 +31,9 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 	var errs []error
 	for _, e := range entries {
 		id := e.Name()
-		// A staging folder older than an hour is a creation that crashed.
 		if strings.HasPrefix(id, stagePrefix) {
-			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour && !dryRun {
-				os.RemoveAll(filepath.Join(h.Dir, "runs", id))
+			if !dryRun {
+				h.collectStage(id)
 			}
 			continue
 		}
@@ -116,6 +115,20 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	release()
 	errs = append(errs, os.RemoveAll(dir))
 	return size, errors.Join(errs...)
+}
+
+// collectStage removes a run being prepared whose creator is gone: its
+// lock is free. A live creator holds the lock from before it makes the
+// folder until it has published or removed it.
+func (h *Home) collectStage(name string) {
+	lockPath := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock")+".lock")
+	unlock, err := lockFile(lockPath)
+	if err != nil {
+		return // its creator is alive
+	}
+	os.RemoveAll(strings.TrimSuffix(lockPath, ".lock"))
+	unlock()
+	os.Remove(lockPath)
 }
 
 // dirSize adds up the sizes of a run folder's files.

@@ -56,46 +56,100 @@ type TurnRecord struct {
 // finished reports whether the turn has a final outcome.
 func (t TurnRecord) finished() bool { return t.Outcome != "queued" && t.Outcome != "running" }
 
-// NewRun creates a run directory with a fresh, time-ordered id. The
-// directory is prepared under a staging name and renamed into runs/ only
-// once its record is saved, so runs/ never holds a run without a record
-// that gc could mistake for debris.
-func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
+// runID makes a fresh, time-ordered run id; tests replace it.
+var runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) }
+
+// A run is prepared in runs/.new-<id> and renamed to runs/<id> once it is
+// complete: with its record and, from Prepare, its first turn queued. So a
+// run appears whole, and runs/ never holds one half made. While preparing
+// it, its creator holds runs/.new-<id>.lock, outside the folder (Windows
+// cannot rename a folder with a file open inside); gc removes a staging
+// folder only when that lock is free, that is when its creator is gone.
+
+// stagePrefix names a run being prepared and its lock; it is not a run id.
+const stagePrefix = ".new-"
+
+// stagedRun is a run being prepared.
+type stagedRun struct {
+	*Run
+	final string
+	lock  *os.File
+}
+
+// stageRun prepares a new run, with its record, under a staging name.
+func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error) {
 	runs := filepath.Join(h.Dir, "runs")
 	for range 8 {
-		id := time.Now().Format("060102-150405") + "-" + randHex(2)
-		final := filepath.Join(runs, id)
-		if _, err := os.Stat(final); err == nil {
-			continue
+		id := runID()
+		stage := filepath.Join(runs, stagePrefix+id)
+		lock, err := lockOpen(stage + ".lock")
+		if errors.Is(err, errBusy) {
+			continue // another creator chose this id
 		}
-		stage, err := os.MkdirTemp(runs, stagePrefix)
 		if err != nil {
 			return nil, err
 		}
-		r := &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent, Created: time.Now().UTC(), dir: stage}
-		if err := createStage("record"); err != nil {
-			os.RemoveAll(stage)
-			return nil, err
+		// Checked under the lock: a creator publishes before it releases
+		// the lock, so a run with this id is visible by now.
+		final := filepath.Join(runs, id)
+		if _, err := os.Stat(final); err == nil {
+			lock.Close()
+			continue
 		}
-		if err := r.Save(); err != nil {
-			os.RemoveAll(stage)
-			return nil, err
-		}
-		if err := os.Rename(stage, final); err != nil {
-			os.RemoveAll(stage)
-			if _, serr := os.Stat(final); serr == nil {
-				continue // the id was taken meanwhile
+		if err := os.Mkdir(stage, 0o700); err != nil {
+			lock.Close()
+			if errors.Is(err, fs.ErrExist) {
+				continue // a crashed creation's leftover; gc removes it
 			}
 			return nil, err
 		}
-		r.dir = final
-		return r, nil
+		s := &stagedRun{Run: &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
+			Created: time.Now().UTC(), dir: stage}, final: final, lock: lock}
+		if err := createStage("record"); err != nil {
+			s.abort()
+			return nil, err
+		}
+		if err := s.Save(); err != nil {
+			s.abort()
+			return nil, err
+		}
+		return s, nil
 	}
 	return nil, errors.New("could not allocate a run id")
 }
 
-// stagePrefix names a run directory being prepared; it is not a run id.
-const stagePrefix = ".new-"
+// publish renames the prepared run into runs/. It cannot replace a run:
+// a published run is never empty, and a rename replaces only an empty
+// folder on Unix and none on Windows. On failure the run is removed.
+func (s *stagedRun) publish() error {
+	if err := os.Rename(s.dir, s.final); err != nil {
+		s.abort()
+		return err
+	}
+	s.dir = s.final
+	s.release()
+	return nil
+}
+
+// abort removes the prepared run.
+func (s *stagedRun) abort() {
+	os.RemoveAll(s.dir)
+	s.release()
+}
+
+func (s *stagedRun) release() {
+	s.lock.Close()
+	os.Remove(s.lock.Name())
+}
+
+// NewRun creates a run with no turn yet.
+func (h *Home) NewRun(profile, harness, cwd, parent string) (*Run, error) {
+	s, err := h.stageRun(profile, harness, cwd, parent)
+	if err != nil {
+		return nil, err
+	}
+	return s.Run, s.publish()
+}
 
 // idSlack bounds how far a run id's time can be from when the run was
 // created: ids are local wall-clock time without a zone, and the zone can

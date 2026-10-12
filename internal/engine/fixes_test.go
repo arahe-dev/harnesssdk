@@ -396,13 +396,81 @@ func TestGCSparesRunsTakingShape(t *testing.T) {
 	if _, err := f.home.LoadRun(runs[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	// A staging folder left by a crash is removed after an hour.
-	stale := filepath.Join(f.home.Dir, "runs", stagePrefix+"crashed")
-	os.Mkdir(stale, 0o700)
-	old := time.Now().Add(-2 * time.Hour)
-	os.Chtimes(stale, old, old)
+	// A staging folder is removed only once its creator is gone, however
+	// old it is.
+	runsDir := filepath.Join(f.home.Dir, "runs")
+	live, crashed := filepath.Join(runsDir, stagePrefix+"live"), filepath.Join(runsDir, stagePrefix+"crashed")
+	os.Mkdir(live, 0o700)
+	os.Mkdir(crashed, 0o700)
+	old := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(live, old, old)
+	lk, err := lockOpen(live + ".lock") // a creator paused for two days
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.home.GC(time.Now().AddDate(0, 0, -30), false)
-	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("stale staging folder kept")
+	if _, err := os.Stat(live); err != nil {
+		t.Fatal("a live creation was removed")
+	}
+	if _, err := os.Stat(crashed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a crashed creation was kept")
+	}
+	lk.Close() // the creator dies
+	f.home.GC(time.Now().AddDate(0, 0, -30), false)
+	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an abandoned creation was kept")
+	}
+	if _, err := os.Stat(live + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("its lock file was kept")
+	}
+}
+
+// Round four of the review.
+
+// The turn that was reaped is counted, even when another turn has been
+// queued after it in the meantime.
+func TestReapedTurnCountedByNumber(t *testing.T) {
+	f := newFixture(t, nil)
+	f.profile("ok", "harness: fake\neffect: pure\nmode: echo")
+	rep := f.start(context.Background(), "ok", "x")[0] // a session to send to
+	n, err := f.r.PrepareSend(rep.Run.ID, "y", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.home.updateRun(rep.Run.ID, func(run *Run) error {
+		run.Turns[n-1].Outcome = "running" // its worker died
+		f.r.reapLost(run)
+		return nil
+	})
+	// Another caller queues the next turn before the reaped one is counted.
+	if _, err := f.r.PrepareSend(rep.Run.ID, "z", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.r.countReaped(rep.Run.ID, n)
+	p, d, _ := f.r.load("ok", f.cwd)
+	if got := len(f.home.failures(requestFingerprint("send", rep.Run.ID, p, d, f.cwd, "y", nil))); got != 1 {
+		t.Fatalf("reaped turn counted %d times", got)
+	}
+}
+
+// Ids that collide with a published run or a creation in progress are
+// skipped, never replaced.
+func TestRunIDCollisions(t *testing.T) {
+	h := newGateHome(t)
+	defer func() { runID = func() string { return time.Now().Format("060102-150405") + "-" + randHex(2) } }()
+	ids := []string{"261012-000000-aaaa", "261012-000000-aaaa", "261012-000000-bbbb", "261012-000000-cccc"}
+	runID = func() string { id := ids[0]; ids = ids[1:]; return id }
+	first, err := h.NewRun("p", "h", ".", "")
+	if err != nil || first.ID != "261012-000000-aaaa" {
+		t.Fatal(first, err)
+	}
+	lk, _ := lockOpen(filepath.Join(h.Dir, "runs", stagePrefix+"261012-000000-bbbb.lock")) // being created
+	defer lk.Close()
+	second, err := h.NewRun("q", "h", ".", "")
+	if err != nil || second.ID != "261012-000000-cccc" {
+		t.Fatalf("got %v %v, want the third id", second, err)
+	}
+	if r, err := h.LoadRun("261012-000000-aaaa"); err != nil || r.Profile != "p" {
+		t.Fatal("the first run was replaced")
 	}
 }
