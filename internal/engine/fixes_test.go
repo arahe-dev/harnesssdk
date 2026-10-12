@@ -578,3 +578,19 @@ func TestLateFailureDoesNotUndoSuccess(t *testing.T) {
 		t.Fatalf("the next identical send was refused: %v", err)
 	}
 }
+
+// Round seven: a failure counted after the window has passed is not
+// counted, and warns no one.
+func TestExpiredLateFailureIsIgnored(t *testing.T) {
+	h := newGateHome(t)
+	h.SetConfig("repeat_warn", 1)
+	if hint := h.noteRepeat("fp", "r/1", "permanent", now().Add(-2*time.Hour)); hint != "" {
+		t.Fatalf("hint for an expired failure: %q", hint)
+	}
+	if n := len(h.failures("fp")); n != 0 {
+		t.Fatalf("expired failure counted: %d", n)
+	}
+	if hint := h.noteRepeat("fp", "r/2", "permanent", now()); hint == "" {
+		t.Fatal("no hint for a current failure")
+	}
+}

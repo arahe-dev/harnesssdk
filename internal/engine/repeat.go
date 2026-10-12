@@ -156,6 +156,8 @@ func (h *Home) noteRepeat(fp, turn, outcome string, ended time.Time) string {
 		rec.Failures = slices.DeleteFunc(rec.Failures, func(f repeatFailure) bool { return !f.At.After(rec.Cleared) })
 	case !ended.After(rec.Cleared):
 		return "" // it ended before the request last succeeded
+	case ended.Before(now().Add(-repeatWindow)):
+		return "" // it ended before the window: it no longer counts
 	case !slices.ContainsFunc(rec.Failures, func(f repeatFailure) bool { return f.Turn == turn }):
 		rec.Failures = append(rec.Failures, repeatFailure{At: ended.UTC(), Turn: turn})
 		slices.SortFunc(rec.Failures, func(a, b repeatFailure) int { return a.At.Compare(b.At) })
