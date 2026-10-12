@@ -182,3 +182,27 @@ func TestDefinitionCheck(t *testing.T) {
 		t.Fatalf("missing CLI: %v", err)
 	}
 }
+
+// A CLI that writes its usage to a report file feeds metrics and the
+// session id from there.
+func TestReportFile(t *testing.T) {
+	f := newFixture(t, nil)
+	f.def("fakerep", Definition{
+		Args: [][]string{{"{mode}"}, {"--usage-file", "{report_file}"}},
+		Output: OutputRule{Format: "text", Report: &ReportRule{SessionField: "session_id", Metrics: map[string]*Selector{
+			"input_tokens": {Field: "input_tokens+cache_read_tokens"},
+			"cost_usd":     {Field: "estimated_cost_usd"},
+		}}},
+	})
+	f.profile("r", "harness: fakerep\neffect: pure\nmode: report")
+	rep := f.start(context.Background(), "r", "x")[0]
+	if rep.Err != nil || rep.Output != "reported" || rep.Metrics["input_tokens"] != 120 || rep.Metrics["cost_usd"] != 0.25 {
+		t.Fatalf("%+v", rep)
+	}
+	if run, _ := f.home.LoadRun(rep.Run.ID); run.Session != "rep-7" {
+		t.Fatalf("session %q", run.Session)
+	}
+	if _, err := ParseDefinition("x", []byte(`{"command":"x","output":{"format":"text","report":{}}}`)); err == nil {
+		t.Fatal("an empty report rule was accepted")
+	}
+}

@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.0.0-next (2026-10-12)
+
+The v2 candidate: verified outcomes, isolated working copies, spending and
+waiting limits, and retries Herta 1.0-next cannot express yet. The module
+path is now `github.com/arahe-dev/harnesssdk/v2`; v1.7.0 stays the stable v1.
+
+- **Retries with backoff.** Herta 1.0-next keeps v0.2.0's limits: no backoff,
+  and `throttled` cannot be retried. Harness now owns the retry loop (Herta
+  runs one attempt per call and still validates effects and turns a timeout
+  into `uncertain`): a profile's `backoff` (default 2s) doubles per retry up
+  to 5 minutes with jitter, and waits at least what the CLI asked for (a
+  definition's `retry_after` regex). `throttled` may be listed in `retry`,
+  except for non-idempotent profiles. **Between attempts a turn holds no
+  budget, key or slot.**
+- **Verified outcomes.** A profile's `check` (or `--check`) is a command line
+  run as written in the agent's folder once it answers; the turn succeeds
+  only if it exits 0. A failed check is permanent and keeps the answer and
+  session. `stats` counts checks passed.
+- **Worktrees.** `--worktree` (or a profile's `worktree: true`) runs the
+  agent in a git worktree on branch `harness/<run>`; each turn's work is
+  committed there and summarized. `compare --worktree` compares agents that
+  edit files. `gc` removes the worktree and keeps the branch.
+- **Limits.** Config `max_wait_minutes` and profile `max_wait` bound a wait at
+  the gate; `max_queue` refuses a turn that would queue behind that many;
+  config and profile `spend_limit_usd` cap the reported cost over 24 hours.
+- **`harness def check <name> [--profile p]`** finds the CLI and its version,
+  and with a profile runs a live turn and checks its answer and metrics.
+- **Usage reports.** `output.report` reads metrics and the session id from a
+  JSON file the CLI writes to `{report_file}`.
+- **New definitions.** Hermes Agent 0.20.5, verified live (answer, resume,
+  metrics). Factory Droid and Kimi Code as unverified starting points (the
+  CLIs were not signed in).
+- **Go API (v2).** `Request.Check` and `Worktree`; `Send` and `SendStart` take
+  a `FollowUp`; `Result` and `Turn` gain check, branch and changes fields;
+  `Config` gains the new limits; `Stats` counts checks; `CheckDefinition`.
+  The engine's `TurnOptions` replaces its growing argument lists.
+- **docs/DESIGN.md** explains every lock and protocol in one place.
+
+Not done: the Codex `workspace-write` sandbox (with the data folder writable
+and network on) could not be verified, because Codex's Windows sandbox fails
+to start any command on the machine used; the guide describes it as
+unverified, and the full-access Codex example stays.
+
 ## v1.7.0 (2026-10-12)
 
 Fixes for the findings of a Pi review agent (`review`, GPT-6.1 Sol): 13 in

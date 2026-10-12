@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -78,6 +79,16 @@ type OutputRule struct {
 	// over the one document for json. Pick "sum" adds up every match and
 	// "count" counts matches; a field may add several paths with "+".
 	Metrics map[string]*Selector `json:"metrics,omitempty"`
+	// Report reads the session id and metrics from a JSON document the CLI
+	// writes to {report_file}, for a CLI that reports usage apart from its
+	// answer.
+	Report *ReportRule `json:"report,omitempty"`
+}
+
+// ReportRule says what to read from the report file.
+type ReportRule struct {
+	SessionField string               `json:"session_field,omitempty"`
+	Metrics      map[string]*Selector `json:"metrics,omitempty"`
 }
 
 // Selector picks a field from the events of a JSONL stream that match
@@ -192,6 +203,16 @@ func (d *Definition) validate() error {
 	for name, sel := range o.Metrics {
 		if err := sel.validateMetric(name); err != nil {
 			return fmt.Errorf("output.metrics.%s: %w", name, err)
+		}
+	}
+	if o.Report != nil {
+		for name, sel := range o.Report.Metrics {
+			if err := sel.validateMetric(name); err != nil {
+				return fmt.Errorf("output.report.metrics.%s: %w", name, err)
+			}
+		}
+		if o.Report.SessionField == "" && len(o.Report.Metrics) == 0 {
+			return errors.New("output.report needs session_field or metrics")
 		}
 	}
 	for i := range d.Failures {
@@ -684,5 +705,38 @@ func jsonTruthy(v any) bool {
 		return x != 0
 	default:
 		return true
+	}
+}
+
+// readReport adds what the report file says to x: the session id, unless
+// stdout gave one, and its metrics. A missing or unreadable report (the CLI
+// failed before writing it) adds nothing.
+func (d *Definition) readReport(path string, x *extraction) {
+	rule := d.Output.Report
+	if rule == nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var doc any
+	if json.Unmarshal(bytes.TrimSpace(data), &doc) != nil {
+		return
+	}
+	if rule.SessionField != "" && x.Session == "" {
+		if s, ok := lookup(doc, rule.SessionField); ok {
+			x.Session = scalar(s)
+		}
+	}
+	metrics := newMetrics(rule.Metrics)
+	for _, c := range metrics {
+		c.add(doc)
+	}
+	for k, v := range metricValues(metrics) {
+		if x.Metrics == nil {
+			x.Metrics = map[string]float64{}
+		}
+		x.Metrics[k] = v
 	}
 }

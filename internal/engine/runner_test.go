@@ -90,6 +90,13 @@ func fakeHarness(args []string) int {
 		fmt.Println("wrote " + opts["file"])
 	case "version":
 		fmt.Println("fake 1.2.3")
+	case "report": // the answer on stdout, usage in the file after --usage-file
+		for i, f := range flags {
+			if f == "--usage-file" && i+1 < len(flags) {
+				os.WriteFile(flags[i+1], []byte(`{"session_id":"rep-7","input_tokens":100,"cache_read_tokens":20,"estimated_cost_usd":0.25}`), 0o600)
+			}
+		}
+		fmt.Println("reported")
 	case "ratelimited":
 		if _, err := os.Stat(opts["state"]); err != nil {
 			os.WriteFile(opts["state"], nil, 0o644)

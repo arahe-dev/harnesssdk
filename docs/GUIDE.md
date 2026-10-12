@@ -53,6 +53,8 @@ Read this guide, then use the commands below.
 | `session` | `"mint"`: harness picks a UUID per session and passes it through `{session}` / `{new_session}` / `{resume_session}`. Omit it if the CLI cannot take a caller-chosen id, and capture the id from the output instead. |
 | `output` | Where the answer is; see below. |
 | `failures` | Regex rules over a failed attempt's own stderr and stdout, first match wins. Outcomes: `transient` (the run did not take effect: safe to repeat), `throttled`, `uncertain` (it may have done work), `permanent`. Unmatched failures are permanent. |
+| `retry_after` | A regex over the same text whose one group is the wait the provider asked for: seconds (`30`, `1.5`) or a duration (`1m30s`). A retry waits at least that long (up to an hour). Example: `"(?i)retry.after:?\\s*([0-9.]+(?:[hms][0-9hms.]*)?)"` |
+| `version` | The arguments that print the CLI's version, for `harness def check` (default `["--version"]`). |
 
 Unknown fields are rejected, so typos fail at `def set`.
 
@@ -101,8 +103,19 @@ with `+`. Every attempt's metrics count, a failed one's too.
 Use these names, so profiles on different harnesses compare:
 `input_tokens` (every prompt token, cached ones included), `cached_tokens`,
 `output_tokens`, `cost_usd` (only as the CLI reports it; harness keeps no
-prices), `turns` (model calls) and `tool_calls`. Text output has no metrics:
-prefer a CLI's JSON mode (the examples below all use one).
+prices), `turns` (model calls) and `tool_calls`. Text output has no metrics
+of its own: prefer a CLI's JSON mode, or its usage report.
+
+**Usage reports.** Some CLIs print only the answer and write their usage to
+a file. Pass `{report_file}` to that option, and read it with `output.report`:
+the session id (`session_field`) and `metrics` come from that one JSON
+document (see the Hermes example).
+
+```json
+"args": [["--usage-file", "{report_file}"], ["-z", "{prompt}"]],
+"output": {"format": "text", "report": {"session_field": "session_id",
+  "metrics": {"input_tokens": {"field": "input_tokens+cache_read_tokens"}, "cost_usd": {"field": "estimated_cost_usd"}}}}
+```
 
 ### Placeholders
 
@@ -117,8 +130,11 @@ Values come from the profile header, from `--set key=value`, and from these
 built-ins: `{prompt}`, `{prompt_file}`, `{system_file}` (the profile body,
 when present), `{session}`, `{new_session}` (first turn only),
 `{resume_session}` (follow-ups only), `{cwd}`, `{run_id}`, `{run_dir}`,
-`{harness_home}` (the data folder) and `{lineage}` (the gate tickets of this
-turn and its ancestors). The last three exist so a definition can hand
+`{harness_home}` (the data folder), `{lineage}` (the gate tickets of this
+turn and its ancestors) and `{report_file}` (where the CLI may write its
+usage report). `{cwd}` is the agent's folder: inside its worktree, for a run
+started with `--worktree`. `{run_id}`, `{harness_home}` and `{lineage}`
+exist so a definition can hand
 harness's environment (`HARNESS_RUN`, `HARNESS_HOME`, `HARNESS_LINEAGE`) to a
 CLI that strips it; see the Codex example.
 
@@ -156,11 +172,17 @@ execution policy (HertaSDK); every other key is a placeholder value.
 |---|---|---|
 | `harness` | definition name | required |
 | `effect` | `pure`, `idempotent`, `non-idempotent` | required: what repeating a run does. Use `idempotent` only if the agent cannot change anything (read-only tools); anything that can edit files or run commands is `non-idempotent`. |
-| `retry` | `transient x2`, `transient,uncertain x3`, `none` | which outcomes are retried, total attempts. `uncertain` is refused for `non-idempotent` profiles: a run that may have edited files is never replayed blind. |
+| `retry` | `transient x2`, `transient,throttled,uncertain x4`, `none` | which outcomes are retried, total attempts. `uncertain` and `throttled` are refused for `non-idempotent` profiles: a run that may have edited files (a rate limit can stop an agent half way) is never replayed blind; continue its session with `send` instead. |
+| `backoff` | `5s` (default `2s`) | the wait before the first retry; it doubles for each retry after, up to 5 minutes, with jitter, and is at least what the CLI asked for (`retry_after`). A turn holds no budget, key or slot while it waits. |
 | `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain` |
 | `budget` | `pi=1, gpu=4` | units claimed from named budgets while the turn runs |
 | `admission` | `wait` (default), `reject` | when a budget or key is taken: queue, or fail at once as `throttled` |
+| `max_wait` | `10m` | the longest a turn waits for its budgets, keys and slot before failing as `throttled` (default: config `max_wait_minutes`) |
 | `serialize` | template, e.g. `{cwd}` | turns with the same key run one at a time |
+| `check` | a command line, e.g. `go test ./...` | run as written, through the platform shell (`sh -c`; `cmd.exe /c` on Windows), in the agent's folder once it answers: the turn succeeds only if it exits 0. A failed check is `permanent`; the answer and session are kept, so `send` can ask the same agent to fix it. `--check` on a turn replaces it. |
+| `check_timeout` | `10m` (default) | how long the check may run |
+| `worktree` | `true` | every new run works in a git worktree of its own (see Running) |
+| `spend_limit_usd` | `2.50` | refuse the profile's turns once they have cost that much in the last 24 hours, as the CLI reports it |
 | `description` | text | shown in `profile list` |
 
 Update single keys without rewriting: `harness profile set <name> thinking=xhigh`
@@ -193,11 +215,16 @@ The study used open models in its own harness, not these CLIs, so treat
 these as hypotheses for your setup and check them with your own runs:
 
 1. Give runs a label: `--kind review`, `--kind refactor`.
-2. Try candidates on the same task: `harness compare a,b,c "task"` prints
-   each answer, then outcome, time, tokens and cost side by side.
-3. Look at the record: `harness stats` (or `--kind review`) lists, per
-   profile and model, success rate, failures by outcome, median and p90
-   time, attempts, tokens and cost per turn, and cost per success.
+2. Make success mean the work is right: give the task a check
+   (`--check "go test ./..."`). Without one, success only means the agent
+   finished.
+3. Try candidates on the same task: `harness compare a,b,c --worktree --check "..." "task"`
+   gives each agent its own copy of the repository, and prints each answer,
+   then outcome, check, time, tokens, cost and changes side by side.
+4. Look at the record: `harness stats` (or `--kind review`) lists, per
+   profile and model, success rate, checks passed, failures by outcome,
+   median and p90 time, attempts, tokens and cost per turn, and cost per
+   success.
 
 Prefer the profile with the best success and cost for that kind of task,
 and say why when you report it.
@@ -247,6 +274,17 @@ and how it was found.
   clears the failures; throttled and cancelled turns do not count; a
   background turn whose worker died does. Do not loop on a failing request:
   read the error, change the prompt, the profile or the plan.
+- `max_wait_minutes` (default 0, no limit): how long a turn waits for its
+  budgets, keys and slot before failing as `throttled`, unless its profile
+  sets `max_wait`.
+- `max_queue` (default 0, no limit): how many turns may wait for one budget,
+  key or slot; a turn that would wait behind that many fails at once as
+  `throttled`. A turn already queued keeps its place.
+- `spend_limit_usd` (default 0, no limit): whole dollars all turns may cost
+  in the last 24 hours, as the CLIs report it (`cost_usd`); then new turns
+  fail as `throttled` until the window moves on. A profile's
+  `spend_limit_usd` caps that profile alone. Turns already running finish,
+  and a CLI that reports no cost (Codex) is not limited.
 
 ## Per-project profiles
 
@@ -265,11 +303,12 @@ file).
 ## Running
 
 ```
-harness run <profile> [prompt words | -] [--task T]... [--file F]... [--cwd D] [--set k=v]... [--kind K] [--json] [--dry-run]
+harness run <profile> [prompt words | -] [--task T]... [--file F]... [--cwd D] [--set k=v]... [--kind K] [--check C] [--worktree] [--json] [--dry-run]
 harness start <profile> ...           same flags; returns run ids at once
-harness compare <p1>,<p2>[,...] [prompt words | -] [--file F]... [--cwd D] [--set k=v]... [--kind K] [--json]
+harness compare <p1>,<p2>[,...] [prompt words | -] [--file F]... [--cwd D] [--set k=v]... [--kind K] [--check C] [--worktree] [--json]
 harness stats [--profile P] [--kind K] [--days N] [--json]
-harness send <run-id> [prompt words | -] [--file F]... [--set k=v]... [--json] [--dry-run] [--detach]
+harness send <run-id> [prompt words | -] [--file F]... [--set k=v]... [--check C] [--json] [--dry-run] [--detach]
+harness def check <name> [--profile P]
 harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json]
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
 ```
@@ -283,14 +322,30 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   project whose profiles apply.
 - `--kind` labels runs (lower-case, such as `review`) so `harness stats` can
   compare profiles per kind of task.
+- `--check "go test ./..."` gives the turn a check (see the profile's
+  `check`): it succeeds only if the check passes in the agent's folder.
+- `--worktree` runs each new run in a git worktree of its own, in
+  `<home>/worktrees/<run-id>`, on branch `harness/<run-id>` made from the
+  commit `--cwd` is on. The agent works there, in the same subfolder; the
+  profiles of `--cwd`'s project apply. After each turn harness commits what
+  the agent left uncommitted, so the branch holds the work, and reports its
+  changes ("2 files changed, 10 insertions(+)"). Merge or cherry-pick the
+  branch to keep the work. `gc` removes the worktree with the run but keeps
+  the branch; delete it with `git branch -D harness/<run-id>`.
 - `compare` runs the same task on each profile at once, prints each answer,
-  then a table of outcome, time, attempts, tokens and cost. Every agent in a
-  compare works in the same folder at the same time, so compare read-only
-  profiles. To compare agents that edit files, give each its own checkout
-  and use `harness run --kind <label> --cwd <checkout>` per profile instead;
-  `harness stats --kind <label>` then compares them.
-- `--json` prints `{run, turn, profile, harness, model, kind, outcome, exit_code, attempts, session, duration_ms, metrics, output, error, hint}`
+  then a table of outcome, check, time, attempts, tokens, cost and changes.
+  Without `--worktree` every agent works in the same folder at the same
+  time, so compare read-only profiles that way. With `--worktree` each agent
+  gets its own copy: `harness compare a,b --worktree --check "go test ./..." "fix the failing test"`
+  shows which agent's fix passes, and at what cost.
+- `def check <name>` finds the CLI and prints its version; with `--profile`
+  it also runs one short live turn and checks that the answer and metrics
+  come out. Run it after a CLI updates.
+- `--json` prints `{run, turn, profile, harness, model, kind, outcome, exit_code, attempts, session, duration_ms, metrics, output, error, hint, check, checked, branch, changes}`
   (an array for several tasks, and for `compare`).
+- Retries: a failed attempt whose outcome is in the profile's `retry` list
+  is repeated after a backoff, and between attempts the turn holds no
+  budget, key or slot; the stderr log records each wait.
 - A `hint` (also printed as `harness: hint: ...`) is advice to act on, such
   as the repeat guard's.
 - Every run is kept in `<home>/runs/<run-id>/` for `retention_days` after
@@ -388,9 +443,13 @@ prompt:
  "failures": [{"match": "(?i)rate.?limit|\\b429\\b|usage limit", "outcome": "throttled"}]}
 ```
 
-Codex reports tokens but no cost. A Codex agent that runs harness needs
-`sandbox: danger-full-access` (harness writes to its data folder, and the
-agents it starts need the network).
+Codex reports tokens but no cost. A Codex agent that runs harness needs to
+write to harness's data folder, and the agents it starts need the network.
+The narrow way is Codex's `workspace-write` sandbox with both allowed:
+`extra_args: -c sandbox_workspace_write.network_access=true -c sandbox_workspace_write.writable_roots=["<data folder>"]`
+(not verified: on the Windows machine these examples were checked on,
+Codex's own sandbox could not start any command). Otherwise it needs
+`sandbox: danger-full-access`.
 
 **OpenCode** (1.18.35), JSONL events, session captured from the stream; no
 system-prompt option, so the profile body goes at the top of the prompt:
@@ -410,6 +469,34 @@ system-prompt option, so the profile body goes at the top of the prompt:
      "cost_usd": {"where": {"type": "step_finish"}, "field": "part.cost", "pick": "sum"},
      "turns": {"where": {"type": "step_finish"}, "pick": "count"}}}}
 ```
+
+**Hermes Agent** (0.20.5), one-shot mode: the answer on stdout, usage and
+the session id in a report file. Hermes has no system-prompt option and
+takes the prompt as an argument, so on Windows keep prompts under about
+30,000 characters; `hermes.exe` is a real program, which parses arguments
+safely.
+
+```json
+{"command": "hermes",
+ "args": [["--usage-file", "{report_file}"], ["-m", "{model}"], ["--provider", "{provider}"], ["--reasoning", "{reasoning}"],
+          ["-t", "{toolsets}"], ["--resume", "{resume_session}"], ["{yolo?--yolo}"], ["-z", "{prompt}"]],
+ "stdin": "none",
+ "output": {"format": "text", "report": {"session_field": "session_id", "metrics": {
+   "input_tokens": {"field": "input_tokens+cache_read_tokens+cache_write_tokens"},
+   "cached_tokens": {"field": "cache_read_tokens"},
+   "output_tokens": {"field": "output_tokens"},
+   "cost_usd": {"field": "estimated_cost_usd"},
+   "turns": {"field": "api_calls"}}}},
+ "failures": [{"match": "(?i)rate.?limit|\\b429\\b|too many requests|quota", "outcome": "throttled"}],
+ "retry_after": "(?i)retry.after:?\\s*([0-9.]+(?:[hms][0-9hms.]*)?)"}
+```
+
+Not verified (the CLIs were installed but not signed in), as starting
+points to check with `harness def check <name> --profile <p>` once they are:
+**Factory Droid** `droid exec -o json -f {prompt_file}`, whose JSON result
+has `result`, `is_error`, `session_id` and a Claude-style `usage`; and
+**Kimi Code** `kimi -p {prompt}`, whose answer is all of stdout (it also has
+`--output-format stream-json`).
 
 ## Other commands
 

@@ -95,7 +95,7 @@ func TestThrottledRetryHonorsRetryAfter(t *testing.T) {
 func TestBackoffReleasesBudgets(t *testing.T) {
 	f := newFixture(t, map[string]int64{"b": 1})
 	state := filepath.Join(t.TempDir(), "state")
-	f.profile("flaky", "harness: fake\neffect: idempotent\nbudget: b=1\nretry: transient x2\nbackoff: 3s\nmode: flaky\nopts: state="+state)
+	f.profile("flaky", "harness: fake\neffect: idempotent\nbudget: b=1\nretry: transient x2\nbackoff: 6s\nmode: flaky\nopts: state="+state)
 	f.saveProfile("quick", "harness: fake\neffect: pure\nbudget: b=1\nmode: echo")
 	done := make(chan Report)
 	go func() { done <- f.start(context.Background(), "flaky", "x")[0] }()
@@ -115,7 +115,7 @@ func TestBackoffReleasesBudgets(t *testing.T) {
 	if rep := f.start(context.Background(), "quick", "y")[0]; rep.Err != nil {
 		t.Fatal(rep.Err)
 	}
-	if d := time.Since(start); d > 1200*time.Millisecond {
+	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Fatalf("the other turn waited %s: the backing-off turn held the budget", d)
 	}
 	select {

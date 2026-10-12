@@ -340,6 +340,7 @@ func (t *Turn) vars() Vars {
 	}
 	v["cwd"], v["run_id"], v["run_dir"] = t.Run.AgentDir(), t.Run.ID, t.Run.dir
 	v["harness_home"] = t.home
+	v["report_file"] = t.Run.Path(fmt.Sprintf("turn-%d.report.json", t.N))
 	v["lineage"] = strings.Join(t.lineage, ",")
 	return v
 }
@@ -373,6 +374,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	}
 	env = append(env, EnvHome+"="+r.home.Dir, EnvRun+"="+t.Run.ID, EnvLineage+"="+strings.Join(t.lineage, ","))
 	t.argv = argv
+	os.Remove(v["report_file"]) // only this attempt's report counts
 
 	stdoutPath := t.Run.Path(fmt.Sprintf("turn-%d.stdout.log", t.N))
 	stderrPath := t.Run.Path(fmt.Sprintf("turn-%d.stderr.log", t.N))
@@ -434,6 +436,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	// Every attempt's metrics count, a failed or stopped one's too: its
 	// tokens were spent.
 	x, xerr := extractFile(t.Def, stdoutPath)
+	t.Def.readReport(v["report_file"], &x)
 	for k, n := range x.Metrics {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
