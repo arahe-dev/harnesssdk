@@ -286,7 +286,11 @@ and how it was found.
   in the last 24 hours, as the CLIs report it (`cost_usd`); then new turns
   fail as `throttled` until the window moves on. A profile's
   `spend_limit_usd` caps that profile alone. Turns already running finish,
-  and a CLI that reports no cost (Codex) is not limited.
+  and a CLI that reports no cost (Codex) is not limited. What each attempt
+  cost is kept in `<home>/spend`. If harness could not write it there (its
+  process died mid-turn, or the folder could not be written), the cost is
+  unknown, and turns under a limit are refused, naming the entry, until it
+  is 24 hours old or you remove it.
 
 ## Per-project profiles
 

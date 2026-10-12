@@ -36,9 +36,10 @@ type Turn struct {
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
 	retryAfter  time.Duration      // what the last failed attempt's CLI asked to wait
-	spendSaved  float64            // the cost_usd recorded in Spend so far
+	spendSaved  float64            // the cost_usd written to the spending ledger so far
+	entry       *spendEntry        // the attempt's ledger entry, while its cost is not in it
+	opened      int                // ledger entries made for the turn
 	held        *Ticket            // admission kept until finish records the cost
-	apart       float64            // the cost recorded apart (see recordApart)
 	changes     string             // the worktree branch's changes after the turn
 	check       string             // the check command run, if any
 	checked     string             // passed or failed
@@ -842,7 +843,9 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(fmt.Errorf("run %s: another process is executing it: %w", id, err))
 	}
 	defer execLock.Close()
-	if r.home.creating(run.Dir()) {
+	if creating, err := r.home.creating(run.Dir()); err != nil {
+		return fail(fmt.Errorf("run %s: cannot tell whether its creation finished: %w", id, err))
+	} else if creating {
 		return fail(fmt.Errorf("run %s is being created, or its creation failed", id))
 	}
 	start := time.Now()
@@ -874,7 +877,14 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		testHookTurnEnd()
 	}
 	if t != nil && t.held != nil {
-		defer t.held.Release() // once finish has recorded what the turn cost
+		// Let go of once what the turn cost is in the ledger, or the turn
+		// is stopped first: its execution lock goes before its admission,
+		// so that the next turn admitted finds the turn over, and its cost
+		// unknown.
+		defer func() {
+			execLock.Close()
+			t.held.Release()
+		}()
 	}
 	// The end of the turn (the worktree commit, and saving a record that
 	// failed) stops with the caller, a shutdown, or a stop request that
@@ -903,28 +913,24 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 			rep.Hint = r.countTurn(id, n, t.repeat, OutcomeName(err), now())
 		}
 	}
-	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
-	// A turn whose cost is on record nowhere (not in its run record, not
-	// apart) stays admitted, and tries both again, until the cost is on
-	// record or the turn is stopped: no turn is admitted against a total
-	// that leaves it out meanwhile.
-	for wait := time.Second; t != nil && t.held != nil && errors.Is(ferr, errUnsaved) && fctx.Err() == nil; wait = min(2*wait, 30*time.Second) {
-		aerr := r.home.recordApart(t)
-		if aerr == nil {
-			break
-		}
-		t.logf("== harness warning: %v, and recording its cost apart failed (%v); its cost is on record nowhere, so it stays admitted and tries again in %s", ferr, aerr, wait)
+	// A turn whose cost could not be written to the spending ledger stays
+	// admitted, writing it again, until it is written or the turn is
+	// stopped: no turn is admitted against a total that leaves it out.
+	for wait := time.Second; t != nil && t.held != nil && t.entry != nil && fctx.Err() == nil; wait = min(2*wait, 30*time.Second) {
+		t.logf("== harness warning: what the turn cost is not in the spending ledger; it stays admitted and tries again in %s", wait)
 		select {
 		case <-fctx.Done():
 		case <-time.After(wait):
-			run, ferr = r.finish(id, n, t, res, err, rep.Hint)
+			if cerr := r.home.closeSpend(t); cerr != nil {
+				t.logf("== harness warning: writing the spending ledger: %v", cerr)
+			}
 		}
 	}
-	if t != nil && t.held != nil && errors.Is(ferr, errUnsaved) {
-		if d := finiteMetrics(t.metrics)["cost_usd"] - t.spendSaved; d != 0 {
-			ferr = fmt.Errorf("%w; the $%.4f it cost is on record nowhere, so spending limits do not count it", ferr, d)
-		}
+	if t != nil && t.held != nil && t.entry != nil && err == nil {
+		err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf(
+			"what the turn cost could not be written to the spending ledger, so it is unknown: turns under a spending limit are refused until it is 24 hours old, or until you remove %s", r.home.spendPath(t.entry)))
 	}
+	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
 	if run != nil {
 		rep.Run = run
 	}
@@ -1027,7 +1033,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// backs off, a turn holds no budget, key or slot.
 	for {
 		var ticket *Ticket
-		var unrecorded error
+		unrecorded := false
 		if ticket, err = r.admit(ctx, t, claims, maxWait); err != nil {
 			return nil, t, err
 		}
@@ -1035,6 +1041,19 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			err = r.home.checkSpend(p)
 		}
 		executed := err == nil // a refusal of harness's own is final, never retried
+		if executed {
+			// The attempt's ledger entry is made before it runs: a turn
+			// under a spending limit whose spending cannot be recorded
+			// does not run.
+			if oerr := r.home.openSpend(t); oerr != nil {
+				if limited(cfg, p) {
+					err = hertasdk.Fail(hertasdk.Permanent, fmt.Errorf("the spending ledger cannot be written, so a turn under a spending limit does not run: %w", oerr))
+					executed = false
+				} else {
+					t.logf("== harness warning: writing the spending ledger: %v", oerr)
+				}
+			}
+		}
 		if executed {
 			// On Unix the agent inherits these locks: while any process of
 			// its tree runs, the turn counts as executing and its budget
@@ -1047,21 +1066,21 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			if err == nil && check != "" {
 				err = r.runCheck(ctx, t, check, p.CheckTimeout)
 			}
-			// Saved before the budget is released, so the spending limit
-			// counts this attempt for the next turn admitted, and for this
-			// one's own retries. A turn whose spending cannot be recorded
-			// is not retried.
-			if unrecorded = r.saveMetrics(run.ID, n, t); unrecorded != nil {
-				t.logf("== harness warning: recording the attempt's metrics: %v", unrecorded)
-				// Recorded apart, the cost counts all the same. A turn
-				// whose cost is on record nowhere is not retried, and
-				// stays admitted (below).
-				if aerr := r.home.recordApart(t); aerr != nil {
-					t.logf("== harness warning: recording the attempt's cost apart: %v", aerr)
-					executed = false
+			// Written before the admission is released, so the next turn
+			// admitted, and this one's retries, count this attempt. A turn
+			// under a limit whose cost cannot be written is not retried,
+			// and stays admitted (here and in Execute).
+			if cerr := r.home.closeSpend(t); cerr != nil {
+				t.logf("== harness warning: writing what the attempt cost to the spending ledger: %v", cerr)
+				if limited(cfg, p) {
+					unrecorded, executed = true, false
 				} else {
-					unrecorded = nil
+					os.Remove(r.home.spendPath(t.entry)) // its cost goes to the next entry
+					t.entry = nil
 				}
+			}
+			if serr := r.saveMetrics(run.ID, n, t); serr != nil {
+				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
 			}
 		}
 		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
@@ -1071,10 +1090,9 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			if !errors.Is(err, ErrRepeated) {
 				t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
 			}
-			if unrecorded != nil {
-				// What the attempt cost is on record nowhere: the turn
-				// stays admitted until finish records it, so no turn is
-				// admitted against a total that leaves it out.
+			if unrecorded {
+				// What the attempt cost is not in the ledger: the turn
+				// stays admitted until it is (see Execute).
 				t.held = ticket
 			} else {
 				ticket.Release()
@@ -1143,41 +1161,26 @@ func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait tim
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
-// Test hooks, when set: testHookSaveMetrics and testHookFinish run in
-// saveMetrics and finish (an error fails the save), testHookTurnEnd when
-// execute returns, and testHookFinalize before a worktree turn's commit.
+// Test hooks, when set: testHookTurnEnd runs when execute returns,
+// testHookFinalize before a worktree turn's commit, and testHookTake in a
+// stop watch's take.
 var (
-	testHookSaveMetrics func() error
-	testHookFinalize    func(ctx context.Context)
-	testHookFinish      func() error
-	testHookSaveApart   func() error
-	testHookTurnEnd     func()
-	testHookTake        func()
+	testHookFinalize func(ctx context.Context)
+	testHookTurnEnd  func()
+	testHookTake     func()
 )
 
-// saveMetrics records the turn's metrics so far in its run record, with
-// what this attempt cost and when.
+// saveMetrics records the turn's metrics so far in its run record, for
+// those who look at the turn while it runs.
 func (r *Runner) saveMetrics(id string, n int, t *Turn) error {
 	if len(t.metrics) == 0 {
 		return nil
 	}
-	if testHookSaveMetrics != nil {
-		if err := testHookSaveMetrics(); err != nil {
-			return err
-		}
-	}
-	cost := finiteMetrics(t.metrics)["cost_usd"]
 	_, err := r.home.updateRun(id, func(run *Run) error {
 		rec := &run.Turns[n-1]
 		rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
-		if d := cost - t.spendSaved; d != 0 {
-			rec.Spend = append(rec.Spend, Spend{At: now().UTC(), USD: d})
-		}
 		return nil
 	})
-	if err == nil {
-		t.spendSaved = cost
-	}
 	return err
 }
 
@@ -1199,11 +1202,6 @@ func claimsFor(p *Profile, budgets map[string]int64, t *Turn) []Claim {
 // finish records a turn's outcome. The answer is saved before the record,
 // so the record never claims an answer that is not on disk.
 func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint string) (*Run, error) {
-	if testHookFinish != nil {
-		if herr := testHookFinish(); herr != nil {
-			return nil, fmt.Errorf("the turn finished, but %w (it may still show running): %w", errUnsaved, herr)
-		}
-	}
 	var saveErr error
 	run, uerr := r.home.updateRun(id, func(run *Run) error {
 		switch {
@@ -1230,21 +1228,14 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 			rec.Attempts, rec.ExitCode, rec.Command = t.attempts, t.exitCode, t.argv
 			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 			rec.Check, rec.Checked, rec.Changes = t.check, t.checked, t.changes
-			rec.SpentApart = t.apart
-			if d := finiteMetrics(t.metrics)["cost_usd"] - t.spendSaved; d != 0 {
-				rec.Spend = append(rec.Spend, Spend{At: now().UTC(), USD: d}) // what saveMetrics could not record
-			}
 		}
 		return nil // always save: the record must leave "running"
 	})
 	if uerr != nil {
-		return run, fmt.Errorf("the turn finished, but %w (it may still show running): %w", errUnsaved, uerr)
+		return run, fmt.Errorf("the turn finished, but saving the run record failed (it may still show running): %w", uerr)
 	}
 	return run, saveErr
 }
-
-// errUnsaved is a turn's record that could not be saved.
-var errUnsaved = errors.New("saving the run record failed")
 
 // stopWatch watches a turn's stop file. Each stop request (the file
 // appearing, or written again) is acted on once, by whichever watch sees

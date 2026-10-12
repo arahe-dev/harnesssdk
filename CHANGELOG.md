@@ -130,6 +130,21 @@ Its fifth review found 4 medium issues, also fixed with regression tests:
 - A stop watch ends between takes of a stop request, so a request is never
   taken by a watch that has ended.
 
+Its sixth review found 2 high and 3 medium issues, also fixed with
+regression tests:
+- A creation mark or commit file that cannot be read leaves its run alone
+  (gc used to read it as "not committed"), a run that ever ran is never
+  rolled back, and a rollback keeps a worktree that holds changes.
+- Commit files are pruned only when an hour older than the start of a gc
+  scan that read every mark, so a long scan cannot prune one still needed.
+- Spending is one ledger, `<home>/spend`, with an entry per attempt made
+  before it runs and given its cost before its admission is released. It
+  replaces the per-turn `spend` records and the files written apart in the
+  fifth round. A cost that never reached the ledger is unknown and, like an
+  unreadable entry, refuses turns under a limit until it leaves the 24-hour
+  window or is removed: spending limits fail closed. A v1 run continued by v2
+  loses the v1 turns' costs from the window.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now

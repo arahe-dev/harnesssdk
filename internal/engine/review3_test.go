@@ -79,47 +79,30 @@ func TestNoHooksFolderCannotBePlanted(t *testing.T) {
 	}
 }
 
-// M3: an attempt whose cost could not be recorded keeps its admission
-// until the turn's record holds it, so the next turn admitted counts it:
-// also when the turn's final save fails too, and is tried again.
+// M3: an attempt whose cost could not be written keeps its admission
+// until it is, so the next turn admitted counts it.
 func TestUnrecordedCostKeepsAdmission(t *testing.T) {
-	for _, finishFailures := range []int32{0, 2} {
-		f := newFixture(t, map[string]int64{"b": 1})
-		usageDef(f) // $0.50 a turn
-		f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
-		var saves, finishes atomic.Int32
-		testHookSaveMetrics = func() error {
-			if saves.Add(1) == 1 {
-				return errors.New("disk full")
-			}
-			return nil
+	f := newFixture(t, map[string]int64{"b": 1})
+	usageDef(f) // $0.50 a turn
+	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
+	var closes atomic.Int32
+	testHookSpend = func(stage string) error {
+		if stage == "close" && closes.Add(1) <= 2 {
+			return errors.New("disk full")
 		}
-		testHookFinish = func() error {
-			if finishes.Add(1) <= finishFailures {
-				return errors.New("disk full")
-			}
-			return nil
-		}
-		// A slow end of turn (a worktree commit), during which a turn
-		// admitted too early would run.
-		testHookFinalize = func(context.Context) { time.Sleep(time.Second) }
-		reps, err := f.r.Start(context.Background(), "u", []string{"first", "second"}, gitRepo(t), TurnOptions{Worktree: true}, nil)
-		testHookSaveMetrics, testHookFinish, testHookFinalize = nil, nil, nil
-		if err != nil {
-			t.Fatal(err)
-		}
-		var outcomes []string
-		for _, rep := range reps {
-			outcomes = append(outcomes, rep.Outcome)
-		}
-		// The first turn's cost is recorded apart, so the second is refused
-		// (the first fails too when its own record cannot be saved).
-		if !strings.Contains(strings.Join(outcomes, " "), "throttled") {
-			t.Fatalf("%d failed final saves: the second turn was admitted: %v", finishFailures, outcomes)
-		}
-		if _, spent, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || spent != 0.5 {
-			t.Fatalf("%d failed final saves: spent %v, %v", finishFailures, spent, err)
-		}
+		return nil
+	}
+	defer func() { testHookSpend = nil }()
+	reps := f.start(context.Background(), "u", "first", "second")
+	var outcomes []string
+	for _, rep := range reps {
+		outcomes = append(outcomes, rep.Outcome)
+	}
+	if o := strings.Join(outcomes, " "); !strings.Contains(o, "success") || !strings.Contains(o, "throttled") {
+		t.Fatalf("both turns ran, or neither: %v", outcomes)
+	}
+	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || s.mine != 0.5 {
+		t.Fatalf("spent %+v, %v", s, err)
 	}
 }
 

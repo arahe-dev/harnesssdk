@@ -14,49 +14,71 @@ import (
 
 // Regression tests for the fifth review of v2.0.0-next.
 
-// 1: a cost that cannot go into the run record is recorded apart and
-// counts at once; a turn whose cost is on record nowhere stays admitted
-// until it is.
-func TestCostRecordedApart(t *testing.T) {
-	for _, c := range []struct {
-		name                         string
-		saves, apart, finish, wantIn int32 // failures of each; files expected in spend/
-	}{
-		{"record fails, apart works", 1 << 20, 0, 1 << 20, 1},
-		{"both fail, then the record works", 1, 1 << 20, 2, 0},
-	} {
-		f := newFixture(t, map[string]int64{"b": 1})
-		usageDef(f) // $0.50 a turn
-		f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
-		var saves, apart, finishes atomic.Int32
-		fail := func(n *atomic.Int32, limit int32) func() error {
-			return func() error {
-				if n.Add(1) <= limit {
-					return errors.New("disk full")
-				}
-				return nil
-			}
+// 1 (and the sixth review's 3): a turn stopped before its cost could be
+// written leaves the cost unknown, and turns under a limit are refused
+// until its entry is removed.
+func TestUnknownCostRefusesLimitedTurns(t *testing.T) {
+	f := newFixture(t, map[string]int64{"b": 1})
+	usageDef(f) // $0.50 a turn
+	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 5")
+	runs, err := f.r.Prepare("u", []string{"first", "second", "third"}, f.cwd, TurnOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closes atomic.Int32
+	testHookSpend = func(stage string) error {
+		if stage == "close" {
+			closes.Add(1)
+			return errors.New("disk full")
 		}
-		testHookSaveMetrics, testHookSaveApart, testHookFinish = fail(&saves, c.saves), fail(&apart, c.apart), fail(&finishes, c.finish)
-		testHookFinalize = func(context.Context) { time.Sleep(time.Second) } // a slow end of turn
-		reps, err := f.r.Start(context.Background(), "u", []string{"first", "second"}, gitRepo(t), TurnOptions{Worktree: true}, nil)
-		testHookSaveMetrics, testHookSaveApart, testHookFinish, testHookFinalize = nil, nil, nil, nil
-		if err != nil {
-			t.Fatal(err)
-		}
-		var outcomes []string
-		for _, rep := range reps {
-			outcomes = append(outcomes, rep.Outcome)
-		}
-		if !strings.Contains(strings.Join(outcomes, " "), "throttled") {
-			t.Fatalf("%s: the second turn was admitted against a total without the first's cost: %v", c.name, outcomes)
-		}
-		if _, spent, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || spent != 0.5 {
-			t.Fatalf("%s: spent %v, %v", c.name, spent, err)
-		}
-		if files, _ := os.ReadDir(f.home.spendDir()); int32(len(files)) != c.wantIn {
-			t.Fatalf("%s: %d costs recorded apart", c.name, len(files))
-		}
+		return nil
+	}
+	defer func() { testHookSpend = nil }()
+	ctx, cancel := context.WithCancel(context.Background())
+	first, second := make(chan Report), make(chan Report)
+	go func() { first <- f.r.Execute(ctx, runs[0].ID, 1) }()
+	for closes.Load() < 2 { // it stays admitted, trying again
+		time.Sleep(50 * time.Millisecond)
+	}
+	go func() { second <- f.r.Execute(context.Background(), runs[1].ID, 1) }()
+	time.Sleep(300 * time.Millisecond) // the second waits for the budget
+	cancel()
+	rep := <-first
+	if rep.Err == nil || !strings.Contains(rep.Err.Error(), "spending ledger") {
+		t.Fatalf("first: %s %v", rep.Outcome, rep.Err)
+	}
+	if rep = <-second; rep.Outcome != "throttled" || !strings.Contains(rep.Err.Error(), "unknown") {
+		t.Fatalf("second: %s %v", rep.Outcome, rep.Err)
+	}
+	testHookSpend = nil
+	left, _ := filepath.Glob(filepath.Join(f.home.spendDir(), runs[0].ID+"-*.json"))
+	if len(left) != 1 {
+		t.Fatalf("entries: %v", left)
+	}
+	os.Remove(left[0])
+	if rep := f.r.Execute(context.Background(), runs[2].ID, 1); rep.Outcome != "success" {
+		t.Fatalf("third: %s %v", rep.Outcome, rep.Err)
+	}
+}
+
+// The sixth review's 5: a ledger entry that cannot be read refuses turns
+// under a limit; a file being written does not count.
+func TestUnreadableLedgerEntryRefuses(t *testing.T) {
+	f := newFixture(t, nil)
+	usageDef(f)
+	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 5")
+	f.profile("free", "harness: fakeusage\neffect: pure\nmode: usage")
+	os.MkdirAll(f.home.spendDir(), 0o700)
+	os.WriteFile(filepath.Join(f.home.spendDir(), ".tmp-123"), []byte("{half"), 0o600)
+	if rep := f.start(context.Background(), "u", "x")[0]; rep.Outcome != "success" {
+		t.Fatalf("a file being written counted: %v", rep.Err)
+	}
+	os.WriteFile(filepath.Join(f.home.spendDir(), "r-1-1.json"), []byte("{half"), 0o600)
+	if _, err := f.r.Start(context.Background(), "u", []string{"y"}, f.cwd, TurnOptions{}, nil); err == nil || !strings.Contains(err.Error(), "cannot be read") || OutcomeName(err) != "throttled" {
+		t.Fatalf("an unreadable entry did not refuse: %v", err)
+	}
+	if rep := f.start(context.Background(), "free", "z")[0]; rep.Outcome != "success" {
+		t.Fatalf("a turn under no limit was refused: %v", rep.Err)
 	}
 }
 

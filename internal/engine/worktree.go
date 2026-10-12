@@ -179,6 +179,16 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 		}
 		return err
 	}
+	if exists && drop {
+		// The run never ran, so its worktree holds nothing of anyone's;
+		// one that holds changes all the same is kept. (A folder without
+		// its .git is a worktree git never finished making.)
+		if _, err := os.Lstat(filepath.Join(run.Worktree, ".git")); err == nil {
+			if status, err := git(ctx, "-C", run.Worktree, "status", "--porcelain"); err == nil && status != "" {
+				return fmt.Errorf("worktree %s has changes, so it is kept", run.Worktree)
+			}
+		}
+	}
 	if exists {
 		args := append(at, "worktree", "remove")
 		if drop {

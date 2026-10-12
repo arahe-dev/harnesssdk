@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,23 +115,33 @@ func TestSpendRefusalIsNotRetried(t *testing.T) {
 	}
 }
 
-// M4, M5: spending counts each attempt as it is recorded, and by when it
-// was spent, also on a run created long before.
+// M4, M5: spending counts each attempt by when it was spent, also on a
+// run created long before, and turns recorded before v2 by their records.
 func TestSpendingCountsAttemptsAndOldRuns(t *testing.T) {
 	h := newGateHome(t)
-	old := oldRun(t, h, 3, "spnd") // created three days ago
 	// A follow-up whose first attempt spent $10 yesterday, more than a
 	// day ago, and whose second spent $0.40 today: only today's counts.
-	old.Turns = append(old.Turns, TurnRecord{N: 2, Outcome: "running", Metrics: map[string]float64{"cost_usd": 10.4},
-		Spend: []Spend{{At: time.Now().Add(-25 * time.Hour).UTC(), USD: 10}, {At: time.Now().UTC(), USD: 0.4}}})
-	if err := old.Save(); err != nil {
-		t.Fatal(err)
+	yesterday := time.Now().Add(-25 * time.Hour)
+	for _, e := range []spendEntry{
+		{Run: "r", Turn: 2, Attempt: 1, Profile: "p", At: yesterday.UTC(), USD: 10},
+		{Run: "r", Turn: 2, Attempt: 2, Profile: "p", At: time.Now().UTC(), USD: 0.4},
+	} {
+		if err := h.writeSpend("close", &e); err != nil {
+			t.Fatal(err)
+		}
+		if e.Attempt == 1 {
+			os.Chtimes(h.spendPath(&e), yesterday, yesterday)
+		}
 	}
+	legacy := oldRun(t, h, 3, "spnd") // a v1 record, ended today
+	os.WriteFile(filepath.Join(legacy.Dir(), "run.json"), []byte(fmt.Sprintf(
+		`{"format": 1, "id": %q, "profile": "q", "harness": "fake", "cwd": ".", "created": %q, "turns": [{"n": 1, "outcome": "success", "ended": %q, "metrics": {"cost_usd": 0.3}}]}`,
+		legacy.ID, legacy.Created.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))), 0o600)
 	now := time.Now()
-	os.Chtimes(old.Dir(), now, now)
-	all, mine, err := h.spending(time.Now().Add(-spendWindow), "p")
-	if err != nil || all != 0.4 || mine != 0.4 {
-		t.Fatalf("spent %v / %v %v, want 0.4", all, mine, err)
+	os.Chtimes(legacy.Dir(), now, now)
+	s, err := h.spending(time.Now().Add(-spendWindow), "p")
+	if err != nil || math.Abs(s.all-0.7) > 1e-9 || math.Abs(s.mine-0.4) > 1e-9 || s.unknownAll != "" {
+		t.Fatalf("spent %+v %v, want 0.7 in all, 0.4 by p", s, err)
 	}
 }
 

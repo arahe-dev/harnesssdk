@@ -58,21 +58,10 @@ type TurnRecord struct {
 	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
 	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
 	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
-	// Spend is what each attempt cost (cost_usd) and when, for the
-	// spending limits' rolling window.
-	Spend []Spend `json:"spend,omitempty"`
-	// SpentApart is what was recorded apart, in <home>/spend, instead.
-	SpentApart float64 `json:"spent_apart,omitempty"`
-	Check      string  `json:"check,omitempty"`   // the check command it ran
-	Checked    string  `json:"checked,omitempty"` // passed or failed
+	Check    string    `json:"check,omitempty"`   // the check command it ran
+	Checked  string    `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
-}
-
-// Spend is one attempt's reported cost.
-type Spend struct {
-	At  time.Time `json:"at"`
-	USD float64   `json:"usd"`
 }
 
 // finished reports whether the turn has a final outcome.

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -29,12 +30,14 @@ type GCReport struct {
 // it between runs, and stops git; what it was removing then is kept.
 func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport, error) {
 	var rep GCReport
+	scanned := time.Now()
 	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
 	if err != nil {
 		return rep, err
 	}
 	var errs []error
 	refs := map[string]bool{} // creations that marked runs still refer to
+	unsure := false           // a mark could not be read
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
@@ -53,19 +56,31 @@ func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport,
 		// A run whose creation has not committed is left to its creator;
 		// once the creator is gone (it can then no longer commit), it was
 		// abandoned, and goes whatever its age, as its rollback would.
+		// One whose mark cannot be read is left alone.
 		dir := filepath.Join(h.Dir, "runs", id)
 		abandoned := false
-		if tx, marked := readMark(dir); marked {
-			if h.committed(tx) {
+		if tx, marked, err := readMark(dir); marked {
+			committed := false
+			if err == nil {
+				committed, err = h.committed(tx)
+			}
+			switch {
+			case err != nil:
+				unsure = true
+				continue
+			case committed:
 				if os.Remove(filepath.Join(dir, creatingFile)) != nil { // only clutter now
 					refs[tx] = true
 				}
-			} else {
+			default:
 				refs[tx] = true
 				if !h.creatorGone(ctx, id) {
 					continue
 				}
-				abandoned = h.creating(dir)
+				if abandoned, err = h.creating(dir); err != nil {
+					unsure = true
+					continue
+				}
 			}
 		}
 		// Ids start with their creation time: a run clearly created after
@@ -86,8 +101,8 @@ func (h *Home) GC(ctx context.Context, cutoff time.Time, dryRun bool) (GCReport,
 	h.pruneLive(cutoff)
 	h.pruneRepeats()
 	h.pruneSpend()
-	if ctx.Err() == nil {
-		h.pruneCommits(refs)
+	if ctx.Err() == nil && !unsure {
+		h.pruneCommits(refs, scanned)
 	}
 	return rep, errors.Join(errs...)
 }
@@ -128,6 +143,9 @@ func (h *Home) collect(ctx context.Context, id string, cutoff time.Time, dryRun,
 	// Under the locks, the record decides; one this harness cannot read is
 	// left alone, and so is a run still taking shape.
 	r, err := h.LoadRun(id)
+	// An abandoned creation never ran; a run that did is not one, whatever
+	// its mark says, and is kept or collected like any other.
+	abandoned = abandoned && err == nil && !r.ran()
 	if err != nil || !abandoned && (!r.lastActive().Before(cutoff) || r.settling()) {
 		release()
 		return -1, nil
@@ -244,6 +262,11 @@ func dirSize(dir string) (int64, []os.DirEntry, error) {
 		}
 	}
 	return size, entries, nil
+}
+
+// ran reports whether any turn of the run started.
+func (r *Run) ran() bool {
+	return slices.ContainsFunc(r.Turns, func(t TurnRecord) bool { return t.Outcome != "queued" })
 }
 
 // settling reports whether a run may still be taking shape without
