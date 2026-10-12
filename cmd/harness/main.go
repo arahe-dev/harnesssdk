@@ -332,6 +332,9 @@ func (c *cli) defCheck(name, cwd, profile string) error {
 	if !dc.Answered {
 		return fmt.Errorf("the live turn did not answer as asked (%v): %q; see: harness show %s", rep.Err, firstLine(rep.Output), runID(rep))
 	}
+	if len(dc.Missing) > 0 {
+		return fmt.Errorf("the definition declares metrics the CLI did not report: %s; its output may have changed (see: harness show %s)", strings.Join(dc.Missing, ", "), runID(rep))
+	}
 	return nil
 }
 

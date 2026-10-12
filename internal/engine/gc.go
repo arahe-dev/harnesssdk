@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -101,7 +104,12 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 		release()
 		return size, err
 	}
-	removeWorktree(r, false) // its branch, the agent's work, stays
+	// The worktree goes first, its work committed to its branch, which
+	// stays; a worktree whose work cannot be kept keeps its run too.
+	if err := removeWorktree(context.Background(), r, false); err != nil {
+		release()
+		return -1, fmt.Errorf("run %s: %w", id, err)
+	}
 	// The record goes first: from then on the run does not exist. The lock
 	// files, open here, go last (Windows cannot delete an open file).
 	var errs []error
@@ -124,19 +132,51 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 // folder until it has published or removed it. The lock file is removed
 // under the creation lock (see stageRun).
 func (h *Home) collectStage(name string) {
-	lockPath := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock")+".lock")
+	stage := filepath.Join(h.Dir, "runs", strings.TrimSuffix(name, ".lock"))
+	lockPath := stage + ".lock"
 	coord, err := h.creationLock()
 	if err != nil {
 		return
 	}
-	defer coord()
-	unlock, err := lockFile(lockPath)
+	lk, err := lockOpen(lockPath)
+	coord()
 	if err != nil {
 		return // its creator is alive
 	}
-	os.RemoveAll(strings.TrimSuffix(lockPath, ".lock"))
-	unlock()
-	os.Remove(lockPath)
+	// Its creator is gone, and this lock keeps any other from the id while
+	// what it left is undone: a worktree and branch it made, then the folder.
+	release := func(removeLock bool) {
+		coord, err := h.creationLock()
+		lk.Close()
+		if err == nil {
+			if removeLock {
+				os.Remove(lockPath)
+			}
+			coord()
+		}
+	}
+	if run := readStaged(stage); run != nil && run.Worktree != "" {
+		if err := removeWorktree(context.Background(), run, true); err != nil {
+			release(false) // tried again by the next pass
+			return
+		}
+	}
+	os.RemoveAll(stage)
+	release(true)
+}
+
+// readStaged reads the record of a run being prepared, or nil.
+func readStaged(stage string) *Run {
+	data, err := os.ReadFile(filepath.Join(stage, "run.json"))
+	if err != nil {
+		return nil
+	}
+	var r Run
+	if json.Unmarshal(data, &r) != nil || checkFormatUpTo("staged run", r.Format, runFormat) != nil {
+		return nil
+	}
+	r.dir = stage
+	return &r
 }
 
 // dirSize adds up the sizes of a run folder's files.

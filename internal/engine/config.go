@@ -16,9 +16,20 @@ import (
 // before versions existed read as version 1.
 const formatVersion = 1
 
-func checkFormat(what string, v int) error {
-	if v > formatVersion {
-		return fmt.Errorf("%s was written by a newer harness (format %d; this one reads up to %d): upgrade harness", what, v, formatVersion)
+// Run records and config.json are format 2 since v2.0: they hold what
+// v1 would misread or drop on saving (a worktree run's folder, the new
+// limits), so v1 refuses them. v2 still reads format 1. Files whose meaning
+// did not change stay format 1, shared by both.
+const (
+	runFormat    = 2
+	configFormat = 2
+)
+
+func checkFormat(what string, v int) error { return checkFormatUpTo(what, v, formatVersion) }
+
+func checkFormatUpTo(what string, v, max int) error {
+	if v > max {
+		return fmt.Errorf("%s was written by a newer harness (format %d; this one reads up to %d): upgrade harness", what, v, max)
 	}
 	return nil
 }
@@ -96,7 +107,7 @@ var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
-	return Config{Format: formatVersion, MaxDepth: 3, MaxRunning: 16, RetentionDays: 30, RepeatWarn: 3, RepeatRefuse: 5}
+	return Config{Format: configFormat, MaxDepth: 3, MaxRunning: 16, RetentionDays: 30, RepeatWarn: 3, RepeatRefuse: 5}
 }
 
 func (h *Home) configPath() string { return filepath.Join(h.Dir, "config.json") }
@@ -114,7 +125,7 @@ func (h *Home) Config() (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return c, fmt.Errorf("config.json: %w", err)
 	}
-	if err := checkFormat("config.json", c.Format); err != nil {
+	if err := checkFormatUpTo("config.json", c.Format, configFormat); err != nil {
 		return c, err
 	}
 	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 || c.MaxWaitMinutes < 0 || c.MaxQueue < 0 || c.SpendLimitUSD < 0 {
@@ -158,7 +169,7 @@ func (h *Home) SetConfig(key string, value int) error {
 	case "spend_limit_usd":
 		c.SpendLimitUSD = value
 	}
-	c.Format = formatVersion
+	c.Format = configFormat
 	data, _ := json.MarshalIndent(c, "", "  ")
 	return writeFileAtomic(h.configPath(), append(data, '\n'))
 }

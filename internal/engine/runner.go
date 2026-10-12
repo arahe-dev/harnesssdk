@@ -340,7 +340,7 @@ func (t *Turn) vars() Vars {
 	}
 	v["cwd"], v["run_id"], v["run_dir"] = t.Run.AgentDir(), t.Run.ID, t.Run.dir
 	v["harness_home"] = t.home
-	v["report_file"] = t.Run.Path(fmt.Sprintf("turn-%d.report.json", t.N))
+	v["report_file"] = t.Run.Path(fmt.Sprintf("turn-%d.report.%d.json", t.N, t.attempts)) // one per attempt: never a stale one
 	v["lineage"] = strings.Join(t.lineage, ",")
 	return v
 }
@@ -374,7 +374,6 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	}
 	env = append(env, EnvHome+"="+r.home.Dir, EnvRun+"="+t.Run.ID, EnvLineage+"="+strings.Join(t.lineage, ","))
 	t.argv = argv
-	os.Remove(v["report_file"]) // only this attempt's report counts
 
 	stdoutPath := t.Run.Path(fmt.Sprintf("turn-%d.stdout.log", t.N))
 	stderrPath := t.Run.Path(fmt.Sprintf("turn-%d.stderr.log", t.N))
@@ -619,7 +618,7 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 		// never appears without it.
 		s.Depth, s.Kind = nr.depth, nr.o.Kind
 		if nr.o.Worktree || nr.p.Worktree {
-			err = r.home.addWorktree(s.Run)
+			err = r.home.addWorktree(context.Background(), s.Run)
 		}
 		if err == nil {
 			err = createStage("queue")
@@ -649,7 +648,7 @@ func (r *Runner) create(nr *newRuns) (runs []*Run, err error) {
 // worktrees and branches.
 func removeRuns(runs []*Run) {
 	for _, run := range runs {
-		removeWorktree(run, true)
+		removeWorktree(context.Background(), run, true)
 		os.RemoveAll(run.Dir())
 	}
 }
@@ -825,9 +824,10 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	res, t, err := r.execute(ctx, run, n, execLock)
 	if run.Worktree != "" && t != nil {
 		// The branch keeps the turn's work, whatever its outcome.
-		changes, cerr := commitTurn(run, n)
+		changes, cerr := commitTurn(context.Background(), run, n)
 		if cerr != nil {
 			t.logf("== harness warning: committing the worktree: %v", cerr)
+			changes = fmt.Sprintf("NOT committed (%v); the work is in %s", cerr, run.Worktree)
 		}
 		t.changes = changes
 	}
@@ -946,7 +946,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		if err = r.home.checkRepeat(t.repeat); err == nil {
 			err = r.home.checkSpend(p)
 		}
-		if err == nil {
+		executed := err == nil // a refusal of harness's own is final, never retried
+		if executed {
 			// On Unix the agent inherits these locks: while any process of
 			// its tree runs, the turn counts as executing and its budget
 			// stays held, even if this process dies.
@@ -958,8 +959,12 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			if err == nil && check != "" {
 				err = r.runCheck(ctx, t, check, p.CheckTimeout)
 			}
+			// Saved before the budget is released, so the spending limit
+			// counts this attempt for the next turn admitted, and for this
+			// one's own retries.
+			r.saveMetrics(run.ID, n, t)
 		}
-		again := retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
+		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
 		if !again {
 			// Counted while the turn still holds its budget, before a
 			// waiting turn of the same request is admitted and checks it.
@@ -1030,6 +1035,19 @@ func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait tim
 }
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
+
+// saveMetrics records the turn's metrics so far, and when they were last
+// added to, in its run record.
+func (r *Runner) saveMetrics(id string, n int, t *Turn) {
+	if len(t.metrics) == 0 {
+		return
+	}
+	r.home.updateRun(id, func(run *Run) error {
+		rec := &run.Turns[n-1]
+		rec.Metrics, rec.Model, rec.Spent = finiteMetrics(t.metrics), t.vars()["model"], now().UTC()
+		return nil
+	})
+}
 
 // claimsFor are the gate claims of a turn: its budgets, at their current
 // capacities (checkPolicy has verified them), and its serialize key.

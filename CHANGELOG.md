@@ -37,6 +37,39 @@ path is now `github.com/arahe-dev/harnesssdk/v2`; v1.7.0 stays the stable v1.
   `Config` gains the new limits; `Stats` counts checks; `CheckDefinition`.
   The engine's `TurnOptions` replaces its growing argument lists.
 - **docs/DESIGN.md** explains every lock and protocol in one place.
+- **Formats.** Run records and `config.json` are format 2: they hold what
+  v1 would misread or drop (a worktree run's folder, the new limits), so
+  v1.7 refuses them ("upgrade harness") instead of acting on them. v2 reads
+  format 1. Other files are unchanged and shared.
+
+### Review
+
+The Pi review agent (`review`, GPT-6.1 Sol) reviewed this release before it
+was merged. Its first review found 2 high, 11 medium and 2 low issues, all
+fixed with regression tests:
+- `gc` could delete a worktree whose work was never committed: it now
+  commits the work first and keeps any worktree it cannot commit; a failed
+  turn commit is reported.
+- v1.7 could act on v2 records (above).
+- A spending refusal could loop as a retry; only an attempt that ran is
+  retried.
+- Spending counted only finished turns of runs created in the window: each
+  attempt's cost is now recorded before its budget is released, and counted
+  by when it was spent.
+- Checks now run with the run's identity (`HARNESS_*`), its locks, and as
+  its recorded process.
+- `max_wait` held only between gate passes: lock waits are now bounded by
+  it, and a grant after it is given back.
+- Worktrees: what is about to be made is recorded first, so a failed
+  `git worktree add` or a creator that died is undone (by its rollback or by
+  `gc`); git is addressed from the run's folder or the repository's own git
+  folder; every git command is bounded and contained like an agent; an
+  untracked starting folder is created in the worktree; paths keep leading
+  spaces.
+- `def check` no longer accepts an echoed prompt, reports declared metrics
+  that did not come out, and runs the version command with its process
+  tree bounded.
+- Each attempt has its own `{report_file}`.
 
 Not done: the Codex `workspace-write` sandbox (with the data folder writable
 and network on) could not be verified, because Codex's Windows sandbox fails

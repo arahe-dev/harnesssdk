@@ -155,21 +155,33 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 	}
 	me := gateEntry{ID: id, PID: os.Getpid(), Label: label, Since: time.Now().UTC()}
 	drop := func() {
-		g.update(claims, func(sts []*gateState) {
+		g.update(context.Background(), claims, func(sts []*gateState) {
 			for _, st := range sts {
 				st.remove(id)
 			}
 		})
 	}
+	// entered is set once a pass got into the ledgers: before that, this
+	// request is in none, and leaving has nothing to undo there.
+	entered := false
 	leave := func() {
-		drop()
+		if entered {
+			drop()
+		}
 		live.Close()
 		os.Remove(g.liveFile(id))
 	}
 	for queued := false; ; {
+		if err := ctx.Err(); err != nil {
+			leave()
+			return nil, err
+		}
 		// Stamped before the pass, so a change during it is not missed.
 		stamps := g.stamps(claims)
-		granted, verdict, err := g.try(claims, me, !queued, reject)
+		granted, verdict, err := g.try(ctx, claims, me, !queued, reject)
+		if err == nil {
+			entered = true
+		}
 		switch {
 		case errors.Is(err, errBusy) && !reject:
 			// A ledger stayed locked by others all through this pass:
@@ -178,6 +190,11 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 		case err != nil:
 			leave()
 			return nil, err
+		case granted && ctx.Err() != nil:
+			// The wait ended (max_wait, or the caller) while the pass was
+			// waiting for a ledger: a late grant is given back.
+			leave()
+			return nil, ctx.Err()
 		case granted:
 			return &Ticket{ID: id, Live: live, release: leave}, nil
 		case verdict != nil:
@@ -221,9 +238,9 @@ func (g *Gate) waitChange(ctx context.Context, claims []Claim, stamps []string) 
 // try makes one pass over the ledgers: it enqueues me on the first pass and
 // grants me everything if every ledger allows it. verdict is a final
 // refusal.
-func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bool, verdict, err error) {
+func (g *Gate) try(ctx context.Context, claims []Claim, me gateEntry, first, reject bool) (granted bool, verdict, err error) {
 	nested := len(g.lineage) > 0
-	err = g.update(claims, func(sts []*gateState) {
+	err = g.update(ctx, claims, func(sts []*gateState) {
 		ok := true
 		for i, c := range claims {
 			st := sts[i]
@@ -278,7 +295,13 @@ func (g *Gate) try(claims []Claim, me gateEntry, first, reject bool) (granted bo
 
 // update changes ledgers under their locks, taken in name order, after
 // dropping dead tickets.
-func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
+func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateState)) error {
+	// A ledger lock is waited for up to two seconds, and never past the
+	// caller's deadline.
+	wait := 2 * time.Second
+	if d, ok := ctx.Deadline(); ok {
+		wait = max(0, min(wait, time.Until(d)))
+	}
 	var locks []*os.File
 	defer func() {
 		for i := len(locks) - 1; i >= 0; i-- {
@@ -292,7 +315,7 @@ func (g *Gate) update(claims []Claim, change func([]*gateState)) error {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), 2*time.Second)
+		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), wait)
 		if err != nil {
 			return fmt.Errorf("gate %s: %w", c.Name, err)
 		}

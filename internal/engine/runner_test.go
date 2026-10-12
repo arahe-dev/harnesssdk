@@ -90,6 +90,8 @@ func fakeHarness(args []string) int {
 		fmt.Println("wrote " + opts["file"])
 	case "version":
 		fmt.Println("fake 1.2.3")
+	case "reply": // answers exactly opts text
+		fmt.Println(opts["text"])
 	case "report": // the answer on stdout, usage in the file after --usage-file
 		for i, f := range flags {
 			if f == "--usage-file" && i+1 < len(flags) {

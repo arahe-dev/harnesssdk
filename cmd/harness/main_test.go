@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -35,6 +36,10 @@ func TestMain(m *testing.M) {
 // fakeAgent "tree <pidfile>" starts a sleeping grandchild, records its pid
 // and sleeps.
 func fakeAgent(args []string) int {
+	if len(args) == 2 && args[0] == "reply" {
+		fmt.Println(args[1])
+		return 0
+	}
 	if len(args) == 1 && args[0] == "echo" {
 		in, _ := io.ReadAll(os.Stdin)
 		os.Stdout.Write(append([]byte("echo: "), in...))
@@ -163,7 +168,7 @@ func TestCLICompareAndStats(t *testing.T) {
 		t.Fatalf("stats checks: %s", out)
 	}
 	// def check: the CLI and its version; with a profile, a live turn.
-	withVersion := `{"command":` + strconv.Quote(exe) + `,"args":[["echo"]],"env":{"HARNESS_TEST_FAKE":"1"},"version":["echo"],"output":{"format":"text"}}`
+	withVersion := `{"command":` + strconv.Quote(exe) + `,"args":[["reply","harness-check-ok"]],"env":{"HARNESS_TEST_FAKE":"1"},"version":["echo"],"output":{"format":"text"}}`
 	if code, _, errs := harnessCLI(t, withVersion, "def", "set", "fake", "--file", "-"); code != 0 {
 		t.Fatalf("def set: %d %s", code, errs)
 	}

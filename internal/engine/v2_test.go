@@ -54,16 +54,16 @@ func gitRepo(t *testing.T) string {
 		{"init", "-q"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "test"},
 		{"config", "commit.gpgsign", "false"},
 	} {
-		if _, err := git(repo, args...); err != nil {
+		if _, err := git(context.Background(), append([]string{"-C", repo}, args...)...); err != nil {
 			t.Fatal(err)
 		}
 	}
 	os.MkdirAll(filepath.Join(repo, "sub"), 0o755)
 	os.WriteFile(filepath.Join(repo, "sub", "README"), []byte("hello\n"), 0o644)
-	if _, err := git(repo, "add", "-A"); err != nil {
+	if _, err := git(context.Background(), "-C", repo, "add", "-A"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git(repo, "commit", "-q", "-m", "first"); err != nil {
+	if _, err := git(context.Background(), "-C", repo, "commit", "-q", "-m", "first"); err != nil {
 		t.Fatal(err)
 	}
 	return repo
@@ -102,7 +102,7 @@ func TestWorktree(t *testing.T) {
 	if !strings.Contains(rep.Changes, "1 file changed") {
 		t.Fatalf("changes %q", rep.Changes)
 	}
-	if log, err := git(repo, "log", "--oneline", run.Branch); err != nil || !strings.Contains(log, "harness: run "+run.ID) {
+	if log, err := git(context.Background(), "-C", repo, "log", "--oneline", run.Branch); err != nil || !strings.Contains(log, "harness: run "+run.ID) {
 		t.Fatalf("branch log: %q %v", log, err)
 	}
 	// Collected: the worktree goes, the branch stays.
@@ -112,7 +112,7 @@ func TestWorktree(t *testing.T) {
 	if _, err := os.Stat(run.Worktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("worktree kept")
 	}
-	if out, _ := git(repo, "branch", "--list", run.Branch); out == "" {
+	if out, _ := git(context.Background(), "-C", repo, "branch", "--list", run.Branch); out == "" {
 		t.Fatal("the branch was deleted")
 	}
 	// A creation that fails removes the worktree and branch it made.
@@ -129,7 +129,7 @@ func TestWorktree(t *testing.T) {
 	if wts, _ := os.ReadDir(filepath.Join(f.home.Dir, "worktrees")); len(wts) != 0 {
 		t.Fatalf("%d worktrees left behind", len(wts))
 	}
-	if out, _ := git(repo, "branch", "--list", "harness/*"); strings.Count(out, "harness/") != 1 {
+	if out, _ := git(context.Background(), "-C", repo, "branch", "--list", "harness/*"); strings.Count(out, "harness/") != 1 {
 		t.Fatalf("branches: %q", out)
 	}
 	// Outside a repository, --worktree is refused.
@@ -163,15 +163,29 @@ func TestSpendLimits(t *testing.T) {
 
 func TestDefinitionCheck(t *testing.T) {
 	f := newFixture(t, nil)
-	f.def("fake", Definition{Args: [][]string{{"{mode}"}}, Output: OutputRule{Format: "text"}, Version: []string{"version"}})
+	f.def("fake", Definition{Args: [][]string{{"{mode}"}, {"{*opts}"}}, Output: OutputRule{Format: "text"}, Version: []string{"version"}})
 	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
+	f.profile("exact", "harness: fake\neffect: pure\nmode: reply\nopts: text=harness-check-ok")
 	c, err := f.r.CheckDefinition(context.Background(), "fake", f.cwd, "")
 	if err != nil || c.Version != "fake 1.2.3" || c.Path == "" || c.Live != nil {
 		t.Fatalf("%+v %v", c, err)
 	}
-	c, err = f.r.CheckDefinition(context.Background(), "fake", f.cwd, "echo")
+	c, err = f.r.CheckDefinition(context.Background(), "fake", f.cwd, "exact")
 	if err != nil || !c.Answered || c.Live.Run.Kind != "check" {
 		t.Fatalf("live: %+v %v", c, err)
+	}
+	// An agent that only echoes the prompt has not answered as asked.
+	if c, err = f.r.CheckDefinition(context.Background(), "fake", f.cwd, "echo"); err != nil || c.Answered {
+		t.Fatalf("echo counted as an answer: %+v %v", c, err)
+	}
+	// A declared metric that does not come out is reported missing.
+	usageDef(f)
+	f.def("fakeusage2", Definition{Args: [][]string{{"{mode}"}, {"{*opts}"}}, Output: OutputRule{Format: "jsonl",
+		Answer:  &Selector{Where: map[string]string{"type": "done"}, Field: "content.-1.text"},
+		Metrics: map[string]*Selector{"cost_usd": {Where: map[string]string{"type": "step"}, Field: "cost", Pick: "sum"}, "renamed": {Where: map[string]string{"type": "step"}, Field: "gone"}}}, Version: []string{"version"}})
+	f.profile("u2", "harness: fakeusage2\neffect: pure\nmode: usage")
+	if c, err = f.r.CheckDefinition(context.Background(), "fakeusage2", f.cwd, "u2"); err != nil || len(c.Missing) != 1 || c.Missing[0] != "renamed" {
+		t.Fatalf("missing metrics: %+v %v", c, err)
 	}
 	f.def("gone", Definition{Output: OutputRule{Format: "text"}})
 	d, _ := f.home.Definition("gone", f.cwd)

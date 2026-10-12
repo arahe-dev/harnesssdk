@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/arahe-dev/hertasdk"
@@ -37,7 +38,17 @@ func (r *Runner) runCheck(ctx context.Context, t *Turn, line string, timeout tim
 	argv, cmdLine := shellArgv(line)
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	code, _, err := runProcess(cctx, procSpec{Argv: argv, CmdLine: cmdLine, Dir: t.Run.AgentDir(), Stdout: out, Stderr: out})
+	// The check runs as part of the turn: with the run's identity, so a
+	// check that runs harness is nested in it, holding the turn's locks,
+	// and recorded as the turn's running process.
+	env := []string{EnvHome + "=" + r.home.Dir, EnvRun + "=" + t.Run.ID, EnvLineage + "=" + strings.Join(t.lineage, ",")}
+	code, _, err := runProcess(cctx, procSpec{
+		Argv: argv, CmdLine: cmdLine, Dir: t.Run.AgentDir(), Env: env,
+		Stdout: out, Stderr: out, Inherit: t.inherit,
+		OnStart: func(pid int) {
+			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
+		},
+	})
 	switch {
 	case err != nil:
 		t.checked = "failed"

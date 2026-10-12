@@ -45,7 +45,8 @@ through process ancestry). They skip the queues for budgets their ancestors
 hold, fail at once (`ErrWouldDeadlock`) when only their ancestors' release
 would let them in, and never wait for a `max_running` slot.
 
-`max_wait` bounds a wait; `max_queue` refuses a request that would join a
+`max_wait` bounds a wait, lock waits included, and a grant that arrives
+after it is given back; `max_queue` refuses a request that would join a
 queue already that long. Waiters re-read a ledger only when its file changes,
 or once a second to reclaim dead tickets.
 
@@ -78,7 +79,9 @@ free (a creator publishes before it releases its lock). Creation locks are
 taken, and their files removed, only while holding `create.lock`, briefly, so
 a lock can never be split. `compare` validates every profile first and
 removes what it created if a later creation fails. A `--worktree` run gets its
-worktree and branch while staged; an aborted creation removes both.
+worktree and branch while staged, recorded in the staged run before git
+makes them, so an aborted creation, or `gc` finding a dead creator's
+staging folder, removes both.
 
 ## The repeat guard
 
@@ -99,8 +102,9 @@ undercounts, never overcounts.
 state locks, record first. It leaves alone a run that is executing, or whose
 first turn still waits for its worker, and a staging folder whose creator is
 alive. A folder without a record (an interrupted removal) goes once it is
-untouched since the cutoff. A collected worktree run loses its worktree; its
-branch stays.
+untouched since the cutoff. A collected worktree run loses its worktree, after anything left in it is
+committed to its branch, which stays; a worktree whose work cannot be
+committed is kept, with its run.
 
 ## What harness does not do
 

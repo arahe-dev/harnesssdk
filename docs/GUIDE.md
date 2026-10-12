@@ -328,10 +328,13 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   `<home>/worktrees/<run-id>`, on branch `harness/<run-id>` made from the
   commit `--cwd` is on. The agent works there, in the same subfolder; the
   profiles of `--cwd`'s project apply. After each turn harness commits what
-  the agent left uncommitted, so the branch holds the work, and reports its
-  changes ("2 files changed, 10 insertions(+)"). Merge or cherry-pick the
-  branch to keep the work. `gc` removes the worktree with the run but keeps
-  the branch; delete it with `git branch -D harness/<run-id>`.
+  the agent left uncommitted (as your git user, without hooks or signing),
+  so the branch holds the work, and reports its changes ("2 files changed,
+  10 insertions(+)"); if that commit fails, the report says so and the work
+  stays in the worktree. Merge or cherry-pick the branch to keep the work.
+  `gc` removes the worktree with the run, committing anything left in it
+  first, and keeps the branch; it keeps a worktree whose work it cannot
+  commit. Delete a branch with `git branch -D harness/<run-id>`.
 - `compare` runs the same task on each profile at once, prints each answer,
   then a table of outcome, check, time, attempts, tokens, cost and changes.
   Without `--worktree` every agent works in the same folder at the same
@@ -339,8 +342,9 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   gets its own copy: `harness compare a,b --worktree --check "go test ./..." "fix the failing test"`
   shows which agent's fix passes, and at what cost.
 - `def check <name>` finds the CLI and prints its version; with `--profile`
-  it also runs one short live turn and checks that the answer and metrics
-  come out. Run it after a CLI updates.
+  it also runs one short live turn and checks that the answer is exactly
+  the one asked for and that every metric the definition declares comes
+  out (exit 2 otherwise). Run it after a CLI updates.
 - `--json` prints `{run, turn, profile, harness, model, kind, outcome, exit_code, attempts, session, duration_ms, metrics, output, error, hint, check, checked, branch, changes}`
   (an array for several tasks, and for `compare`).
 - Retries: a failed attempt whose outcome is in the profile's `retry` list

@@ -2,6 +2,9 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/arahe-dev/hertasdk"
@@ -27,17 +30,9 @@ func (h *Home) checkSpend(p *Profile) error {
 	if cfg.SpendLimitUSD == 0 && p.SpendLimit == 0 {
 		return nil
 	}
-	st, err := h.Stats(StatsFilter{Since: now().Add(-spendWindow)})
+	all, mine, err := h.spending(now().Add(-spendWindow), p.Name)
 	if err != nil {
 		return err
-	}
-	var all, mine float64
-	for _, s := range st {
-		c := s.Metrics["cost_usd"].Sum
-		all += c
-		if s.Profile == p.Name {
-			mine += c
-		}
 	}
 	switch {
 	case cfg.SpendLimitUSD > 0 && all >= float64(cfg.SpendLimitUSD):
@@ -48,4 +43,43 @@ func (h *Home) checkSpend(p *Profile) error {
 			"profile %s has spent $%.2f in the last 24 hours, and its spend_limit_usd is $%.2f", p.Name, mine, p.SpendLimit))
 	}
 	return nil
+}
+
+// spending sums the cost_usd of turns whose cost was recorded since then:
+// by every profile, and by profile. It counts by when each attempt spent,
+// not when its run was created, so a follow-up today on yesterday's run
+// counts, and a turn still running counts its finished attempts. Only run
+// folders changed since then are read.
+func (h *Home) spending(since time.Time, profile string) (all, mine float64, err error) {
+	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) {
+			continue
+		}
+		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
+			continue
+		}
+		run, err := h.LoadRun(e.Name())
+		if err != nil {
+			continue
+		}
+		for _, t := range run.Turns {
+			when := t.Spent
+			if when.IsZero() {
+				when = t.Ended // recorded before v2
+			}
+			if when.Before(since) {
+				continue
+			}
+			c := t.Metrics["cost_usd"]
+			all += c
+			if run.Profile == profile {
+				mine += c
+			}
+		}
+	}
+	return all, mine, nil
 }

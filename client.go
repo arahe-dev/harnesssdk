@@ -363,6 +363,7 @@ type DefCheck struct {
 	Live     *Result // the live turn, when a profile was given
 	Answered bool    // it answered as asked
 	Metrics  []string
+	Missing  []string // declared metrics the live turn did not report
 }
 
 // CheckDefinition checks that a definition's CLI is on PATH and reports
@@ -376,7 +377,7 @@ func (c *Client) CheckDefinition(ctx context.Context, name, cwd, profile string)
 	if dc == nil {
 		return nil, err
 	}
-	out := &DefCheck{Path: dc.Path, Version: dc.Version, Answered: dc.Answered, Metrics: dc.Metrics}
+	out := &DefCheck{Path: dc.Path, Version: dc.Version, Answered: dc.Answered, Metrics: dc.Metrics, Missing: dc.Missing}
 	if dc.Live != nil {
 		out.Live = resultOf(*dc.Live)
 	}

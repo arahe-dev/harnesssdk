@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -57,8 +58,11 @@ type TurnRecord struct {
 	Repeat   string    `json:"repeat,omitempty"`  // the fingerprint of the request as it executed
 	Counted  bool      `json:"counted,omitempty"` // the repeat guard has counted this turn
 	Changes  string    `json:"changes,omitempty"` // the worktree branch's changes after it
-	Check    string    `json:"check,omitempty"`   // the check command it ran
-	Checked  string    `json:"checked,omitempty"` // passed or failed
+	// Spent is when its metrics were last added to, by an attempt; the
+	// spending limits count them from then.
+	Spent   time.Time `json:"spent,omitzero"`
+	Check   string    `json:"check,omitempty"`   // the check command it ran
+	Checked string    `json:"checked,omitempty"` // passed or failed
 	// Metrics are the definition's metrics, summed over attempts.
 	Metrics map[string]float64 `json:"metrics,omitempty"`
 }
@@ -131,7 +135,7 @@ func (h *Home) stageRun(profile, harness, cwd, parent string) (*stagedRun, error
 			}
 			return nil, err
 		}
-		s := &stagedRun{Run: &Run{Format: formatVersion, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
+		s := &stagedRun{Run: &Run{Format: runFormat, ID: id, Profile: profile, Harness: harness, Cwd: cwd, Parent: parent,
 			Created: time.Now().UTC(), dir: stage}, home: h, final: final, lock: lock}
 		if err := createStage("record"); err != nil {
 			s.abort()
@@ -161,7 +165,7 @@ func (s *stagedRun) publish() error {
 
 // abort removes the prepared run, with the worktree and branch made for it.
 func (s *stagedRun) abort() {
-	removeWorktree(s.Run, true)
+	removeWorktree(context.Background(), s.Run, true)
 	os.RemoveAll(s.dir)
 	s.release()
 }
@@ -214,7 +218,7 @@ func (h *Home) LoadRun(id string) (*Run, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("run %s: %w", id, err)
 	}
-	if err := checkFormat("run "+id, r.Format); err != nil {
+	if err := checkFormatUpTo("run "+id, r.Format, runFormat); err != nil {
 		return nil, err
 	}
 	r.dir = dir
@@ -282,6 +286,7 @@ func executingAt(dir string) bool {
 
 // Save writes run.json.
 func (r *Run) Save() error {
+	r.Format = runFormat // a record this harness saves may hold what v1 would misread
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err

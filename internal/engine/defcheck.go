@@ -1,11 +1,12 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -23,6 +24,14 @@ type DefCheck struct {
 	Live       *Report
 	Answered   bool     // the live turn answered as asked
 	Metrics    []string // the metrics the live turn reported
+	Missing    []string // the metrics the definition declares that it did not
+}
+
+// answeredAsAsked: the answer is the requested reply, give or take
+// surrounding space, quotes and a final period; an answer that only
+// contains it (an echo of the prompt) is not.
+func answeredAsAsked(output string) bool {
+	return strings.Trim(strings.TrimSpace(output), "`'\". ") == checkReply
 }
 
 // checkReply is what the live turn is asked to answer.
@@ -43,20 +52,31 @@ func (r *Runner) CheckDefinition(ctx context.Context, name, cwd, profile string)
 	if len(args) == 0 {
 		args = []string{"--version"}
 	}
-	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	env, err := d.environ(Vars{})
 	if err != nil {
 		return c, err
 	}
-	cmd := exec.CommandContext(vctx, c.Path, args...)
-	cmd.Env = append(os.Environ(), env...)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		return c, fmt.Errorf("harness %s: %s %s: %w: %s", name, d.Command, strings.Join(args, " "), err, firstLine(out.String()))
+	// Run as agents are: its whole process tree ends at the deadline, and
+	// output goes to a file, so a child holding it open cannot stall us.
+	out, err := os.CreateTemp("", "harness-version-*")
+	if err != nil {
+		return c, err
 	}
-	c.Version = firstLine(out.String())
+	defer os.Remove(out.Name())
+	defer out.Close()
+	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	code, _, err := runProcess(vctx, procSpec{Argv: append([]string{c.Path}, args...), Env: env, Stdout: out, Stderr: out})
+	text, _ := readAll(out)
+	switch {
+	case err != nil:
+		return c, fmt.Errorf("harness %s: %s %s: %w", name, d.Command, strings.Join(args, " "), err)
+	case vctx.Err() != nil:
+		return c, fmt.Errorf("harness %s: %s %s did not finish within 30s", name, d.Command, strings.Join(args, " "))
+	case code != 0:
+		return c, fmt.Errorf("harness %s: %s %s exited with status %d: %s", name, d.Command, strings.Join(args, " "), code, firstLine(text))
+	}
+	c.Version = firstLine(text)
 	if profile == "" {
 		return c, nil
 	}
@@ -72,9 +92,33 @@ func (r *Runner) CheckDefinition(ctx context.Context, name, cwd, profile string)
 		return c, err
 	}
 	c.Live = &reps[0]
-	c.Answered = c.Live.Err == nil && strings.Contains(c.Live.Output, checkReply)
+	c.Answered = c.Live.Err == nil && answeredAsAsked(c.Live.Output)
 	for k := range c.Live.Metrics {
 		c.Metrics = append(c.Metrics, k)
 	}
+	// Every metric the definition declares should have come out: one that
+	// did not is a CLI that changed its output, and a spending limit that
+	// no longer sees its costs.
+	declared := maps.Keys(d.Output.Metrics)
+	if d.Output.Report != nil {
+		declared = func(yield func(string) bool) {
+			for k := range d.Output.Metrics {
+				if !yield(k) {
+					return
+				}
+			}
+			for k := range d.Output.Report.Metrics {
+				if !yield(k) {
+					return
+				}
+			}
+		}
+	}
+	for k := range declared {
+		if _, ok := c.Live.Metrics[k]; !ok {
+			c.Missing = append(c.Missing, k)
+		}
+	}
+	slices.Sort(c.Missing)
 	return c, nil
 }
