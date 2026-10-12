@@ -22,6 +22,9 @@ func TestUnreadableV1RecordRefuses(t *testing.T) {
 	for name, spoil := range map[string]func(){
 		"half written": func() { os.WriteFile(record, []byte(`{"format": 1, "turns": [`), 0o600) },
 		"not a file":   func() { os.Remove(record); os.Mkdir(record, 0o700) },
+		"from a later harness": func() {
+			os.WriteFile(record, []byte(`{"format": 3, "id": "x", "profile": "u", "turns": []}`), 0o600)
+		},
 	} {
 		spoil()
 		if _, err := f.r.Start(context.Background(), "u", []string{name}, f.cwd, TurnOptions{}, nil); err == nil || !strings.Contains(err.Error(), "cannot be read") {

@@ -242,7 +242,8 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 }
 
 // readV1 reads run id's record if it is a v1 one, or returns nil if it is
-// a later one or none.
+// a v2 one or none. A format this harness does not know is an error: what
+// such a record cost cannot be told.
 func (h *Home) readV1(id string) (*Run, error) {
 	data, err := readShared(filepath.Join(h.Dir, "runs", id, "run.json"))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -255,11 +256,11 @@ func (h *Home) readV1(id string) (*Run, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, err
 	}
-	if run.Format >= runFormat {
-		return nil, nil
-	}
 	if err := checkFormatUpTo("run "+id, run.Format, runFormat); err != nil {
 		return nil, err
+	}
+	if run.Format == runFormat {
+		return nil, nil
 	}
 	run.dir = filepath.Join(h.Dir, "runs", id)
 	return &run, nil
