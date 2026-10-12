@@ -203,21 +203,31 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 	}
 	// Turns recorded before v2 count by their run records, by when they
 	// ended, unless the ledger counted them; only run folders changed since
-	// then are read.
+	// then are read. A record that cannot be read may be such a record, so
+	// its cost is unknown; one that is gone was collected, its cost moved
+	// to the ledger (read again below).
 	entries, err := os.ReadDir(filepath.Join(h.Dir, "runs"))
 	if err != nil {
 		return s, err
 	}
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), stagePrefix) || !validName(e.Name()) {
 			continue
 		}
-		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
+		info, err := e.Info()
+		if errors.Is(err, fs.ErrNotExist) || err == nil && info.ModTime().Before(since) {
 			continue
 		}
-		run, err := h.LoadRun(e.Name())
-		if err != nil || run.Format >= runFormat {
+		var run *Run
+		if err == nil {
+			run, err = h.readV1(e.Name())
+		}
+		if err != nil {
+			unknown(true, fmt.Sprintf("run %s's record cannot be read, so what it cost cannot be told (%v)", e.Name(), err))
 			continue
+		}
+		if run == nil {
+			continue // not a v1 record, or none
 		}
 		for _, t := range run.Turns {
 			name := filepath.Base(v1SpendPath(h.Dir, run, t.N))
@@ -229,6 +239,30 @@ func (h *Home) spending(since time.Time, profile string) (s spent, err error) {
 		}
 	}
 	return s, h.readLedger(since, profile, seen, byRecord, add, unknown)
+}
+
+// readV1 reads run id's record if it is a v1 one, or returns nil if it is
+// a later one or none.
+func (h *Home) readV1(id string) (*Run, error) {
+	data, err := readShared(filepath.Join(h.Dir, "runs", id, "run.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var run Run
+	if err := json.Unmarshal(data, &run); err != nil {
+		return nil, err
+	}
+	if run.Format >= runFormat {
+		return nil, nil
+	}
+	if err := checkFormatUpTo("run "+id, run.Format, runFormat); err != nil {
+		return nil, err
+	}
+	run.dir = filepath.Join(h.Dir, "runs", id)
+	return &run, nil
 }
 
 // testHookSpending, when set, runs between spending's first reading of

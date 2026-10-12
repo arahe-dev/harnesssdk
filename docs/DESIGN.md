@@ -149,7 +149,9 @@ first moves their costs into the ledger (`<run>-<created>-<turn>-v1.json`,
 the same name each time for one run, and another for a later run with its
 id); a turn whose cost is there counts only there. Spending
 reads the ledger before the v1 records and again after them, so a cost
-moved while it reads is counted once, from wherever it was when read.
+moved while it reads is counted once, from wherever it was when read. A
+run record in the window that cannot be read may be a v1 one, so its cost
+is unknown; a folder whose record is gone was collected, its cost moved.
 Entries go once they are two windows old.
 
 ## The repeat guard

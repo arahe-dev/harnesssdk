@@ -180,6 +180,10 @@ moved v1 costs are named by their run's creation time too, so two v1 runs
 with one id keep both costs; and the search for submodules stops when its
 caller cancels.
 
+Its eleventh review found 1 medium issue, also fixed with a regression
+test: a run record that cannot be read may hold a v1 cost, so its cost is
+unknown and turns under a limit are refused.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
   from (the review agent's own long run hit it). An `error` selector can now
