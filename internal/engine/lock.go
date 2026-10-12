@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
@@ -20,13 +21,22 @@ func lockFile(path string) (unlock func(), err error) {
 
 // lockWaitOpen retries lockOpen until it succeeds or timeout passes.
 func lockWaitOpen(path string, timeout time.Duration) (*os.File, error) {
+	return lockWaitCtx(context.Background(), path, timeout)
+}
+
+// lockWaitCtx is lockWaitOpen that also gives up when ctx ends.
+func lockWaitCtx(ctx context.Context, path string, timeout time.Duration) (*os.File, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		f, err := lockOpen(path)
 		if err == nil || !errors.Is(err, errBusy) || time.Now().After(deadline) {
 			return f, err
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 }
 

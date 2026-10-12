@@ -72,7 +72,9 @@ events whose dotted paths equal the `where` values, the value at `field`, and
 default empty). A path may index arrays, and `-1` is the last element
 (`message.content.-1.text`). Lines that are not JSON are skipped. Any event
 matching the `error` selector (with a non-empty `field`, if one is given)
-marks the run failed. Example, for `opencode run --format json`:
+marks the run failed; with `"pick": "last"`, only the last event its
+`where` matches decides, so an error the CLI recovered from does not count
+(see Pi below). Example, for `opencode run --format json`:
 
 ```json
 "output": {
@@ -331,7 +333,8 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
   the agent left uncommitted (as your git user, without hooks or signing),
   so the branch holds the work, and reports its changes ("2 files changed,
   10 insertions(+)"); if that commit fails, the report says so and the work
-  stays in the worktree. Merge or cherry-pick the branch to keep the work.
+  stays in the worktree (`harness stop` also stops that commit), and the
+  next turn's commit takes it. Merge or cherry-pick the branch to keep the work.
   `gc` removes the worktree with the run, committing anything left in it
   first, and keeps the branch; it keeps a worktree whose work it cannot
   commit. Delete a branch with `git branch -D harness/<run-id>`.
@@ -387,6 +390,7 @@ the last part of the final message:
  "session": "mint",
  "output": {"format": "jsonl",
    "answer": {"where": {"type": "turn_end"}, "field": "message.content.-1.text"},
+   "error": {"where": {"type": "turn_end"}, "field": "message.errorMessage", "pick": "last"},
    "metrics": {
      "input_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.input+message.usage.cacheRead+message.usage.cacheWrite", "pick": "sum"},
      "cached_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.cacheRead", "pick": "sum"},
@@ -399,10 +403,13 @@ the last part of the final message:
 ```
 
 `--tools` keeps MCP tools; a read-only profile also needs `no_mcp: true`.
-The definition has no `error` selector on purpose: Pi recovers from errors
-within a run (a dropped connection on one model call), and exits non-zero
-when it cannot, so an error event would mark a run that recovered as
-failed.
+In JSON mode Pi exits 0 even when its last model call failed (its own
+`docs/cli-integration.md` says so), so the `error` selector reads the
+final `turn_end`: a model call that failed with nothing to recover leaves
+its `errorMessage` there. Pi retries a failed call within the run (a
+dropped connection, say), so the selector uses `"pick": "last"`: an error
+Pi recovered from is followed by a `turn_end` without one, and does not
+fail the run.
 Without `--mode json`, Pi prints only the answer (`"output": {"format": "text"}`),
 and reports no tokens or cost.
 

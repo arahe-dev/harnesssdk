@@ -273,8 +273,11 @@ func TestWorktreeNamesInUseAreLeftAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	tip, _ := git(context.Background(), "-C", repo, "rev-parse", "harness/261012-000000-eeee")
-	if _, err := f.r.Start(context.Background(), "writer", []string{"x"}, repo, TurnOptions{Worktree: true}, nil); err == nil || !strings.Contains(err.Error(), "in use") {
+	if _, err := f.r.Start(context.Background(), "writer", []string{"x"}, repo, TurnOptions{Worktree: true}, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("a branch in use was not refused: %v", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.home.Dir, "worktrees")); len(entries) != 0 {
+		t.Fatalf("the refused creation left %d worktree folders", len(entries))
 	}
 	if now, err := git(context.Background(), "-C", repo, "rev-parse", "harness/261012-000000-eeee"); err != nil || now != tip {
 		t.Fatalf("the existing branch was changed: %q %v", now, err)

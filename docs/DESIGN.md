@@ -45,10 +45,10 @@ through process ancestry). They skip the queues for budgets their ancestors
 hold, fail at once (`ErrWouldDeadlock`) when only their ancestors' release
 would let them in, and never wait for a `max_running` slot.
 
-`max_wait` bounds a wait, each lock wait included, and a grant that arrives
-after it is given back; a request whose wait ran out leaves at once (it
-withdraws from ledgers it can lock without waiting, and the others drop
-its dead ticket); `max_queue` refuses a request that would join a
+`max_wait` bounds a wait, each lock wait and shared-file retry included,
+and a grant that arrives after it is given back; a request whose wait ran
+out, or whose caller cancelled, leaves at once (it withdraws from ledgers it
+can lock without waiting, and the others drop its dead ticket); `max_queue` refuses a request that would join a
 queue already that long. Waiters re-read a ledger only when its file changes,
 or once a second to reclaim dead tickets.
 
@@ -66,7 +66,9 @@ or once a second to reclaim dead tickets.
 4. **Retries** are harness's own, because Herta 1.0-next has no backoff and
    cannot retry `throttled`: a retryable failure releases its ticket, waits
    the backoff (at least the CLI's `retry_after`), and is admitted again. A
-   turn backing off holds no budget, key or slot.
+   turn backing off holds no budget, key or slot. An attempt's cost is
+   recorded before its ticket is released; if that fails, the turn stays
+   admitted until its final save records the cost.
 5. **Finished**: the outcome is counted for the repeat guard before the last
    ticket is released (so the next identical turn sees it), a worktree's
    changes are committed, and the record is saved.
@@ -80,10 +82,18 @@ has published or removed it, and rechecks under that lock that the id is
 free (a creator publishes before it releases its lock). Creation locks are
 taken, and their files removed, only while holding `create.lock`, briefly, so
 a lock can never be split. `compare` validates every profile first and
-removes what it created if a later creation fails. A `--worktree` run gets its
-worktree and branch while staged, recorded in the staged run before git
-makes them, so an aborted creation, or `gc` finding a dead creator's
-staging folder, removes both.
+removes what it created if a later creation fails, marking each run
+`abandoned` first: an abandoned run never executes, and `gc` finishes a
+rollback that could not finish, whatever the run's age.
+
+A `--worktree` run gets its worktree and branch while staged. Each name is
+claimed by an operation that fails if the name is taken (`mkdir` of the
+folder, then `git branch`, a ref transaction) and recorded in the staged run
+once claimed, so an aborted creation, or `gc` finding a dead creator's
+staging folder, removes only what this creation made; a crash between a
+claim and its record leaves a name behind, never removes another's. A
+rollback deletes the branch only while it points at the commit it was made
+from (`git update-ref -d <ref> <base>`).
 
 ## The repeat guard
 

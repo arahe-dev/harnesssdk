@@ -37,6 +37,7 @@ type Turn struct {
 	repeat      string             // the request's fingerprint, for the repeat guard
 	retryAfter  time.Duration      // what the last failed attempt's CLI asked to wait
 	spendSaved  float64            // the cost_usd recorded in Spend so far
+	held        *Ticket            // admission kept until finish records the cost
 	changes     string             // the worktree branch's changes after the turn
 	check       string             // the check command run, if any
 	checked     string             // passed or failed
@@ -646,15 +647,20 @@ func (r *Runner) create(ctx context.Context, nr *newRuns) (runs []*Run, err erro
 }
 
 // removeRuns undoes runs that were created but never ran, with their
-// worktrees and branches. A run whose worktree cannot be removed is kept,
-// with the record of what was made, for gc to finish.
+// worktrees and branches. Each is marked abandoned first, so that it never
+// executes, and a rollback that cannot finish now (a worktree that cannot
+// be removed) is finished by gc, as a rollback.
 func removeRuns(runs []*Run) {
 	for _, run := range runs {
+		os.WriteFile(run.Path(abandonedFile), nil, 0o600)
 		if removeWorktree(context.Background(), run, true) == nil {
 			os.RemoveAll(run.Dir())
 		}
 	}
 }
+
+// abandonedFile, in a run's folder, marks a run whose creation was undone.
+const abandonedFile = "abandoned"
 
 // PrepareSend queues the next turn of a run, in the same harness session.
 // A run whose last turn has not finished refuses it as throttled.
@@ -801,6 +807,9 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(fmt.Errorf("run %s: another process is executing it: %w", id, err))
 	}
 	defer execLock.Close()
+	if _, err := os.Stat(run.Path(abandonedFile)); err == nil {
+		return fail(fmt.Errorf("run %s was abandoned while it was created", id))
+	}
 	start := time.Now()
 	run, err = r.home.updateRun(id, func(run *Run) error {
 		if n != len(run.Turns) || run.Turns[n-1].Outcome != "queued" {
@@ -825,14 +834,22 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	defer r.home.clearActive(run.ID)
 
 	res, t, err := r.execute(ctx, run, n, execLock)
+	if t != nil && t.held != nil {
+		defer t.held.Release() // once finish has recorded what the turn cost
+	}
 	if run.Worktree != "" && t != nil {
-		// The branch keeps the turn's work, whatever its outcome.
-		// Stopped by the caller or a shutdown like the turn; the work then
-		// stays in the worktree, which gc commits before removing.
-		cctx, cancel := context.WithCancel(ctx)
-		stopOnClose := context.AfterFunc(r.closingCtx, cancel)
+		// The branch keeps the turn's work, whatever its outcome. The
+		// commit stops with the caller, a shutdown, or a stop asked for
+		// while it runs (one asked for earlier stopped the agent, not
+		// this); the work then stays in the worktree, which the next
+		// turn's commit, or gc, commits.
+		cctx, cancel := r.bound(ctx)
+		stopPath := run.Path(fmt.Sprintf("stop-%d", n))
+		go watchStop(cctx, stopPath, fileStamp(stopPath), cancel)
+		if testHookFinalize != nil {
+			testHookFinalize(cctx)
+		}
 		changes, cerr := commitTurn(cctx, run, n)
-		stopOnClose()
 		cancel()
 		if cerr != nil {
 			t.logf("== harness warning: committing the worktree: %v", cerr)
@@ -872,7 +889,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File) (res *Result, t *Turn, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go watchStop(ctx, run.Path(fmt.Sprintf("stop-%d", n)), cancel)
+	go watchStop(ctx, run.Path(fmt.Sprintf("stop-%d", n)), "", cancel)
 
 	var req request
 	data, err := os.ReadFile(run.Path(fmt.Sprintf("turn-%d.request.json", n)))
@@ -949,6 +966,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	// backs off, a turn holds no budget, key or slot.
 	for {
 		var ticket *Ticket
+		var unrecorded error
 		if ticket, err = r.admit(ctx, t, claims, maxWait); err != nil {
 			return nil, t, err
 		}
@@ -972,8 +990,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			// counts this attempt for the next turn admitted, and for this
 			// one's own retries. A turn whose spending cannot be recorded
 			// is not retried.
-			if serr := r.saveMetrics(run.ID, n, t); serr != nil {
-				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
+			if unrecorded = r.saveMetrics(run.ID, n, t); unrecorded != nil {
+				t.logf("== harness warning: recording the attempt's metrics: %v", unrecorded)
 				executed = false
 			}
 		}
@@ -984,7 +1002,14 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			if !errors.Is(err, ErrRepeated) {
 				t.hint, t.noted = r.countTurn(run.ID, n, t.repeat, OutcomeName(err), now()), true
 			}
-			ticket.Release()
+			if unrecorded != nil {
+				// What the attempt cost is not on record: the turn stays
+				// admitted until finish records it, so no turn is admitted
+				// against a total that leaves it out.
+				t.held = ticket
+			} else {
+				ticket.Release()
+			}
 			return res, t, err
 		}
 		ticket.Release()
@@ -1049,11 +1074,23 @@ func (r *Runner) admit(ctx context.Context, t *Turn, claims []Claim, maxWait tim
 
 func turnID(run string, n int) string { return run + "/" + strconv.Itoa(n) }
 
+// testHookSaveMetrics and testHookFinalize, when set, run in saveMetrics
+// (an error fails it) and before a worktree turn's commit.
+var (
+	testHookSaveMetrics func() error
+	testHookFinalize    func(ctx context.Context)
+)
+
 // saveMetrics records the turn's metrics so far in its run record, with
 // what this attempt cost and when.
 func (r *Runner) saveMetrics(id string, n int, t *Turn) error {
 	if len(t.metrics) == 0 {
 		return nil
+	}
+	if testHookSaveMetrics != nil {
+		if err := testHookSaveMetrics(); err != nil {
+			return err
+		}
 	}
 	cost := finiteMetrics(t.metrics)["cost_usd"]
 	_, err := r.home.updateRun(id, func(run *Run) error {
@@ -1126,12 +1163,13 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 	return run, saveErr
 }
 
-// watchStop cancels when a stop file appears.
-func watchStop(ctx context.Context, path string, cancel context.CancelFunc) {
+// watchStop cancels when the stop file at path appears or, if it was
+// there already (stamp), is written again.
+func watchStop(ctx context.Context, path, stamp string, cancel context.CancelFunc) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if _, err := os.Stat(path); err == nil {
+		if s := fileStamp(path); s != "" && s != stamp {
 			cancel()
 			return
 		}
@@ -1147,11 +1185,25 @@ func watchStop(ctx context.Context, path string, cancel context.CancelFunc) {
 // run concurrently, admitted against the profile's budgets. started, if
 // set, is called with each run before any of them executes.
 func (r *Runner) Start(ctx context.Context, profile string, tasks []string, cwd string, o TurnOptions, started func(*Run)) ([]Report, error) {
-	runs, err := r.Prepare(profile, tasks, cwd, o)
+	nr, err := r.check(profile, tasks, cwd, o)
+	if err != nil {
+		return nil, err
+	}
+	r.home.AutoGC()
+	cctx, cancel := r.bound(ctx)
+	runs, err := r.create(cctx, nr)
+	cancel()
 	if err != nil {
 		return nil, err
 	}
 	return r.executeAll(ctx, runs, started), nil
+}
+
+// bound is ctx, also cancelled when the runner shuts down.
+func (r *Runner) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(r.closingCtx, cancel)
+	return ctx, func() { stop(); cancel() }
 }
 
 // Compare runs one task on each of several profiles side by side, so their
@@ -1173,9 +1225,11 @@ func (r *Runner) Compare(ctx context.Context, profiles []string, task, cwd strin
 		all = append(all, nr)
 	}
 	r.home.AutoGC()
+	cctx, cancel := r.bound(ctx)
+	defer cancel()
 	var runs []*Run
 	for _, nr := range all {
-		rs, err := r.create(ctx, nr)
+		rs, err := r.create(cctx, nr)
 		if err != nil {
 			removeRuns(runs) // all or nothing
 			return nil, err
@@ -1222,7 +1276,9 @@ func (r *Runner) Stop(id string) (int, error) {
 	if n == 0 || run.Turns[n-1].finished() {
 		return n, fmt.Errorf("run %s has no unfinished turn", id)
 	}
-	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), nil, 0o600)
+	// Written with content, so a stop asked for again (during the turn's
+	// final commit) changes the file even where an empty rewrite would not.
+	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
 }
 
 // Wait blocks until the run's last turn finishes or ctx ends, and reports

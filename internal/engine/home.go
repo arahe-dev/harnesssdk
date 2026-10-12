@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -267,6 +268,11 @@ func (h *Home) Remove(kind, name, projectDir string) error {
 // writeFileAtomic writes through a temporary file and a rename, so a
 // reader never sees half a file.
 func writeFileAtomic(path string, data []byte) error {
+	return writeFileAtomicCtx(context.Background(), path, data)
+}
+
+// writeFileAtomicCtx is writeFileAtomic that stops retrying when ctx ends.
+func writeFileAtomicCtx(ctx context.Context, path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
@@ -280,7 +286,7 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	if err := renameShared(tmp.Name(), path); err != nil {
+	if err := renameShared(ctx, tmp.Name(), path); err != nil {
 		os.Remove(tmp.Name())
 		return err
 	}

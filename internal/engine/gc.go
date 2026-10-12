@@ -40,12 +40,19 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 			}
 			continue
 		}
-		// Ids start with their creation time: a run clearly created after
-		// the cutoff was active after it, and is not read at all.
-		if created, ok := idTime(id); !e.IsDir() || !ok || !created.Add(-idSlack).Before(cutoff) {
+		if !e.IsDir() {
 			continue
 		}
-		size, err := h.collect(id, cutoff, dryRun)
+		// A run abandoned while it was created goes whatever its age: its
+		// rollback did not finish.
+		_, serr := os.Stat(filepath.Join(h.Dir, "runs", id, abandonedFile))
+		abandoned := serr == nil
+		// Ids start with their creation time: a run clearly created after
+		// the cutoff was active after it, and is not read at all.
+		if created, ok := idTime(id); !abandoned && (!ok || !created.Add(-idSlack).Before(cutoff)) {
+			continue
+		}
+		size, err := h.collect(id, cutoff, dryRun, abandoned)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
@@ -61,10 +68,11 @@ func (h *Home) GC(cutoff time.Time, dryRun bool) (GCReport, error) {
 }
 
 // collect removes one run if it is idle and was last active before cutoff,
-// and returns its size, or -1 if it is kept. It holds the run's execution
-// and state locks while it decides and removes, so the run cannot be sent a
-// turn or executed meanwhile.
-func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) {
+// or was abandoned, and returns its size, or -1 if it is kept. It holds the
+// run's execution and state locks while it decides and removes, so the run
+// cannot be sent a turn or executed meanwhile. An abandoned run is removed
+// as its creation's rollback would have: its branch too.
+func (h *Home) collect(id string, cutoff time.Time, dryRun, abandoned bool) (int64, error) {
 	dir := filepath.Join(h.Dir, "runs", id)
 	// Runs appear with their record (NewRun renames them into place), so
 	// a folder without one is what an interrupted removal leaves: removed
@@ -72,7 +80,7 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	// so it takes no locks, which would also make the folder look new.
 	if _, err := os.Stat(filepath.Join(dir, "run.json")); errors.Is(err, fs.ErrNotExist) {
 		fi, err := os.Stat(dir)
-		if err != nil || !fi.ModTime().Before(cutoff) {
+		if err != nil || !abandoned && !fi.ModTime().Before(cutoff) {
 			return -1, nil
 		}
 		size, _, err := dirSize(dir)
@@ -95,7 +103,7 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	// Under the locks, the record decides; one this harness cannot read is
 	// left alone, and so is a run still taking shape.
 	r, err := h.LoadRun(id)
-	if err != nil || !r.lastActive().Before(cutoff) || r.settling() {
+	if err != nil || !abandoned && (!r.lastActive().Before(cutoff) || r.settling()) {
 		release()
 		return -1, nil
 	}
@@ -106,7 +114,7 @@ func (h *Home) collect(id string, cutoff time.Time, dryRun bool) (int64, error) 
 	}
 	// The worktree goes first, its work committed to its branch, which
 	// stays; a worktree whose work cannot be kept keeps its run too.
-	if err := removeWorktree(context.Background(), r, false); err != nil {
+	if err := removeWorktree(context.Background(), r, abandoned); err != nil {
 		release()
 		return -1, fmt.Errorf("run %s: %w", id, err)
 	}

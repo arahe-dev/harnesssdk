@@ -70,7 +70,9 @@ type OutputRule struct {
 	// SessionField captures the session id from the document.
 	SessionField string `json:"session_field,omitempty"`
 	// Answer, Session and Error pick values out of a JSONL event stream.
-	// Answer is required for jsonl; any Error match marks the run failed.
+	// Answer is required for jsonl. Any Error match marks the run failed;
+	// with "pick": "last", only the last event Error's where matches
+	// decides, so an error the CLI recovered from does not count.
 	Answer  *Selector `json:"answer,omitempty"`
 	Session *Selector `json:"session,omitempty"`
 	Error   *Selector `json:"error,omitempty"`
@@ -414,6 +416,7 @@ func (d *Definition) extractEvents(stdout io.Reader) (extraction, error) {
 	var x extraction
 	o := d.Output
 	errs, sess, ans := newCollector(o.Error), newCollector(o.Session), newCollector(o.Answer)
+	errs.final = o.Error != nil && o.Error.Pick == "last"
 	metrics := newMetrics(o.Metrics)
 	cs := []*collector{errs, sess, ans}
 	for _, c := range metrics {
@@ -470,6 +473,7 @@ type collector struct {
 	metric  bool
 	matched int
 	vals    []string // every value for pick join; otherwise the chosen one
+	final   bool     // an error decided by the last match alone
 	num     float64  // a metric's value so far
 	found   bool     // a metric found a number
 	// literal holds Where values that can be found in a raw line before it
@@ -562,6 +566,14 @@ func (c *collector) add(ev any) {
 		return
 	}
 	v, ok := lookup(ev, c.s.Field)
+	if c.final {
+		// Each match replaces what came before, an empty one included.
+		c.vals = c.vals[:0]
+		if str := scalar(v); ok && str != "" {
+			c.vals = append(c.vals, str)
+		}
+		return
+	}
 	if !ok {
 		return
 	}

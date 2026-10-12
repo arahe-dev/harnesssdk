@@ -83,9 +83,32 @@ recorded is not retried; every ledger lock waits only what remains of
 that cannot finish keeps its staged record for gc to finish; git honors
 cancellation and shutdown.
 
+Its third review found 2 high and 5 medium issues, also fixed with
+regression tests:
+- Worktree names are claimed by operations that fail when a name is taken
+  (making the folder, then `git branch`), and recorded only once claimed,
+  so two data folders using one repository can never remove each other's
+  branch; a rollback deletes a branch only while it still points where it
+  was made.
+- Each commit gets a new private hooks folder (one in a fixed place could
+  be planted with hooks).
+- An attempt whose cost could not be recorded keeps its admission until the
+  turn's record holds it, so no turn is admitted against a total that
+  leaves it out.
+- Gate lock waits and shared-file retries stop when the wait ends, and a
+  pass that ends that way leaves at once.
+- A `compare` whose rollback cannot finish marks its runs abandoned: they
+  never execute, and `gc` finishes the rollback, whatever their age.
+- `Start` creates worktrees under its caller's context, and `harness stop`
+  also stops a turn's final commit.
+- The Pi example's `error` selector is back, reading only the final
+  `turn_end`: in JSON mode Pi exits 0 when its last model call failed.
+
 - **Pi definition fix.** v1.6's Pi example had an `error` selector that
   marked a run failed when any model call errored, even one Pi recovered
-  from; it is gone (the review agent's own long run hit it).
+  from (the review agent's own long run hit it). An `error` selector can now
+  use `"pick": "last"`: only the last event its `where` matches decides.
+  The Pi example uses it on `turn_end`.
 
 Not done: the Codex `workspace-write` sandbox (with the data folder writable
 and network on) could not be verified, because Codex's Windows sandbox fails

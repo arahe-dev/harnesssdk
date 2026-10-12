@@ -202,6 +202,10 @@ func (g *Gate) Acquire(ctx context.Context, claims []Claim, reject bool, label s
 			entered = true
 		}
 		switch {
+		case err != nil && ctx.Err() != nil:
+			// The wait ended during the pass: leave at once, as below.
+			expire()
+			return nil, ctx.Err()
 		case errors.Is(err, errBusy) && !reject:
 			// A ledger stayed locked by others all through this pass:
 			// contention is part of waiting, never a failure. The request
@@ -335,12 +339,12 @@ func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateSt
 		if d, ok := ctx.Deadline(); ok {
 			wait = max(0, min(wait, time.Until(d)))
 		}
-		lk, err := lockWaitOpen(filepath.Join(dir, "state.lock"), wait)
+		lk, err := lockWaitCtx(ctx, filepath.Join(dir, "state.lock"), wait)
 		if err != nil {
 			return fmt.Errorf("gate %s: %w", c.Name, err)
 		}
 		locks = append(locks, lk)
-		st, err := readGate(dir)
+		st, err := readGate(ctx, dir)
 		if err != nil {
 			return err
 		}
@@ -357,15 +361,15 @@ func (g *Gate) update(ctx context.Context, claims []Claim, change func([]*gateSt
 		if string(after) == string(before[i]) {
 			continue
 		}
-		if err := writeFileAtomic(filepath.Join(g.ledger(c.Name), "state.json"), append(after, '\n')); err != nil {
+		if err := writeFileAtomicCtx(ctx, filepath.Join(g.ledger(c.Name), "state.json"), append(after, '\n')); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func readGate(dir string) (*gateState, error) {
-	data, err := readShared(filepath.Join(dir, "state.json"))
+func readGate(ctx context.Context, dir string) (*gateState, error) {
+	data, err := readSharedCtx(ctx, filepath.Join(dir, "state.json"))
 	if errors.Is(err, fs.ErrNotExist) {
 		return &gateState{}, nil
 	}
@@ -471,7 +475,7 @@ func (h *Home) GateStatus() ([]GateInfo, error) {
 		}
 		// Read without the lock: ledgers are replaced whole, and status
 		// must not queue behind the waiters it reports on.
-		st, err := readGate(g.ledger(n))
+		st, err := readGate(context.Background(), g.ledger(n))
 		if err != nil {
 			return nil, err
 		}

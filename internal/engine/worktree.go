@@ -2,9 +2,10 @@ package engine
 
 import (
 	"context"
-
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,10 +75,12 @@ func or(s, alt string) string {
 }
 
 // addWorktree makes run's worktree from the repository holding run.Cwd.
-// It claims only names that are free: an existing branch or folder of that
-// name is never touched. What it is about to make is then recorded in the
-// staged run, so whoever finds the staged run, its own rollback or gc after
-// a crash, removes what git made, even if git failed half way.
+// Each name is claimed by an operation that fails when the name is taken
+// (making the folder, then git creating the branch), and recorded in the
+// staged run only once claimed, so whoever finds the staged run, its own
+// rollback or gc after a crash, removes only what this creation made. A
+// crash between a claim and its record leaves the name behind; nothing
+// someone else made is ever removed.
 func (h *Home) addWorktree(ctx context.Context, run *Run) error {
 	prefix, err := git(ctx, "-C", run.Cwd, "rev-parse", "--show-prefix")
 	if err != nil {
@@ -98,22 +101,25 @@ func (h *Home) addWorktree(ctx context.Context, run *Run) error {
 	}
 	defer unlock()
 	root, branch := filepath.Join(h.Dir, "worktrees", run.ID), "harness/"+run.ID
-	if _, err := os.Lstat(root); err == nil {
-		return fmt.Errorf("worktree folder %s is in use", root)
-	}
-	found, err := branchExists(ctx, []string{"-C", run.Cwd}, branch)
-	if err != nil {
+	if err := os.Mkdir(root, 0o755); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("worktree folder %s is in use", root)
+		}
 		return err
 	}
-	if found {
-		return fmt.Errorf("branch %s is in use", branch)
-	}
-	run.Worktree, run.Branch, run.Base = root, branch, base
+	run.Worktree, run.Base = root, base
 	run.Workdir = filepath.Join(root, filepath.FromSlash(prefix))
 	if err := run.Save(); err != nil {
 		return err
 	}
-	if _, err := git(ctx, "-C", run.Cwd, "worktree", "add", "-q", "-b", branch, root, base); err != nil {
+	if _, err := git(ctx, "-C", run.Cwd, "branch", "--no-track", branch, base); err != nil {
+		return fmt.Errorf("cannot make branch %s: %w", branch, err) // one of that name is not this run's
+	}
+	run.Branch = branch
+	if err := run.Save(); err != nil {
+		return err
+	}
+	if _, err := git(ctx, "-C", run.Cwd, "worktree", "add", "-q", root, branch); err != nil {
 		return err
 	}
 	// A folder git does not track (an empty or ignored one) is not in the
@@ -121,11 +127,10 @@ func (h *Home) addWorktree(ctx context.Context, run *Run) error {
 	return os.MkdirAll(run.Workdir, 0o755)
 }
 
-// branchExists reports whether the repository at has branch. A failure to
-// tell is an error, never "absent".
-func branchExists(ctx context.Context, at []string, branch string) (bool, error) {
-	out, err := git(ctx, append(at, "for-each-ref", "--format=%(refname)", "refs/heads/"+branch)...)
-	return out != "", err
+// branchTip is the commit branch points at in the repository at, or ""
+// if there is no such branch. A failure to tell is an error, never "absent".
+func branchTip(ctx context.Context, at []string, branch string) (string, error) {
+	return git(ctx, append(at, "for-each-ref", "--format=%(objectname)", "refs/heads/"+branch)...)
 }
 
 // repo is the git option that addresses run's repository from outside its
@@ -144,9 +149,10 @@ func repo(ctx context.Context, run *Run) ([]string, error) {
 
 // removeWorktree removes run's worktree.
 //
-// With drop, the run never ran: what git made for it goes, branch
-// included (addWorktree claimed only free names, so they are its own), and
-// what remains of a half-made worktree is deleted.
+// With drop, the run never ran: what was made for it goes (addWorktree
+// recorded only names it claimed), the remains of a half-made worktree
+// included, and its branch too while it still points where it was made: a
+// branch that moved holds someone's work, and is left alone.
 //
 // Without drop, the work is kept: what is uncommitted is committed to the
 // run's branch, and the worktree is removed only if its HEAD is still on
@@ -190,26 +196,19 @@ func removeWorktree(ctx context.Context, run *Run, drop bool) error {
 	if _, err := git(ctx, append(at, "worktree", "prune")...); err != nil {
 		return err
 	}
-	if drop {
-		found, err := branchExists(ctx, at, run.Branch)
+	if drop && run.Branch != "" {
+		tip, err := branchTip(ctx, at, run.Branch)
 		if err != nil {
 			return err
 		}
-		if found {
-			if _, err := git(ctx, append(at, "branch", "-q", "-D", run.Branch)...); err != nil {
+		if tip == run.Base {
+			// Deleted only if it still points there, as one change.
+			if _, err := git(ctx, append(at, "update-ref", "-d", "refs/heads/"+run.Branch, run.Base)...); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
-}
-
-// noHooks is an empty folder given to git as its hooks folder, so that the
-// commits harness makes run no hook at all.
-func noHooks() string {
-	dir := filepath.Join(os.TempDir(), "harness-no-hooks")
-	os.MkdirAll(dir, 0o700)
-	return dir
 }
 
 // commitWork commits what is uncommitted in run's worktree, if anything,
@@ -224,7 +223,14 @@ func commitWork(ctx context.Context, run *Run, message string) (bool, error) {
 	if _, err := git(ctx, "-C", run.Worktree, "add", "-A"); err != nil {
 		return false, err
 	}
-	args := []string{"-C", run.Worktree, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + noHooks()}
+	// git is given a hooks folder of its own, new and private, so that no
+	// hook runs, whatever the repository or anyone else put anywhere.
+	hooks, err := os.MkdirTemp("", "harness-no-hooks-")
+	if err != nil {
+		return false, err
+	}
+	defer os.RemoveAll(hooks)
+	args := []string{"-C", run.Worktree, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + hooks}
 	if email, _ := git(ctx, "-C", run.Worktree, "config", "user.email"); email == "" {
 		args = append(args, "-c", "user.name=harness", "-c", "user.email=harness@localhost")
 	}
