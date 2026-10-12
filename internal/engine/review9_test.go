@@ -70,7 +70,7 @@ func TestV1CostMovedDuringAScanCountsOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		s, err := h.spending(time.Now().Add(-spendWindow), "u")
+		s, err := h.spending(time.Now().Add(-spendWindow), "u", nil)
 		testHookSpending = nil
 		if err != nil || s.mine != 0.6 {
 			t.Fatalf("upgraded %v: spent %+v %v, want 0.6", upgrade, s, err)

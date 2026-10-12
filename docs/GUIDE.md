@@ -185,6 +185,7 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `check_timeout` | `10m` (default) | how long the check may run |
 | `worktree` | `true` | every new run works in a git worktree of its own (see Running) |
 | `spend_limit_usd` | `2.50` | refuse the profile's turns once they have cost that much in the last 24 hours, as the CLI reports it |
+| `spend_unknown` | `refuse` | what a cost harness could not record counts as for this profile's limits: `warn`, `refuse` or dollars (overrides config; see Machine limits) |
 | `description` | text | shown in `profile list` |
 
 Update single keys without rewriting: `harness profile set <name> thinking=xhigh`
@@ -287,10 +288,19 @@ and how it was found.
   fail as `throttled` until the window moves on. A profile's
   `spend_limit_usd` caps that profile alone. Turns already running finish,
   and a CLI that reports no cost (Codex) is not limited. What each attempt
-  cost is kept in `<home>/spend`. If harness could not write it there (its
-  process died mid-turn, or the folder could not be written), the cost is
-  unknown, and turns under a limit are refused, naming the entry, until it
-  is 24 hours old or you remove it.
+  cost is kept in `<home>/spend`.
+- `spend_unknown` (default `warn`): what a cost harness could not record
+  counts as. That happens when its process died mid-turn, or the folder
+  could not be written. A profile's `spend_unknown` overrides it for that
+  profile. You choose the method:
+  - `warn`: counts as $0, and the turn prints a `harness: hint:` that
+    says so, with the entry and how to change this;
+  - a number of dollars (`harness config set spend_unknown 1.50`): counts
+    as that much each;
+  - `refuse`: turns under a limit are refused, naming the entry, until it is
+    24 hours old or you remove it. Only with `refuse` does a turn under a
+    limit not run when its spending cannot be recorded, and stay admitted
+    while its cost cannot be written.
 
 ## Per-project profiles
 

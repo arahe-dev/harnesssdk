@@ -1,5 +1,46 @@
 # Changelog
 
+## v2.0.0-next.1 (2026-10-12)
+
+- **`spend_unknown`: you choose how a cost harness could not record counts.**
+  v2.0.0-next refused turns under a spending limit for 24 hours after such
+  a cost (an agent's harness process died mid-turn, or the ledger could not
+  be written), and nothing told the user how to get out of it. Now it is a
+  setting, `harness config set spend_unknown <warn|refuse|dollars>`, which a
+  profile can override with its own `spend_unknown`:
+  - `warn`, the default, counts the cost as $0, and the turn's
+    `harness: hint:` says so and how to change it;
+  - a number counts each such cost as that many dollars;
+  - `refuse` keeps the old behaviour.
+
+  The policy governs the ledger's strict paths too: only under `refuse`
+  does a turn under a limit not run when its spending cannot be recorded,
+  or stay admitted while its cost cannot be written. Refusals name the
+  setting.
+- `harness config set` takes a value per key (`spend_unknown` is not a
+  number); the Go API adds `Config.SpendUnknown` and
+  `Client.SetConfigValue`.
+- **Review.** The Pi review agent's first review found 5 medium issues, all
+  in what happens when the spending ledger cannot be written. They were
+  fixed in one change, against stated guarantees: every attempt's cost
+  counts once (its own if written, else as `spend_unknown` says); an
+  attempt's ledger handling follows the rule it was admitted by; an
+  unknown cost is always shown. Concretely:
+  - an attempt whose entry could not be made still has its cost written
+    once the ledger can be;
+  - a cost is given to its own attempt's entry, so a later entry never
+    counts it again;
+  - a retry counts its earlier attempts whose costs are not written;
+  - ledger failures under a limit put a hint on the turn.
+
+  Unreadable ledger or run folders now count as unknown instead of failing
+  the turn. Its second review found 3 medium issues, also fixed with
+  regression tests:
+  - an unreadable ledger folder counts as one unknown cost per check;
+  - a turn's own unwritten entries are left out of the ledger's reading,
+    so each counts once even when its file cannot be read either;
+  - they leave the window like any other entry.
+
 ## v2.0.0-next (2026-10-12)
 
 The v2 candidate: verified outcomes, isolated working copies, spending and

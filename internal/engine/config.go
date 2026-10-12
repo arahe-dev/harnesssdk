@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -100,10 +102,13 @@ type Config struct {
 	// SpendLimitUSD caps what turns on this machine cost over 24 hours, in
 	// whole dollars, as the CLIs report it; 0 means no limit.
 	SpendLimitUSD int `json:"spend_limit_usd"`
+	// SpendUnknown is how spending limits count a cost harness could not
+	// record: warn (the default), refuse, or dollars (see spend.go).
+	SpendUnknown string `json:"spend_unknown,omitempty"`
 }
 
 // ConfigKeys are the settable keys, in display order.
-var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse", "max_wait_minutes", "max_queue", "spend_limit_usd"}
+var ConfigKeys = []string{"max_depth", "max_running", "retention_days", "repeat_warn", "repeat_refuse", "max_wait_minutes", "max_queue", "spend_limit_usd", "spend_unknown"}
 
 // DefaultConfig is used for any key config.json does not set.
 func DefaultConfig() Config {
@@ -131,16 +136,35 @@ func (h *Home) Config() (Config, error) {
 	if c.MaxDepth < 0 || c.MaxRunning < 0 || c.RetentionDays < 0 || c.RepeatWarn < 0 || c.RepeatRefuse < 0 || c.MaxWaitMinutes < 0 || c.MaxQueue < 0 || c.SpendLimitUSD < 0 {
 		return c, errors.New("config.json: limits must be ≥ 0")
 	}
+	if _, err := parseUnknown(c.SpendUnknown); err != nil {
+		return c, fmt.Errorf("config.json: %w", err)
+	}
 	return c, nil
 }
 
-// SetConfig sets one key.
+// SetConfig sets one key to a number.
 func (h *Home) SetConfig(key string, value int) error {
+	return h.SetConfigValue(key, strconv.Itoa(value))
+}
+
+// SetConfigValue sets one key from its text: a whole number of at least
+// 0, or, for spend_unknown, warn, refuse or a number of dollars.
+func (h *Home) SetConfigValue(key, text string) error {
 	if !slices.Contains(ConfigKeys, key) {
 		return fmt.Errorf("unknown config key %q (%v)", key, ConfigKeys)
 	}
-	if value < 0 {
-		return fmt.Errorf("%s must be ≥ 0", key)
+	text = strings.TrimSpace(text)
+	value := 0
+	if key == "spend_unknown" {
+		if _, err := parseUnknown(text); err != nil {
+			return err
+		}
+	} else {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s must be a whole number, 0 or more", key)
+		}
+		value = n
 	}
 	lk, err := lockWaitOpen(filepath.Join(h.Dir, "config.lock"), 5*time.Second)
 	if err != nil {
@@ -168,6 +192,8 @@ func (h *Home) SetConfig(key string, value int) error {
 		c.MaxQueue = value
 	case "spend_limit_usd":
 		c.SpendLimitUSD = value
+	case "spend_unknown":
+		c.SpendUnknown = text
 	}
 	c.Format = configFormat
 	data, _ := json.MarshalIndent(c, "", "  ")

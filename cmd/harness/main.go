@@ -540,18 +540,15 @@ func (c *cli) config(args []string) error {
 		fmt.Fprintf(w, "max_wait_minutes\t%d\thow long a turn waits for its budgets, unless its profile sets max_wait (0: no limit)\n", cfg.MaxWaitMinutes)
 		fmt.Fprintf(w, "max_queue\t%d\tturns that may wait for one budget, key or slot (0: no limit)\n", cfg.MaxQueue)
 		fmt.Fprintf(w, "spend_limit_usd\t%d\tdollars all turns may spend in 24 hours, as the CLIs report it (0: no limit)\n", cfg.SpendLimitUSD)
+		fmt.Fprintf(w, "spend_unknown\t%s\twhat a cost harness could not record counts as: warn ($0, and a hint), refuse, or dollars\n", or(cfg.SpendUnknown, "warn"))
 		return w.Flush()
 	case args[0] == "set" && len(args) == 3:
-		n, err := strconv.Atoi(args[2])
-		if err != nil {
-			return usageErr("%s must be a whole number", args[1])
-		}
-		if err := c.home.SetConfig(args[1], n); err != nil {
+		if err := c.home.SetConfigValue(args[1], args[2]); err != nil {
 			return errUsage{err}
 		}
 		return nil
 	}
-	return usageErr("config takes no arguments, list, or set <key> <n>")
+	return usageErr("config takes no arguments, list, or set <key> <value>")
 }
 
 func (c *cli) gc(args []string) error {

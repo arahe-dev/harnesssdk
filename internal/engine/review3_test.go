@@ -84,7 +84,7 @@ func TestNoHooksFolderCannotBePlanted(t *testing.T) {
 func TestUnrecordedCostKeepsAdmission(t *testing.T) {
 	f := newFixture(t, map[string]int64{"b": 1})
 	usageDef(f) // $0.50 a turn
-	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4")
+	f.profile("u", "harness: fakeusage\neffect: pure\nbudget: b=1\nmode: usage\nspend_limit_usd: 0.4\nspend_unknown: refuse")
 	var closes atomic.Int32
 	testHookSpend = func(stage string) error {
 		if stage == "close" && closes.Add(1) <= 2 {
@@ -101,7 +101,7 @@ func TestUnrecordedCostKeepsAdmission(t *testing.T) {
 	if o := strings.Join(outcomes, " "); !strings.Contains(o, "success") || !strings.Contains(o, "throttled") {
 		t.Fatalf("both turns ran, or neither: %v", outcomes)
 	}
-	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u"); err != nil || s.mine != 0.5 {
+	if s, err := f.home.spending(time.Now().Add(-time.Hour), "u", nil); err != nil || s.mine != 0.5 {
 		t.Fatalf("spent %+v, %v", s, err)
 	}
 }

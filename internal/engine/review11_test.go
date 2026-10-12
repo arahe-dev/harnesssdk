@@ -16,7 +16,7 @@ import (
 func TestUnreadableV1RecordRefuses(t *testing.T) {
 	f := newFixture(t, nil)
 	usageDef(f)
-	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 0.5")
+	f.profile("u", "harness: fakeusage\neffect: pure\nmode: usage\nspend_limit_usd: 0.5\nspend_unknown: refuse")
 	ended := time.Now().Add(-2 * time.Hour)
 	record := filepath.Join(v1Run(t, f.home, ended.Format("060102-150405")+"-v1v1", "u", f.cwd, ended, 0.6), "run.json")
 	for name, spoil := range map[string]func(){

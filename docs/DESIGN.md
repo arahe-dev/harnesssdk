@@ -123,14 +123,24 @@ Spending limits count `spend/<run>-<turn>-<attempt>-<random>.json`, one
 entry per attempt, each written whole and only by its attempt's process
 (the random part keeps a run id used again, after its run is gone, from
 writing over the first run's entries). The entry is made, `running`, before
-the attempt runs; under a limit, an attempt whose entry cannot be made does
-not run. An entry is never removed because its cost could not be written,
-limit or not. Once the attempt is over, its cost
-is written into the entry before its ticket is released, so the next turn
-admitted counts it. A turn under a limit whose cost cannot be written stays
-admitted, trying again (1 s, doubling to 30 s), until it is written or the
-turn is stopped; a stopped one lets go of its execution lock before its
-ticket.
+the attempt runs. Once the attempt is over, the entry is given what the
+turn has cost since the last entry given a cost (from then on that cost is
+the entry's alone), and written before the ticket is released, so the next
+turn admitted counts it. An entry that cannot be written, at either step,
+stays with the turn and is written with its next write that succeeds; until
+then the turn's own checks (before a retry) count it as unknown, and other
+turns see its running entry, if that was written. An entry is never removed
+because its cost could not be written, limit or not.
+
+The rule for a turn's spending (whether a limit applies, and
+`spend_unknown`) is read once for each attempt, when its admission is
+checked, and the attempt's ledger handling follows that rule. With
+`refuse`, an attempt under a limit whose entry cannot be made does not run,
+and a turn whose cost cannot be written stays admitted, trying again (1 s,
+doubling to 30 s), until it is written or the turn is stopped; a stopped one
+lets go of its execution lock before its ticket. Otherwise the turn goes
+on, and its hint says that its cost could not be written and how it
+counts.
 
 Spending sums the entries in the window. A `running` entry counts nothing
 while its turn executes (its run's execution lock is held, its record says
@@ -140,10 +150,13 @@ that turn is over, a `running` entry's cost is unknown, and so is an entry
 that cannot be read, or that is not a valid entry (one naming its run and
 its creation time, turn, attempt, profile and time, and, once closed, a
 cost of zero or more dollars);
-files being written, `.tmp-*`, are not entries. An
-unknown cost refuses turns under any limit it falls under (the machine's,
-and its profile's) until it is out of the window, or someone removes it:
-spending limits fail closed. Turns recorded before v2 count by their run
+files being written, `.tmp-*`, are not entries. How an unknown cost
+counts is the user's choice, `spend_unknown`, in `config.json` or the
+profile of the turn being checked (the profile's wins), for every limit
+over that turn: `warn` (the default) counts it as $0 and puts a hint on the
+turn; a number counts it as that many dollars each; `refuse` refuses turns
+under a limit it falls under until it is out of the window, or its entry is
+removed. Turns recorded before v2 count by their run
 records until v2 saves the record, or `gc` removes it, either of which
 first moves their costs into the ledger (`<run>-<created>-<turn>-v1.json`,
 the same name each time for one run, and another for a later run with its
