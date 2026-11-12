@@ -22,6 +22,10 @@ Most requests are one of these:
   if it is missing (`harness def set <name> --file -`), then the profile
   (`harness profile set <name> --file -`, add `--project` for one repository),
   check it with `harness run <profile> --dry-run "test"`, then run it.
+- **Follow a running agent:** `harness status <run-id>` says where it is,
+  what it is doing and what it has changed; `harness events <run-id> --since <cursor> --wait 2m`
+  wakes on what it does next. `harness wait --timeout` prints the status
+  when it times out. Use these rather than reading the files it edits.
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
 - **Choose between agents:** `harness stats --kind <label>` shows each
   profile's success rate, time, tokens and cost so far; `harness compare a,b "task"`

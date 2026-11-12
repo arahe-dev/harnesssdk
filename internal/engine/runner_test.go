@@ -114,6 +114,22 @@ func fakeHarness(args []string) int {
 	case "sleep":
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		fmt.Println("slept")
+	case "progress":
+		// Streams JSONL events as it works, edits a file, then waits for
+		// its gate file (if any) before answering.
+		fmt.Println(`{"type":"tool_start","tool":"edit","args":{"path":"a.go"}}`)
+		fmt.Println(`{"type":"tool_start","tool":"bash","args":{"command":"go test ./..."}}`)
+		fmt.Println(`{"type":"message","role":"assistant","text":"fixing the race"}`)
+		os.WriteFile("touched.txt", []byte("edited by the agent\n"), 0o644)
+		if gate := opts["gate"]; gate != "" {
+			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+				if _, err := os.Stat(gate); err == nil {
+					break
+				}
+			}
+		}
+		fmt.Println(`{"type":"message","role":"assistant","text":"done"}`)
+		fmt.Printf(`{"type":"done","text":"answer: %s"}`+"\n", strings.TrimSpace(string(in)))
 	case "nested":
 		// Act as a harness command run by the agent; with strip=1, as one
 		// whose harness removed harness's environment variables.

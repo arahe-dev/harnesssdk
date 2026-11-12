@@ -417,6 +417,12 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		defer stdin.Close()
 	}
 
+	limit := "no timeout"
+	if t.Profile.Timeout > 0 {
+		limit = "timeout " + t.Profile.Timeout.String()
+	}
+	t.Run.note(Event{Turn: t.N, Attempt: t.attempts, Kind: EvAttempt, Name: v["model"], Text: limit})
+	tail := followProgress(t.Def, t.Run, stdoutPath, t.N, t.attempts)
 	code, warnings, runErr := runProcess(ctx, procSpec{
 		Argv: argv, Dir: t.Run.AgentDir(), Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
@@ -426,6 +432,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
 		},
 	})
+	tail.end()
 	t.exitCode = code
 	t.stderrTail = readTail(stderrPath, mark, 8<<10)
 	for _, w := range warnings {
@@ -533,6 +540,7 @@ func queue(run *Run, prompt string, req request) (int, error) {
 		return 0, err
 	}
 	run.Turns = append(run.Turns, TurnRecord{N: n, Queued: time.Now().UTC(), Outcome: "queued"})
+	run.note(Event{Turn: n, Kind: EvQueued, Text: firstLine(prompt)})
 	return n, nil
 }
 
@@ -771,6 +779,7 @@ func (r *Runner) reapLost(run *Run) bool {
 		return false
 	}
 	rec.Ended = time.Now().UTC()
+	run.note(Event{Turn: rec.N, Kind: EvLost, Name: rec.Outcome, Text: rec.Error})
 	return true // the caller counts it with countReaped, once this is saved
 }
 
@@ -867,6 +876,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(err)
 	}
 	rep.Run = run
+	run.note(Event{Turn: n, Kind: EvStarted})
 
 	if err := r.home.writeActive(activeMarker{Run: run.ID, Turn: n, PID: os.Getpid()}); err != nil {
 		return fail(err)
@@ -1079,6 +1089,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			}
 			res, err = op.Do(ctx, t)
 			if err == nil && check != "" {
+				run.note(Event{Turn: n, Attempt: t.attempts, Kind: EvCheck, Text: check})
 				err = r.runCheck(ctx, t, check, p.CheckTimeout)
 			}
 			// Written before the admission is released, so the next turn
@@ -1116,6 +1127,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		ticket.Release()
 		delay := backoffDelay(p.Backoff, t.attempts, t.retryAfter)
 		t.logf("== %s; retrying in %s (attempt %d of %d)", OutcomeName(err), delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts)
+		run.note(Event{Turn: n, Attempt: t.attempts, Kind: EvRetry, Name: OutcomeName(err),
+			Text: fmt.Sprintf("retrying in %s (attempt %d of %d): %v", delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts, err)})
 		select {
 		case <-ctx.Done():
 			return nil, t, ctx.Err()
@@ -1241,6 +1254,13 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 			rec.Check, rec.Checked, rec.Changes = t.check, t.checked, t.changes
 		}
+		// Noted before the record is saved, so whoever sees the turn
+		// finished finds its event too.
+		text := rec.Error
+		if text == "" && res != nil {
+			text = firstLine(res.Output)
+		}
+		run.note(Event{Turn: n, Attempt: rec.Attempts, Kind: EvFinished, Name: rec.Outcome, Text: text})
 		return nil // always save: the record must leave "running"
 	})
 	if uerr != nil {
@@ -1408,6 +1428,7 @@ func (r *Runner) Stop(id string) (int, error) {
 	if n == 0 || run.Turns[n-1].finished() {
 		return n, fmt.Errorf("run %s has no unfinished turn", id)
 	}
+	run.note(Event{Turn: n, Kind: EvStop, Text: "a stop was asked for"})
 	// Written with content, so a stop asked for again (during the turn's
 	// final commit) changes the file even where an empty rewrite would not.
 	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)

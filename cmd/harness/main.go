@@ -34,10 +34,12 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness compare <p1>,<p2>[,...] [prompt] run one task on several profiles side by side; --file --cwd --set --kind --check --worktree --json
   harness stats [--profile p] [--kind k]   how each profile's turns ended and what they cost; --days --json
   harness send <run-id> [prompt | -]       follow up in the same session; --file --set --check --json --dry-run --detach
-  harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running)
+  harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running, with its status)
+  harness status <run-id>                  where a run is, what its agent is doing and has changed; --json
+  harness events <run-id> [--since c]      a run's event log from a cursor; --wait 2m for the next ones; --json
   harness result <run-id>                  print a run's last turn without waiting
   harness stop <run-id>                    stop a run's turn
-  harness runs | show <run-id> | status    past runs; budgets and keys in use
+  harness runs | show <run-id> | status    past runs; budgets, keys and active runs
   harness profile set|show|list|rm         agents (Markdown with a header); --project for this project
   harness def set|show|list|rm|check       harness definitions (JSON); --project; check: CLI, version, --profile live turn
   harness trust [--approve]                review, then trust, this project's .harness files
@@ -148,7 +150,9 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 	case "show":
 		return 0, c.show(args)
 	case "status":
-		return 0, c.status()
+		return c.statusCmd(args)
+	case "events":
+		return c.events(args)
 	}
 	return harness.ExitUsage, usageErr("unknown command %q; see: harness help", cmd)
 }
@@ -862,10 +866,21 @@ func (c *cli) wait(args []string, now bool) (int, error) {
 	}
 	if !finished {
 		rep.Outcome = rep.Run.Turns[rep.Turn-1].Outcome
+		// Not done yet: say where it is and what it is doing, so the caller
+		// need not go and look.
+		st, serr := r.Status(context.Background(), pos[0])
 		if *asJSON {
-			c.report([]harness.Report{rep}, true, false)
+			var js *jsonStatus
+			if serr == nil {
+				j := statusJSON(st)
+				js = &j
+			}
+			c.reportStatus(rep, js)
 		} else {
 			fmt.Fprintf(c.stderr, "harness: %s turn %d is still %s; wait again with: harness wait %s\n", rep.Run.ID, rep.Turn, rep.Outcome, rep.Run.ID)
+			if serr == nil {
+				printStatus(c.stdout, st)
+			}
 		}
 		return harness.ExitRunning, nil
 	}
@@ -924,6 +939,30 @@ type jsonReport struct {
 	Checked    string             `json:"checked,omitempty"` // passed or failed
 	Branch     string             `json:"branch,omitempty"`  // a worktree run's branch
 	Changes    string             `json:"changes,omitempty"`
+	// Status is where an unfinished turn is, for wait --timeout.
+	Status *jsonStatus `json:"status,omitempty"`
+}
+
+func jsonOf(rep harness.Report) jsonReport {
+	j := jsonReport{Turn: rep.Turn, Outcome: rep.Outcome, ExitCode: harness.ExitCode(rep.Outcome), Attempts: rep.Attempts,
+		DurationMS: rep.Duration.Milliseconds(), Output: rep.Output, Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint,
+		Check: rep.Check, Checked: rep.Checked, Changes: rep.Changes}
+	if rep.Run != nil {
+		j.Run, j.Profile, j.Harness, j.Session, j.Kind = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session, rep.Run.Kind
+		j.Branch = rep.Run.Branch
+	}
+	if rep.Err != nil {
+		j.Error = rep.Err.Error()
+	}
+	return j
+}
+
+// reportStatus prints an unfinished turn as JSON, with its status.
+func (c *cli) reportStatus(rep harness.Report, st *jsonStatus) {
+	j := jsonOf(rep)
+	j.ExitCode, j.Status = harness.ExitRunning, st
+	data, _ := json.MarshalIndent(j, "", "  ")
+	fmt.Fprintln(c.stdout, string(data))
 }
 
 // report prints the answers and returns the most severe exit code.
@@ -934,17 +973,7 @@ func (c *cli) report(reps []harness.Report, asJSON, many bool) int {
 		ec := harness.ExitCode(rep.Outcome)
 		code = worse(code, ec)
 		if asJSON {
-			j := jsonReport{Turn: rep.Turn, Outcome: rep.Outcome, ExitCode: ec, Attempts: rep.Attempts,
-				DurationMS: rep.Duration.Milliseconds(), Output: rep.Output, Model: rep.Model, Metrics: rep.Metrics, Hint: rep.Hint,
-				Check: rep.Check, Checked: rep.Checked, Changes: rep.Changes}
-			if rep.Run != nil {
-				j.Run, j.Profile, j.Harness, j.Session, j.Kind = rep.Run.ID, rep.Run.Profile, rep.Run.Harness, rep.Run.Session, rep.Run.Kind
-				j.Branch = rep.Run.Branch
-			}
-			if rep.Err != nil {
-				j.Error = rep.Err.Error()
-			}
-			js = append(js, j)
+			js = append(js, jsonOf(rep))
 			continue
 		}
 		c.status1(rep)

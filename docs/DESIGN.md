@@ -22,6 +22,7 @@ the same name, which splits one lock into two.
 | `gate/live/<ticket>.live` | a gate ticket's owner is alive |
 | `runs/.new-<id>.lock` | a run being created; removed only under `create.lock` |
 | `create.lock` | taking and removing creation locks (never removed); waits for it end with the caller |
+| `runs/<id>/events.jsonl` | the run's event log (no lock: each event is one append) |
 | `spend/<run>-<turn>-<attempt>-<random>.json` | the spending ledger: one attempt's entry, replaced whole (no lock) |
 | `created/<creation>` | a committed creation (no lock; made once) |
 | `repeats.lock` | every repeat-guard record (never removed) |
@@ -73,6 +74,18 @@ or once a second to reclaim dead tickets.
 5. **Finished**: the outcome is counted for the repeat guard before the last
    ticket is released (so the next identical turn sees it), a worktree's
    changes are committed, and the record is saved.
+
+## The event log
+
+`runs/<id>/events.jsonl` is how callers follow a run. Each event is one
+`write` to the file opened for appending, so writers never interleave
+within a line: the process executing the turn (its lifecycle, and its
+agent's progress, read from the attempt's stdout as the CLI writes it),
+and the ones that queue a turn, ask it to stop, or record it as lost.
+Readers keep a byte offset as their cursor and take complete lines only.
+A turn's `finished` event is written before its record is saved, so whoever
+sees the turn finished finds its event. The log is advisory: an event that
+cannot be written is dropped, and no outcome, retry or limit depends on it.
 
 ## Creating runs
 

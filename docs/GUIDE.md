@@ -27,6 +27,10 @@ Read this guide, then use the commands below.
      prints a run id at once; the agent keeps working in the background.
      Collect it with `harness wait <run-id> --timeout 5m` (repeat while it
      exits 7) or check with `harness result <run-id>`.
+   - While it works, do not open its files to see how it is doing:
+     `harness status <run-id>` says where it is, what it is doing and what
+     it has changed, and `wait --timeout` prints the same when it times out.
+     See [Following a run](#following-a-run).
 7. Follow up in the same harness session: `harness send <run-id> "more"`
    (add `--detach` to run the turn in the background).
 
@@ -118,6 +122,31 @@ document (see the Hermes example).
 "output": {"format": "text", "report": {"session_field": "session_id",
   "metrics": {"input_tokens": {"field": "input_tokens+cache_read_tokens"}, "cost_usd": {"field": "estimated_cost_usd"}}}}
 ```
+
+### Progress
+
+`output.progress` lets callers follow an agent while it works. Each rule
+turns the CLI's JSONL events, read as they are written, into entries in the
+run's event log, which `harness status` and `harness events` show:
+
+```json
+"progress": [
+  {"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command"},
+  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}
+]
+```
+
+| `kind` | `field` is | `detail` |
+|---|---|---|
+| `tool` | the tool's name | the first of its `\|`-separated paths with a value (a file, a command) |
+| `file` | a changed file's path | |
+| `say` | what the agent said | |
+| `step` | optional text for a finished step (a model call) | as for tool |
+
+`where` is required, and an event whose `field` has no value is skipped.
+Progress needs `jsonl` output: with text or one JSON document, the CLI says
+nothing until it is done, and `status` follows the agent's files instead.
+See the examples at the end for each CLI's rules.
 
 ### Placeholders
 
@@ -327,6 +356,7 @@ harness send <run-id> [prompt words | -] [--file F]... [--set k=v]... [--check C
 harness def check <name> [--profile P]
 harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json]
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
+harness status <run-id> [--json]      harness events <run-id> [--since C] [--wait D] [--json]
 ```
 
 - The prompt is the words after the profile, or stdin with `-`. Each
@@ -387,6 +417,35 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
 
 A failed first turn keeps its session: `harness send` can continue it. A
 background turn whose worker died is reported as `uncertain` by `wait`.
+
+## Following a run
+
+Every run keeps an event log (`events.jsonl` in its folder). Read it,
+rather than the agent's files, to know how it is doing.
+
+- `harness status <run-id>` is the run's last turn now: its phase
+  (`queued`, `admitting` while it waits for its budgets, keys or a running
+  slot, `running`, `backing off` between attempts, `checking`, then its
+  outcome), its attempt and how long its timeout has left, when the agent
+  last wrote output, its tokens and cost so far, its latest tool calls and
+  messages, the files changed where it works, and the commands to run next.
+  For a `--worktree` run the changes are exactly its own (its branch since
+  it started); otherwise they are everything changed in its folder since
+  the last commit, by anyone.
+- `harness wait <run-id> --timeout 5m` prints the same when it times out
+  (exit 7), so each wait tells you something.
+- `harness events <run-id> [--since C]` prints the log from cursor `C`
+  (default: the start) and the next cursor on stderr. With `--wait 2m` it
+  waits for the next event, or for the turn to end, and exits 7 if nothing
+  happened. Lifecycle events are `queued`, `started`, `attempt`, `retry`,
+  `check`, `stop`, `finished` and `lost`; activity events (`tool`, `file`,
+  `say`, `step`) come from the definition's `output.progress` rules.
+- `--json` on each prints the same as JSON; the Go API has `Status`,
+  `Events` and `WaitEvents`.
+
+How much you see depends on the CLI: one that streams JSONL events, with
+progress rules, shows each tool call as it happens; one that prints only
+its answer shows its phase, time and changed files.
 
 ## Verified examples
 
@@ -525,6 +584,27 @@ points to check with `harness def check <name> --profile <p>` once they are:
 has `result`, `is_error`, `session_id` and a Claude-style `usage`; and
 **Kimi Code** `kimi -p {prompt}`, whose answer is all of stdout (it also has
 `--output-format stream-json`).
+
+### Progress rules for these CLIs
+
+Added to `output` in the definitions above. Their event names come from
+each CLI's JSON stream; they were not checked live, so watch the first run
+with `harness events` and adjust.
+
+- **Pi** (`--mode json`):
+  `[{"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command|args.pattern"},
+  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}]`
+- **Codex** (`--json`):
+  `[{"kind": "tool", "where": {"type": "item.started", "item.type": "command_execution"}, "field": "item.type", "detail": "item.command"},
+  {"kind": "file", "where": {"type": "item.completed", "item.type": "file_change"}, "field": "item.changes.0.path"},
+  {"kind": "say", "where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"}]`
+- **OpenCode** (`--format json`):
+  `[{"kind": "tool", "where": {"type": "tool_use"}, "field": "part.tool", "detail": "part.state.input.filePath|part.state.input.command|part.state.title"},
+  {"kind": "say", "where": {"type": "text"}, "field": "part.text"}]`
+- **Claude Code** with `--output-format json` prints one document at the
+  end, so it has no progress; `--output-format stream-json --verbose`
+  streams events, with its answer in the `result` event.
+- **Hermes** prints only its answer: no progress.
 
 ## Other commands
 

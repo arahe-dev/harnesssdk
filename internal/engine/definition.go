@@ -85,6 +85,10 @@ type OutputRule struct {
 	// writes to {report_file}, for a CLI that reports usage apart from its
 	// answer.
 	Report *ReportRule `json:"report,omitempty"`
+	// Progress rules report what the agent is doing while it works (its
+	// tool calls, file edits, messages), read from jsonl events as the CLI
+	// writes them, into the run's event log.
+	Progress []ProgressRule `json:"progress,omitempty"`
 }
 
 // ReportRule says what to read from the report file.
@@ -215,6 +219,14 @@ func (d *Definition) validate() error {
 		}
 		if o.Report.SessionField == "" && len(o.Report.Metrics) == 0 {
 			return errors.New("output.report needs session_field or metrics")
+		}
+	}
+	if len(o.Progress) > 0 && o.Format != "jsonl" {
+		return errors.New("progress needs jsonl output: it reads the CLI's events as they are written")
+	}
+	for i := range o.Progress {
+		if err := o.Progress[i].validate(); err != nil {
+			return fmt.Errorf("output.progress[%d]: %w", i, err)
 		}
 	}
 	for i := range d.Failures {

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased (v2.0.0-next.2)
+
+Agents that drive harness can see what their runs are doing, instead of
+reading the files they edit.
+
+- **Event log.** Every run keeps `runs/<id>/events.jsonl`: each turn's
+  lifecycle (`queued`, `started`, `attempt`, `retry`, `check`, `stop`,
+  `finished`, `lost`) and its agent's activity (`tool`, `file`, `say`,
+  `step`), read as the CLI streams it.
+- **`output.progress`** in a definition: rules that turn a JSONL CLI's
+  events into activity (its tool calls, file edits and messages). The
+  guide has starting rules for Pi, Codex and OpenCode.
+- **`harness status <run-id>`**: phase (queued, admitting, running,
+  backing off, checking, or the outcome), attempt and timeout left, time
+  since the agent's last output, tokens and cost so far (the running
+  attempt's too), latest activity, what it last said, files changed (a
+  worktree run's branch, or the folder), and the commands to run next.
+  `--json` prints it as JSON. `harness status` with no run is unchanged.
+- **`harness events <run-id> [--since C] [--wait D]`**: the log from a
+  cursor; `--wait` wakes on the next event or the turn's end (exit 7 if
+  nothing happened).
+- **`harness wait --timeout`** prints the run's status when it times out
+  (and `--json` adds a `status` object), instead of only "still running".
+- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`.
+
 ## v2.0.0-next.1 (2026-10-12)
 
 - **`spend_unknown`: you choose how a cost harness could not record counts.**
