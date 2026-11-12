@@ -22,6 +22,25 @@ Most requests are one of these:
   if it is missing (`harness def set <name> --file -`), then the profile
   (`harness profile set <name> --file -`, add `--project` for one repository),
   check it with `harness run <profile> --dry-run "test"`, then run it.
+- **Follow a running agent:** `harness status <run-id>` says where it is,
+  what it is doing and what it has changed; `harness events <run-id> --since <cursor> --wait 2m`
+  wakes on what it does next. `harness wait --timeout` prints the status
+  when it times out. Use these rather than reading the files it edits.
+- **Time and context:** `harness extend <run-id> 30m` gives a running turn
+  more time (an agent harness started can run `harness extend --self 30m`).
+  A turn stopped by its timeout or idle limit is parked: check it with
+  `harness status`, then `harness send`. If a hint says the context is
+  nearly full, `harness handover <run-id> --next "<task>"` continues in a
+  fresh session.
+- **Talk to a running agent:** when `wait` returns early with a question
+  (`attention: ... ask q-...`), answer it with `harness reply <run-id> "answer"`;
+  redirect an agent with `harness steer <run-id> "message"` (`--now` to stop
+  it and continue with the message at once).
+- **Work with other agents and people on this machine:** `harness join --as <me> --room <team>`,
+  then `harness start <profile> --as <me> "task"` so your runs report to you,
+  and loop on `harness inbox --as <me> --wait 5m` (it says how to answer each
+  item). `harness peers` shows who is here; `harness post <alias|run:id|room:name> "..."`
+  messages them; `harness claim <path> --as <me>` before editing shared files.
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
 - **Choose between agents:** `harness stats --kind <label>` shows each
   profile's success rate, time, tokens and cost so far; `harness compare a,b "task"`

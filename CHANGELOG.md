@@ -1,5 +1,94 @@
 # Changelog
 
+## v2.0.0-next.2 (2026-11-12)
+
+Agents that drive harness can see what their runs are doing, instead of
+reading the files they edit.
+
+- **Event log.** Every run keeps `runs/<id>/events.jsonl`: each turn's
+  lifecycle (`queued`, `started`, `attempt`, `retry`, `check`, `stop`,
+  `finished`, `lost`) and its agent's activity (`tool`, `file`, `say`,
+  `step`), read as the CLI streams it.
+- **`output.progress`** in a definition: rules that turn a JSONL CLI's
+  events into activity (its tool calls, file edits and messages). The
+  guide has starting rules for Pi, Codex and OpenCode.
+- **`harness status <run-id>`**: phase (queued, admitting, running,
+  backing off, checking, or the outcome), attempt and timeout left, time
+  since the agent's last output, tokens and cost so far (the running
+  attempt's too), latest activity, what it last said, files changed (a
+  worktree run's branch, or the folder), and the commands to run next.
+  `--json` prints it as JSON. `harness status` with no run is unchanged.
+- **`harness events <run-id> [--since C] [--wait D]`**: the log from a
+  cursor; `--wait` wakes on the next event or the turn's end (exit 7 if
+  nothing happened).
+- **`harness wait --timeout`** prints the run's status when it times out
+  (and `--json` adds a `status` object), instead of only "still running".
+- **Context.** Two metric names, `context_tokens` (the last model call's
+  prompt tokens) and `context_window`, hold the latest value instead of
+  adding up, and `status` shows `context: 61% (122k of 200k tokens)`. A
+  profile's `context_window` (`200k`, `1m`) gives the window for a CLI
+  that does not report it, and wins over one it does. A `*` in a selector
+  path stands for a key not known in advance (`modelUsage.*.contextWindow`).
+- **Claude Code over `stream-json`** in the guide, checked live on 2.1.322:
+  tool calls and messages as they happen, the answer, session resume,
+  tokens, cost, and context against the window Claude reports. It adds a
+  `{permission_mode}` group, without which print mode cannot edit files.
+  The guide adds progress and context rules for Pi and OpenCode, and says
+  why Codex's stream has no measure of context.
+- **Extendable timeouts.** The attempt clock is harness's now, not Herta's
+  (Herta's per-attempt deadline is fixed when the attempt begins): same
+  `timeout`, same `uncertain` outcome and retries, but
+  `harness extend <run-id> 30m`, or `harness extend --self 30m` from the
+  agent, moves a running turn's deadline and resets its idle clock.
+- **Idle limit.** A profile's `idle` (15m by default for a CLI that streams
+  events, none for one that prints only at the end; `idle: none` turns it
+  off) stops an agent that wrote nothing for that long. It is not retried.
+- **Parked turns.** A turn stopped by its timeout or idle limit keeps its
+  session, and its hint says to check it and continue with `send`.
+- **`timeout_soon`.** A deadline's last fifth, or three quarters of an idle
+  limit, is announced in the log once, and `harness wait` returns early on
+  it (exit 7, with the status and an `attention` list), so the caller can
+  extend in time.
+- **Handover.** A turn that ends with the agent's context past the
+  profile's `handover_at` (80% by default; `none` turns it off) says so in
+  its hint and in `status`. `harness handover <run-id> [--next task]` asks
+  the agent for handover notes in its session, then starts a new run of the
+  same profile and folder with them, in the background; the new run
+  records `from`.
+- **Talking with a run's agent.** The agent's system prompt says how to
+  reach whoever started it (`intercom: false` leaves that out). From
+  inside its run: `harness note` posts progress, `harness ask` posts a
+  question and waits for the answer (the idle clock does not count the
+  wait), `harness inbox` reads what was posted to it. The caller's `wait`
+  wakes on a question, `status` lists open ones, `harness reply` answers,
+  and `harness steer` posts a message; unread messages lead the next turn,
+  and `steer --now` stops the turn and continues with the message. Checked
+  live with a Claude Code agent asking through its shell.
+- **Many agents and people.** `harness join --as <alias>` (`--human` for
+  a person) gives an agent session or a person a mailbox; `--room` puts it
+  in a shared one. `harness post` messages an alias, a run or a room;
+  `harness ask --to` waits for anyone's answer and `harness reply --as`
+  gives it; runs started `--as` a party are its own. `harness inbox --as
+  <me> --wait` gathers, once each, its mailbox, its rooms, and its runs'
+  questions, warnings and ends. `harness claim` takes advisory leases on
+  paths (refusing, exit 5, an overlap with someone else's; ending with the
+  run, the party, or `--for`); `harness peers` shows who is here, and
+  `harness watch` follows it all live. No daemon: a party is present while
+  it uses harness.
+- **`bridge: pi-intercom`.** For a Pi agent with the pi-intercom
+  extension: messages steered or posted to the run reach it mid-turn
+  through pi-intercom's broker (and are not repeated at the next turn), and
+  what it sends back becomes notes and questions in the run's log. Built
+  against pi-intercom 0.18 (protocol 1) and tested with a broker speaking
+  it; not yet checked with Pi itself, and not on Windows.
+- **Claude Code definition:** an `{allowed_tools}` group, so an agent can be
+  allowed to run harness (`Bash(harness *)`) and nothing else.
+- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`,
+  `Client.Extend`, `Client.Handover`, `Client.Reply`, `Client.Steer`,
+  `Client.Join`, `Leave`, `Parties`, `Post`, `Ask`, `Answer`, `Inbox`,
+  `Claim`, `Release`, `Claims`; `Request.Owner`, `Run.Owner`, `Event.From`; `Status` has `ContextTokens`,
+  `ContextWindow`, `ContextUsed`, `Deadline` and `Idle`; `Run.From`.
+
 ## v2.0.0-next.1 (2026-10-12)
 
 - **`spend_unknown`: you choose how a cost harness could not record counts.**

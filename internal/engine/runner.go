@@ -29,9 +29,11 @@ type Turn struct {
 	Def     *Definition
 	Extra   Vars // per-invocation values (--set)
 
-	home        string     // the data folder, for {harness_home}
-	lineage     []string   // gate tickets held for this turn and its ancestors
-	inherit     []*os.File // locks the agent CLI inherits (Unix)
+	home        string        // the data folder, for {harness_home}
+	lineage     []string      // gate tickets held for this turn and its ancestors
+	inherit     []*os.File    // locks the agent CLI inherits (Unix)
+	idle        time.Duration // the idle limit of its attempts; 0 for none
+	system      string        // the system prompt: the profile's, with the intercom note
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
@@ -225,7 +227,9 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 // attempt per call; the retries, with backoff and throttled outcomes that
 // Herta 1.0-next cannot express yet, are harness's own (execute).
 func policyFor(p *Profile) hertasdk.Policy[*Turn] {
-	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
+	// No Herta timeout: the attempt's clock is harness's, so that it can be
+	// extended (clock.go).
+	return hertasdk.Policy[*Turn]{Effect: p.Effect, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
 }
 
 // retryable reports whether a failed attempt may be repeated: its outcome
@@ -341,7 +345,7 @@ func (t *Turn) vars() Vars {
 	}
 	v["prompt"] = t.Prompt
 	v["prompt_file"] = t.Run.Path(fmt.Sprintf("turn-%d.prompt.md", t.N))
-	if t.Profile.System != "" {
+	if t.system != "" {
 		v["system_file"] = t.Run.Path("system.md")
 	}
 	v["cwd"], v["run_id"], v["run_dir"] = t.Run.AgentDir(), t.Run.ID, t.Run.dir
@@ -404,9 +408,9 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	var stdin *os.File
 	if t.Def.Stdin != "none" {
 		input := v["prompt_file"]
-		if t.Def.Stdin == "system+prompt" && t.Profile.System != "" {
+		if t.Def.Stdin == "system+prompt" && t.system != "" {
 			input = t.Run.Path(fmt.Sprintf("turn-%d.input.md", t.N))
-			text := "<instructions>\n" + t.Profile.System + "\n</instructions>\n\n" + t.Prompt
+			text := "<instructions>\n" + t.system + "\n</instructions>\n\n" + t.Prompt
 			if err := os.WriteFile(input, []byte(text), 0o600); err != nil {
 				return nil, hertasdk.Fail(hertasdk.Permanent, err)
 			}
@@ -417,15 +421,36 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		defer stdin.Close()
 	}
 
-	code, warnings, runErr := runProcess(ctx, procSpec{
+	limit := "no timeout"
+	if t.Profile.Timeout > 0 {
+		limit = "timeout " + t.Profile.Timeout.String()
+	}
+	t.Run.note(Event{Turn: t.N, Attempt: t.attempts, Kind: EvAttempt, Name: v["model"], Text: limit})
+	tail := followProgress(t.Def, t.Run, stdoutPath, t.N, t.attempts)
+	actx, cancelAttempt := context.WithCancelCause(ctx)
+	defer cancelAttempt(nil)
+	stopClock := t.watchClock(actx, cancelAttempt, stdoutPath, stderrPath)
+	agentPID := make(chan int, 1)
+	stopBridge := func() {}
+	if t.Profile.Bridge == BridgePiIntercom {
+		stopBridge = startPiBridge(actx, t, agentPID)
+	}
+	code, warnings, runErr := runProcess(actx, procSpec{
 		Argv: argv, Dir: t.Run.AgentDir(), Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
 		OnStart: func(pid int) {
 			// Record this attempt's agent, so a nested run can find this
 			// turn even when its sibling turns share this process.
 			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
+			select {
+			case agentPID <- pid:
+			default:
+			}
 		},
 	})
+	stopBridge()
+	stopClock()
+	tail.end()
 	t.exitCode = code
 	t.stderrTail = readTail(stderrPath, mark, 8<<10)
 	for _, w := range warnings {
@@ -446,10 +471,20 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
 		}
-		t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
+		if gauge(k) {
+			t.metrics[k] = n
+		} else {
+			t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
+	}
+	if err := clockFailure(actx); err != nil {
+		if x.Session != "" {
+			t.lastSession = x.Session
+		}
+		return nil, err
 	}
 	answer, session := x.Answer, x.Session
 	if code == 0 && xerr == nil && !x.Failed {
@@ -507,6 +542,9 @@ type TurnOptions struct {
 	Check string
 	// Worktree runs each new run in a git worktree of its own.
 	Worktree bool
+	// Owner is the party starting new runs (--as), whose inbox follows
+	// them.
+	Owner string
 }
 
 // request is what a queued turn needs besides its prompt.
@@ -533,6 +571,7 @@ func queue(run *Run, prompt string, req request) (int, error) {
 		return 0, err
 	}
 	run.Turns = append(run.Turns, TurnRecord{N: n, Queued: time.Now().UTC(), Outcome: "queued"})
+	run.note(Event{Turn: n, Kind: EvQueued, Text: firstLine(prompt)})
 	return n, nil
 }
 
@@ -629,7 +668,7 @@ func (r *Runner) create(ctx context.Context, nr *newRuns, tx string) (staged []*
 		}
 		// The first turn is queued before the run is published, so a run
 		// never appears without it.
-		s.Depth, s.Kind = nr.depth, nr.o.Kind
+		s.Depth, s.Kind, s.Owner = nr.depth, nr.o.Kind, nr.o.Owner
 		if err = createStage("mark"); err == nil {
 			err = os.WriteFile(s.Path(creatingFile), []byte(tx+"\n"), 0o600)
 		}
@@ -744,7 +783,8 @@ func (r *Runner) PrepareSend(id, prompt string, o TurnOptions) (int, error) {
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: o.Extra, Check: o.Check, Repeat: fp, Caller: "send:" + id})
+		// What was posted to the agent and it has not read leads the turn.
+		n, err = queue(run, withUnread(run, len(run.Turns)+1, prompt), request{Resume: true, Extra: o.Extra, Check: o.Check, Repeat: fp, Caller: "send:" + id})
 		return err
 	})
 	return n, err
@@ -771,6 +811,7 @@ func (r *Runner) reapLost(run *Run) bool {
 		return false
 	}
 	rec.Ended = time.Now().UTC()
+	run.note(Event{Turn: rec.N, Kind: EvLost, Name: rec.Outcome, Text: rec.Error})
 	return true // the caller counts it with countReaped, once this is saved
 }
 
@@ -867,6 +908,7 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 		return fail(err)
 	}
 	rep.Run = run
+	run.note(Event{Turn: n, Kind: EvStarted})
 
 	if err := r.home.writeActive(activeMarker{Run: run.ID, Turn: n, PID: os.Getpid()}); err != nil {
 		return fail(err)
@@ -939,6 +981,11 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	if t != nil && len(t.spendHints) > 0 {
 		rep.Hint = strings.TrimPrefix(rep.Hint+"; "+strings.Join(t.spendHints, "; "), "; ")
 	}
+	for _, h := range []string{parkedHint(run, err), handoverHint(run, t)} {
+		if h != "" {
+			rep.Hint = strings.TrimPrefix(rep.Hint+"; "+h, "; ")
+		}
+	}
 	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
 	if run != nil {
 		rep.Run = run
@@ -986,12 +1033,14 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if d.Name != run.Harness {
 		return nil, nil, fmt.Errorf("run %s was started on harness %s, but profile %s now uses %s", run.ID, run.Harness, p.Name, d.Name)
 	}
-	if p.System != "" {
-		if err := os.WriteFile(run.Path("system.md"), []byte(p.System+"\n"), 0o600); err != nil {
+	system := systemFor(p, run)
+	if system != "" {
+		if err := os.WriteFile(run.Path("system.md"), []byte(system+"\n"), 0o600); err != nil {
 			return nil, nil, err
 		}
 	}
-	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat,
+		idle: idleFor(p, d), system: system}
 	// The repeat guard follows what runs: the profile and definition as
 	// loaded now, which may have been edited since the turn was queued.
 	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
@@ -1079,6 +1128,7 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			}
 			res, err = op.Do(ctx, t)
 			if err == nil && check != "" {
+				run.note(Event{Turn: n, Attempt: t.attempts, Kind: EvCheck, Text: check})
 				err = r.runCheck(ctx, t, check, p.CheckTimeout)
 			}
 			// Written before the admission is released, so the next turn
@@ -1097,7 +1147,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
 			}
 		}
-		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
+		// A stuck agent is parked, not started over (clock.go).
+		again := executed && retryable(p, err) && !errors.Is(err, ErrIdle) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
 		if !again {
 			// Counted while the turn still holds its budget, before a
 			// waiting turn of the same request is admitted and checks it.
@@ -1116,6 +1167,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 		ticket.Release()
 		delay := backoffDelay(p.Backoff, t.attempts, t.retryAfter)
 		t.logf("== %s; retrying in %s (attempt %d of %d)", OutcomeName(err), delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts)
+		run.note(Event{Turn: n, Attempt: t.attempts, Kind: EvRetry, Name: OutcomeName(err),
+			Text: fmt.Sprintf("retrying in %s (attempt %d of %d): %v", delay.Round(time.Second), t.attempts+1, p.Retry.MaxAttempts, err)})
 		select {
 		case <-ctx.Done():
 			return nil, t, ctx.Err()
@@ -1241,6 +1294,13 @@ func (r *Runner) finish(id string, n int, t *Turn, res *Result, err error, hint 
 			rec.Metrics, rec.Model = finiteMetrics(t.metrics), t.vars()["model"]
 			rec.Check, rec.Checked, rec.Changes = t.check, t.checked, t.changes
 		}
+		// Noted before the record is saved, so whoever sees the turn
+		// finished finds its event too.
+		text := rec.Error
+		if text == "" && res != nil {
+			text = firstLine(res.Output)
+		}
+		run.note(Event{Turn: n, Attempt: rec.Attempts, Kind: EvFinished, Name: rec.Outcome, Text: text})
 		return nil // always save: the record must leave "running"
 	})
 	if uerr != nil {
@@ -1408,6 +1468,7 @@ func (r *Runner) Stop(id string) (int, error) {
 	if n == 0 || run.Turns[n-1].finished() {
 		return n, fmt.Errorf("run %s has no unfinished turn", id)
 	}
+	run.note(Event{Turn: n, Kind: EvStop, Text: "a stop was asked for"})
 	// Written with content, so a stop asked for again (during the turn's
 	// final commit) changes the file even where an empty rewrite would not.
 	return n, os.WriteFile(run.Path(fmt.Sprintf("stop-%d", n)), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
@@ -1525,7 +1586,7 @@ func (r *Runner) DryRun(profile, prompt, cwd string, extra Vars) (*Plan, error) 
 		return nil, err
 	}
 	run := &Run{ID: "<run-id>", Cwd: cwd, dir: "<run-dir>"}
-	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
+	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra, home: r.home.Dir, system: systemFor(p, run)})
 }
 
 // DryRunSend renders the command a follow-up turn of a run would execute.
@@ -1538,7 +1599,7 @@ func (r *Runner) DryRunSend(id, prompt string, extra Vars) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
+	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra, home: r.home.Dir, system: systemFor(p, run)})
 }
 
 func plan(t *Turn) (*Plan, error) {

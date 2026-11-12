@@ -10,12 +10,13 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v2.0.0-next.1**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
+> **Status: v2.0.0-next.2**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
 > v1.7.0 is the stable v1). Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35, Codex 0.162.1 and Hermes Agent 0.20.5, including a Codex agent that starts a Pi
-> agent through harness. The test suite passes in CI on Ubuntu and Windows; no
-> real harness CLI has been run on Linux or macOS yet. See
-> [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
+> agent through harness, and on Linux with Claude Code 2.1.322 (streaming
+> events, questions between agents and people, handover). The test suite
+> passes in CI on Ubuntu and Windows; no real harness CLI has been run on
+> macOS yet. See [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
 
 ## One layer, nothing hardcoded
 
@@ -25,11 +26,13 @@ prompts and context. The child runs in its own harness's native one-shot mode
   an agent built on it is a Markdown **profile**. Agents create both by
   running `harness` commands, after reading the CLI's own `--help`.
 - **HertaSDK owns the execution contract.** Each profile is a Herta operation
-  with a declared effect, retry table and per-attempt timeout, checked when the
-  profile is saved: a profile that could replay a half-finished file-editing
-  run is rejected before it ever runs. Budgets and serialize keys are
-  arbitrated once, across every harness process on the machine, with Herta's
-  budget rules.
+  with a declared effect and retry table, checked when the profile is saved:
+  a profile that could replay a half-finished file-editing run is rejected
+  before it ever runs. Budgets and serialize keys are arbitrated once, across
+  every harness process on the machine, with Herta's budget rules. Where Herta
+  cannot yet express something an agent needs (backoff, retrying throttled
+  turns, a deadline that can be extended), harness does it beside Herta,
+  under the same rules.
 
 ## Example: a Pi GPT-6.1 Sol reviewer
 
@@ -68,7 +71,7 @@ missing tests. Rank findings by severity with file:line. No style nits.
 EOF
 git diff main > /tmp/change.diff
 harness start review "Review this change." --file /tmp/change.diff   # prints a run id
-harness wait <run-id> --timeout 5m                                   # exit 7: still running
+harness wait <run-id> --timeout 5m                                   # exit 7: still running, and what it is doing
 harness send <run-id> "Which finding would you fix first, and how?"
 ```
 
@@ -110,7 +113,7 @@ func main() {
 }
 ```
 
-`Run`, `Start`, `Send`, `SendStart`, `Wait`, `Result`, `Stop`, `Runs`,
+`Run`, `Start`, `Send`, `SendStart`, `Wait`, `Result`, `Stop`, `Status`, `Events`, `WaitEvents`, `Runs`,
 `Compare`, `Stats`, `SetDefinition`, `SetProfile`, `SetBudget`, `Config`,
 `SetConfig`, `GC` and `CheckDefinition` mirror the commands; import it as
 `github.com/arahe-dev/harnesssdk/v2`. v2.0.0-next is a pre-release: its API
@@ -131,6 +134,11 @@ rather than misread it, and reads files from earlier releases as they are.
 | **Checks and worktrees** | A profile's `check` (or `--check`) is a command, such as `go test ./...`, that must pass in the agent's folder for the turn to succeed, so success means the work is right. `--worktree` gives a run its own git worktree and branch, so agents that edit files run side by side and `compare` can set them against each other. |
 | **Metrics** (`output.metrics` in a definition) | Numbers read from the CLI's own output with every turn: tokens, cost, model calls, tool calls. `harness stats` sums them up per profile and model (and per `--kind` of task) with success rates and times; `harness compare a,b "task"` runs one task on several profiles side by side. The guide's section on choosing a harness and model turns a 2026 study of harness design into starting points to check this way. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
+| **Time and context** | A profile's `timeout` is per attempt and can be extended while it runs, by the caller or the agent itself (`harness extend <run-id> 30m`, `harness extend --self 30m`); `timeout_soon` warns first and wakes a waiting `wait`. An agent whose CLI streams events is stopped after `idle` (15m by default) without output. Either way the turn is **parked**: its session is kept, and a stuck agent is not started over. When a turn ends with the agent's context past `handover_at` (80%), its hint says so, and `harness handover <run-id>` continues the work in a fresh session from the agent's own handover notes. |
+| **Talking with agents** | A run's agent is told, in its system prompt, how to reach whoever started it: `harness note` posts progress, `harness ask` asks and waits for the answer (and `wait` wakes on it; `harness reply` answers), `harness inbox` reads what was posted to it with `harness steer`. What it has not read leads its next turn; `steer --now` stops it and continues the session with the message. All of it is in the run's event log. |
+| **Many agents and people** | Agents in different harnesses, and people, `harness join --as <alias>` and get a mailbox; rooms (`room:<name>`) are shared ones. `harness inbox --as <me> --wait` gathers, once each, what others posted to you or your rooms and what your runs (started `--as` you) need from you. `harness ask --to` waits for an answer from anyone; `harness claim` says, advisorily, what you are about to edit; `harness peers` shows who is here; `harness watch` follows it all live for a person. No daemon: presence is using harness. |
+| **Bridges** | `bridge: pi-intercom` carries messages to a Pi agent mid-turn through pi-intercom, and its intercom messages back into the run's log. |
+| **Events and status** (`runs/<id>/events.jsonl`) | How a caller follows a run while it works, without reading the files its agent edits. The log records each turn's lifecycle (queued, admitted, attempts, retries, check, finished) and, through a definition's `output.progress` rules, the agent's tool calls and messages as the CLI streams them. `harness status <run-id>` sums it up with how full the agent's context is (`context_tokens` against `context_window`), the files changed and what to run next; `harness events --since <cursor> --wait 2m` wakes on what happens next; `wait --timeout` prints the status instead of nothing. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,
 4 transient, 5 throttled, 6 uncertain, 7 still running, 130 cancelled (2 for
@@ -140,8 +148,12 @@ Windows, falling back to a parent-pid walk; a process group on Unix) and is
 
 ## Limits
 
-- **No real harness CLI has run on Linux or macOS yet.** The full test suite,
-  including process-group kill and SIGTERM handling, passes in CI on Ubuntu.
+- **No real harness CLI has run on macOS yet**, and on Linux only Claude
+  Code. The full test suite, including process-group kill and SIGTERM
+  handling, passes in CI on Ubuntu.
+- **The pi-intercom bridge** is tested against a broker speaking
+  pi-intercom 0.18's protocol, not yet against Pi itself, and does not
+  support Windows yet.
 - **Budgets are per machine**, not across machines: HertaSDK, and harness on
   top of it, stay local by design.
 - **Pi on some networks** ends long runs with `fetch failed`; the turn is

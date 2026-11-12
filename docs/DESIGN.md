@@ -22,6 +22,13 @@ the same name, which splits one lock into two.
 | `gate/live/<ticket>.live` | a gate ticket's owner is alive |
 | `runs/.new-<id>.lock` | a run being created; removed only under `create.lock` |
 | `create.lock` | taking and removing creation locks (never removed); waits for it end with the caller |
+| `runs/<id>/extend-<turn>` | how far `harness extend` moved the turn's deadline (no lock: replaced whole, under the state lock) |
+| `runs/<id>/asking.lock` | an agent of the run is waiting in `harness ask`; the idle clock counts it as activity |
+| `runs/<id>/inbox.cursor` | how far the run's agent has read the messages posted to it (replaced whole) |
+| `parties/<alias>.lock` | read-modify-write of `parties/<alias>.json` (never removed) |
+| `parties/<alias>.jsonl`, `rooms/<name>.jsonl` | mailboxes: event logs like a run's (no lock: one append each) |
+| `claims.lock` | `claims.json`, the advisory claims (never removed) |
+| `runs/<id>/events.jsonl` | the run's event log (no lock: each event is one append) |
 | `spend/<run>-<turn>-<attempt>-<random>.json` | the spending ledger: one attempt's entry, replaced whole (no lock) |
 | `created/<creation>` | a committed creation (no lock; made once) |
 | `repeats.lock` | every repeat-guard record (never removed) |
@@ -63,8 +70,13 @@ or once a second to reclaim dead tickets.
    worker holds `exec.lock` for the whole turn.
 3. **Each attempt** is admitted at the gate on its own, re-checks the repeat
    guard and spending limits, runs the CLI through Herta (one attempt: its
-   effect checks, timeout as `uncertain`, classification), then, if it
-   answered, the check.
+   effect checks and classification), then, if it answered, the check. The
+   attempt's clock is harness's (`clock.go`): Herta's timeout is a deadline
+   fixed when the attempt begins, and `harness extend` must be able to move
+   it. A watch reads `runs/<id>/extend-<turn>` (replaced whole, no lock) and
+   the output files' times, and cancels the attempt past its deadline, or
+   after `idle` with no output; either is `uncertain`, as Herta's timeout
+   was. An attempt the idle limit stopped is never retried.
 4. **Retries** are harness's own, because Herta 1.0-next has no backoff and
    cannot retry `throttled`: a retryable failure releases its ticket, waits
    the backoff (at least the CLI's `retry_after`), and is admitted again. A
@@ -73,6 +85,60 @@ or once a second to reclaim dead tickets.
 5. **Finished**: the outcome is counted for the repeat guard before the last
    ticket is released (so the next identical turn sees it), a worktree's
    changes are committed, and the record is saved.
+
+## The event log
+
+`runs/<id>/events.jsonl` is how callers follow a run. Each event is one
+`write` to the file opened for appending, so writers never interleave
+within a line: the process executing the turn (its lifecycle, and its
+agent's progress, read from the attempt's stdout as the CLI writes it),
+and the ones that queue a turn, ask it to stop, or record it as lost.
+Readers keep a byte offset as their cursor and take complete lines only.
+A turn's `finished` event is written before its record is saved, so whoever
+sees the turn finished finds its event. The log is advisory: an event that
+cannot be written is dropped, and no outcome, retry or limit depends on it.
+
+## The intercom
+
+A run's event log is also its mailbox. The agent's `note` and `ask`, the
+caller's `reply` and `steer`, are events in it, so they share its
+guarantees: one append each, read by cursor. An ask is open until a
+`reply` or `expired` event names it; `reply` refuses an ask that is not
+open, and the asking process, which watches the log from where it asked,
+takes the first reply. Messages are read once: `inbox` moves
+`inbox.cursor`, and a follow-up turn, queued under the state lock, takes
+what is still unread into its prompt and moves the cursor, logging a
+`delivery` event.
+
+## Parties, rooms and claims
+
+A party is a record (`parties/<alias>.json`: kind, folder, rooms, when
+last seen, and its read cursors) and a mailbox. Every command run `--as`
+it updates it under its lock, which is its presence; there is no process
+to hold a session open. Its inbox reads its mailbox, its rooms and the logs
+of the runs it owns from its cursors, and saves them once read, so each
+thing reaches it once; a room it joins is read from then on.
+
+A question to an address goes to that mailbox; its answer goes to the
+asker's (a party's, or its run's log), which the asker watches from where
+it asked, and to the question's mailbox too, which closes it there.
+
+Claims live in one small file, changed under `claims.lock`. Each change
+first drops claims whose holder no longer holds them (expired; its run
+finished; its party gone or away), then refuses a claim overlapping
+someone else's, so a dead holder never blocks anyone.
+
+## The pi-intercom bridge
+
+With `bridge: pi-intercom`, the attempt's process connects to the broker's
+Unix socket, registers (with no liveness interval, so the broker never
+drops it for silence), and lists sessions until it finds the agent's (its
+harness session id, its process id, or one started in its folder since the
+attempt began). It then reads the run's log from the attempt's start, sends
+each message and each reply to an intercom ask, and on the broker's
+`delivered` moves the run's inbox cursor past that message. It unregisters
+when the attempt ends. Nothing depends on it: without it, messages wait for
+the next turn.
 
 ## Creating runs
 

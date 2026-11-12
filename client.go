@@ -73,10 +73,13 @@ type Request struct {
 	// Worktree runs the agent in a git worktree of its own, on branch
 	// harness/<run>, which keeps its work.
 	Worktree bool
+	// Owner is the party (see Join) the run belongs to: its questions and
+	// its end reach that party's Inbox.
+	Owner string
 }
 
 func (r Request) options(vars engine.Vars) engine.TurnOptions {
-	return engine.TurnOptions{Extra: vars, Kind: r.Kind, Check: r.Check, Worktree: r.Worktree}
+	return engine.TurnOptions{Extra: vars, Kind: r.Kind, Check: r.Check, Worktree: r.Worktree, Owner: r.Owner}
 }
 
 // FollowUp is the next turn of a run, in the same session.

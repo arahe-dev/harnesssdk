@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,40 @@ func TestConfigAndGC(t *testing.T) {
 	}
 	if ids, err := c.GC(context.Background(), 0, true); err != nil || len(ids) != 1 || ids[0] != res.Run {
 		t.Fatalf("gc of every finished run: %v %v", ids, err)
+	}
+}
+
+// Parties, mailboxes and claims through the Go API.
+func TestClientParties(t *testing.T) {
+	c, err := Open(Options{Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(context.Background())
+	dir := t.TempDir()
+	if err := c.Join("bot", "agent", dir, "triage", []string{"ops"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Join("ana", "human", dir, "", []string{"ops"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Post("ana", "room:ops", "deploy at 5"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	items, err := c.Inbox(ctx, "bot")
+	// Ana joining after the bot, then her post.
+	if err != nil || len(items) != 2 || items[0].Kind != "joined" || items[1].Source != "room:ops" || items[1].From != "ana" || items[1].Text != "deploy at 5" {
+		t.Fatalf("inbox: %+v %v", items, err)
+	}
+	if err := c.Claim("bot", []string{filepath.Join(dir, "svc")}, time.Hour, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Claim("ana", []string{filepath.Join(dir, "svc", "main.go")}, time.Hour, ""); err == nil {
+		t.Fatal("overlapping claim accepted")
+	}
+	if ps, err := c.Parties(); err != nil || len(ps) != 2 {
+		t.Fatalf("parties: %+v %v", ps, err)
 	}
 }

@@ -50,6 +50,45 @@ func fakeAgent(args []string) int {
 		os.Stdout.Write(append([]byte("echo: "), in...))
 		return 0
 	}
+	if len(args) == 1 && args[0] == "askparent" {
+		exe, _ := os.Executable()
+		cmd := exec.Command(exe, "ask", "--wait", "20s", "which database?")
+		cmd.Env = append(os.Environ(), "HARNESS_TEST_FAKE=", "HARNESS_TEST_CLI=1")
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return 1
+		}
+		fmt.Printf("using %s", out)
+		return 0
+	}
+	if len(args) == 1 && args[0] == "selfextend" {
+		// An agent that knows it needs longer than its timeout says so
+		// through harness itself, then takes that long.
+		exe, _ := os.Executable()
+		cmd := exec.Command(exe, "extend", "--self", "20s", "--reason", "a long build")
+		cmd.Env = append(os.Environ(), "HARNESS_TEST_FAKE=", "HARNESS_TEST_CLI=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "extend --self: %v: %s", err, out)
+			return 1
+		}
+		time.Sleep(2500 * time.Millisecond)
+		fmt.Println("extended myself")
+		return 0
+	}
+	if len(args) == 2 && args[0] == "stream" {
+		// JSONL progress, then the answer once the gate file exists.
+		fmt.Println(`{"type":"tool","name":"edit","path":"a.go"}`)
+		fmt.Println(`{"type":"msg","text":"working on it"}`)
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if _, err := os.Stat(args[1]); err == nil {
+				break
+			}
+		}
+		fmt.Println(`{"type":"done","text":"all done"}`)
+		return 0
+	}
 	if len(args) == 2 && args[0] == "tree" {
 		exe, _ := os.Executable()
 		child := exec.Command(exe, "sleep")
@@ -269,5 +308,172 @@ func TestCLIBackgroundAndProject(t *testing.T) {
 	}
 	if code, _, errs := harnessCLI(t, "", "stop", id); code != 2 || !strings.Contains(errs, "no unfinished turn") {
 		t.Fatalf("stop: %d %s", code, errs)
+	}
+}
+
+// A caller following a background run sees where it is and what it is
+// doing: wait --timeout prints its status, status and events show it, and
+// events --wait wakes on what happens next.
+func TestCLIFollowRun(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	gate := filepath.Join(t.TempDir(), "gate")
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["stream",` + strconv.Quote(gate) + `]],"env":{"HARNESS_TEST_FAKE":"1"},
+	  "output":{"format":"jsonl","answer":{"where":{"type":"done"},"field":"text"},
+	    "progress":[{"kind":"tool","where":{"type":"tool"},"field":"name","detail":"path"},
+	                {"kind":"say","where":{"type":"msg"},"field":"text"}]}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "stream", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, _, errs := harnessCLI(t, "---\nharness: stream\neffect: idempotent\ntimeout: 10m\n---\n", "profile", "set", "w", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	code, out, errs := harnessCLI(t, "", "start", "w", "go")
+	id := strings.TrimSpace(out)
+	if code != 0 || id == "" {
+		t.Fatalf("start: %d %q %s", code, out, errs)
+	}
+	defer os.WriteFile(gate, nil, 0o644)
+
+	// events --wait wakes on progress, long before the turn ends.
+	var cursor string
+	var seen string
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(seen, "working on it"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no progress: %s", seen)
+		}
+		args := []string{"events", id, "--wait", "10s"}
+		if cursor != "" {
+			args = append(args, "--since", cursor)
+		}
+		code, out, errs := harnessCLI(t, "", args...)
+		if code != 0 && code != harness.ExitRunning {
+			t.Fatalf("events: %d %s", code, errs)
+		}
+		seen += out
+		m := regexp.MustCompile(`cursor (\d+)`).FindStringSubmatch(errs)
+		if m == nil {
+			t.Fatalf("no cursor: %s", errs)
+		}
+		cursor = m[1]
+	}
+	if !strings.Contains(seen, "queued  go") || !strings.Contains(seen, "tool  edit  a.go") {
+		t.Fatalf("events:\n%s", seen)
+	}
+
+	code, out, errs = harnessCLI(t, "", "wait", id, "--timeout", "200ms")
+	if code != harness.ExitRunning || !strings.Contains(errs, "still running") ||
+		!strings.Contains(out, "phase:    running · attempt 1 of 1") || !strings.Contains(out, "said:     working on it") ||
+		!strings.Contains(out, "left of its 10m0s timeout") || !strings.Contains(out, "next:     harness wait "+id) {
+		t.Fatalf("wait --timeout: %d\n%s\n%s", code, out, errs)
+	}
+	t.Logf("wait --timeout prints:\n%s%s", errs, out)
+	code, out, _ = harnessCLI(t, "", "wait", id, "--timeout", "200ms", "--json")
+	if code != harness.ExitRunning || !strings.Contains(out, `"exit_code": 7`) || !strings.Contains(out, `"phase": "running"`) || !strings.Contains(out, `"said": "working on it"`) {
+		t.Fatalf("wait --json: %d %s", code, out)
+	}
+	if code, out, _ := harnessCLI(t, "", "status", id, "--json"); code != 0 || !strings.Contains(out, `"live": true`) || !strings.Contains(out, `"time_left_ms"`) {
+		t.Fatalf("status --json: %d %s", code, out)
+	}
+
+	os.WriteFile(gate, nil, 0o644)
+	if code, out, errs := harnessCLI(t, "", "wait", id, "--timeout", "60s"); code != 0 || strings.TrimSpace(out) != "all done" {
+		t.Fatalf("wait: %d %q %s", code, out, errs)
+	}
+	code, out, errs = harnessCLI(t, "", "events", id, "--since", cursor, "--wait", "5s")
+	if code != 0 || !strings.Contains(out, "finished  success  all done") || !strings.Contains(errs, "has finished") {
+		t.Fatalf("events after the end: %d %s %s", code, out, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "status", id); code != 0 || !strings.Contains(out, "phase:    success") || !strings.Contains(out, "harness result "+id) {
+		t.Fatalf("status: %d %s", code, out)
+	}
+}
+
+// A running agent can give itself more time: harness extend --self, run
+// inside the run, moves its own deadline.
+func TestCLIExtendSelf(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["selfextend"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, _, errs := harnessCLI(t, "---\nharness: fake\neffect: idempotent\ntimeout: 1s\n---\n", "profile", "set", "p", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	code, out, errs := harnessCLI(t, "", "run", "p", "go")
+	if code != 0 || strings.TrimSpace(out) != "extended myself" {
+		t.Fatalf("run: %d %q %s", code, out, errs)
+	}
+	code, out, _ = harnessCLI(t, "", "runs", "--limit", "1")
+	id := strings.Fields(out)[0]
+	if code, out, _ := harnessCLI(t, "", "events", id); code != 0 || !strings.Contains(out, "extend  self  until") || !strings.Contains(out, "a long build") {
+		t.Fatalf("events: %d %s", code, out)
+	}
+	if code, _, errs := harnessCLI(t, "", "extend", "--self", "5m"); code != 2 || !strings.Contains(errs, "not running inside a harness run") {
+		t.Fatalf("extend --self outside a run: %d %s", code, errs)
+	}
+}
+
+// Several parties on one machine: one starts a run whose agent asks it a
+// question; its inbox wakes with the question and how to answer; claims
+// keep two agents off the same files; peers shows who is there.
+func TestCLIMultiplayer(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["askparent"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, _, errs := harnessCLI(t, "---\nharness: fake\neffect: idempotent\n---\n", "profile", "set", "p", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	for _, j := range [][]string{{"join", "--as", "alice", "--room", "team", "--note", "db layer"}, {"join", "--as", "ana", "--human", "--room", "team"}} {
+		if code, _, errs := harnessCLI(t, "", j...); code != 0 {
+			t.Fatalf("%v: %s", j, errs)
+		}
+	}
+	code, out, errs := harnessCLI(t, "", "start", "p", "--as", "alice", "set up the db")
+	id := strings.TrimSpace(out)
+	if code != 0 || id == "" {
+		t.Fatalf("start: %d %s", code, errs)
+	}
+	// Alice's inbox wakes on her run's question, with how to answer it.
+	var inbox string
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(inbox, "which database?"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no question in alice's inbox: %s", inbox)
+		}
+		_, out, _ := harnessCLI(t, "", "inbox", "--as", "alice", "--wait", "10s")
+		inbox += out
+	}
+	if !strings.Contains(inbox, "harness reply "+id+" q-") {
+		t.Fatalf("inbox: %s", inbox)
+	}
+	if code, _, errs := harnessCLI(t, "", "reply", id, "postgres"); code != 0 {
+		t.Fatalf("reply: %s", errs)
+	}
+	if code, out, errs := harnessCLI(t, "", "wait", id, "--timeout", "60s"); code != 0 || strings.TrimSpace(out) != "using postgres" {
+		t.Fatalf("wait: %d %q %s", code, out, errs)
+	}
+	// The run's end reaches alice too.
+	if _, out, _ := harnessCLI(t, "", "inbox", "--as", "alice", "--json"); !strings.Contains(out, `"kind": "finished"`) {
+		t.Fatalf("alice's inbox after the end: %s", out)
+	}
+	// Rooms.
+	harnessCLI(t, "", "post", "--as", "ana", "room:team", "please keep migrations backward compatible")
+	if _, out, _ := harnessCLI(t, "", "inbox", "--as", "alice"); !strings.Contains(out, "room:team") || !strings.Contains(out, "ana:") {
+		t.Fatalf("room post: %s", out)
+	}
+	// Claims.
+	dir := t.TempDir()
+	if code, _, errs := harnessCLI(t, "", "claim", "--as", "alice", filepath.Join(dir, "db")); code != 0 {
+		t.Fatalf("claim: %s", errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "claim", "--as", "ana", filepath.Join(dir, "db", "schema.sql")); code != harness.ExitThrottled || !strings.Contains(errs, "claimed by alice") {
+		t.Fatalf("conflicting claim: %d %s", code, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "peers"); code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "human") || !strings.Contains(out, filepath.Join(dir, "db")) {
+		t.Fatalf("peers: %s", out)
 	}
 }

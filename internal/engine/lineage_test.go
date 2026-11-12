@@ -129,7 +129,7 @@ func TestParentFoundAmongManyNewerRuns(t *testing.T) {
 func TestSystemPlusPromptStdin(t *testing.T) {
 	f := newFixture(t, nil)
 	f.def("plain", Definition{Args: [][]string{{"echo"}}, Stdin: "system+prompt", Output: OutputRule{Format: "text"}})
-	f.profile("p", "harness: plain\neffect: pure")
+	f.profile("p", "harness: plain\neffect: pure\nintercom: false")
 	rep := f.start(context.Background(), "p", "hello")[0]
 	want := "echo: <instructions>\nYou are a test agent.\n</instructions>\n\nhello"
 	if rep.Err != nil || rep.Output != want {

@@ -27,6 +27,10 @@ Read this guide, then use the commands below.
      prints a run id at once; the agent keeps working in the background.
      Collect it with `harness wait <run-id> --timeout 5m` (repeat while it
      exits 7) or check with `harness result <run-id>`.
+   - While it works, do not open its files to see how it is doing:
+     `harness status <run-id>` says where it is, what it is doing and what
+     it has changed, and `wait --timeout` prints the same when it times out.
+     See [Following a run](#following-a-run).
 7. Follow up in the same harness session: `harness send <run-id> "more"`
    (add `--detach` to run the turn in the background).
 
@@ -105,7 +109,23 @@ with `+`. Every attempt's metrics count, a failed one's too.
 Use these names, so profiles on different harnesses compare:
 `input_tokens` (every prompt token, cached ones included), `cached_tokens`,
 `output_tokens`, `cost_usd` (only as the CLI reports it; harness keeps no
-prices), `turns` (model calls) and `tool_calls`. Text output has no metrics
+prices), `turns` (model calls) and `tool_calls`.
+
+Two more names say how full the agent's context is, which `harness status`
+shows as `context: 61% (122k of 200k tokens)`:
+
+- `context_tokens`: the prompt tokens of the agent's **last** model call,
+  cached ones included, which is what its context holds. Select it from a
+  per-call event with the default `"pick": "last"`, never from a total.
+- `context_window`: the model's window, if the CLI reports it. A `*` in a
+  path stands for a key not known in advance, such as the model's name:
+  `modelUsage.*.contextWindow`.
+
+These two hold the latest value: a retry or a later reading replaces them,
+where other metrics add up. When the CLI does not report the window, set
+`context_window` in the profile; a profile's value always wins, since a CLI
+that reports several models (an agent's subagents) may not say which is the
+agent's. Text output has no metrics
 of its own: prefer a CLI's JSON mode, or its usage report.
 
 **Usage reports.** Some CLIs print only the answer and write their usage to
@@ -118,6 +138,31 @@ document (see the Hermes example).
 "output": {"format": "text", "report": {"session_field": "session_id",
   "metrics": {"input_tokens": {"field": "input_tokens+cache_read_tokens"}, "cost_usd": {"field": "estimated_cost_usd"}}}}
 ```
+
+### Progress
+
+`output.progress` lets callers follow an agent while it works. Each rule
+turns the CLI's JSONL events, read as they are written, into entries in the
+run's event log, which `harness status` and `harness events` show:
+
+```json
+"progress": [
+  {"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command"},
+  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}
+]
+```
+
+| `kind` | `field` is | `detail` |
+|---|---|---|
+| `tool` | the tool's name | the first of its `\|`-separated paths with a value (a file, a command) |
+| `file` | a changed file's path | |
+| `say` | what the agent said | |
+| `step` | optional text for a finished step (a model call) | as for tool |
+
+`where` is required, and an event whose `field` has no value is skipped.
+Progress needs `jsonl` output: with text or one JSON document, the CLI says
+nothing until it is done, and `status` follows the agent's files instead.
+See the examples at the end for each CLI's rules.
 
 ### Placeholders
 
@@ -176,7 +221,11 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `effect` | `pure`, `idempotent`, `non-idempotent` | required: what repeating a run does. Use `idempotent` only if the agent cannot change anything (read-only tools); anything that can edit files or run commands is `non-idempotent`. |
 | `retry` | `transient x2`, `transient,throttled,uncertain x4`, `none` | which outcomes are retried, total attempts. `uncertain` and `throttled` are refused for `non-idempotent` profiles: a run that may have edited files (a rate limit can stop an agent half way) is never replayed blind; continue its session with `send` instead. |
 | `backoff` | `5s` (default `2s`) | the wait before the first retry; it doubles for each retry after, up to 5 minutes, with jitter, and is at least what the CLI asked for (`retry_after`). A turn holds no budget, key or slot while it waits. |
-| `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain` |
+| `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain`. `harness extend` gives a running turn more |
+| `idle` | `15m` (default for a CLI that streams events), `none` | stop an attempt whose agent wrote nothing for this long; the turn is parked, not retried. A CLI that prints only at the end has no idle limit unless set |
+| `intercom` | `true` (default), `false` | tell the agent, in its system prompt, how to reach whoever started it (`harness note`, `ask`, `inbox`, `extend --self`); it needs a shell that can run harness |
+| `bridge` | `pi-intercom`, `none` (default) | carry messages live to a Pi agent that has the pi-intercom extension, mid-turn (see Bridges) |
+| `handover_at` | `80%` (default), `none` | when a turn ends with the agent's context this full, its hint says to hand over to a fresh session |
 | `budget` | `pi=1, gpu=4` | units claimed from named budgets while the turn runs |
 | `admission` | `wait` (default), `reject` | when a budget or key is taken: queue, or fail at once as `throttled` |
 | `max_wait` | `10m` | the longest a turn waits for its budgets, keys and slot before failing as `throttled` (default: config `max_wait_minutes`) |
@@ -185,6 +234,7 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `check_timeout` | `10m` (default) | how long the check may run |
 | `worktree` | `true` | every new run works in a git worktree of its own (see Running) |
 | `spend_limit_usd` | `2.50` | refuse the profile's turns once they have cost that much in the last 24 hours, as the CLI reports it |
+| `context_window` | `200k`, `1m` | the model's context window in tokens, so `status` can say how full the agent's context is; wins over a window the CLI reports |
 | `spend_unknown` | `refuse` | what a cost harness could not record counts as for this profile's limits: `warn`, `refuse` or dollars (overrides config; see Machine limits) |
 | `description` | text | shown in `profile list` |
 
@@ -327,6 +377,15 @@ harness send <run-id> [prompt words | -] [--file F]... [--set k=v]... [--check C
 harness def check <name> [--profile P]
 harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json]
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
+harness status <run-id> [--json]      harness events <run-id> [--since C] [--wait D] [--json]
+harness extend <run-id> <D> [--reason R]     harness extend --self <D>     harness handover <run-id> [--next T] [--json]
+harness reply <run-id> [q-id] "answer"       harness steer <run-id> "message" [--now]
+inside a run:  harness note "..."     harness ask "question" [--wait 10m]     harness inbox [--peek]
+harness join --as <me> [--human] [--room R]... [--note N]     harness leave --as <me>     harness peers [--room R] [--json]
+harness post <to> "text" [--as me]     harness ask --as <me> --to <to> "question"     harness reply --as <me> <q-id> "answer"
+harness inbox --as <me> [--wait D] [--peek] [--json]     harness watch [--as me] [--room R]
+harness claim <path>... [--as me] [--for 2h] [--note N]     harness release [<path>...] [--as me]     harness claims [--json]
+run, start: --as <me> makes the new runs yours: their questions and ends reach your inbox
 ```
 
 - The prompt is the words after the profile, or stdin with `-`. Each
@@ -388,6 +447,141 @@ harness stop <run-id>                 harness runs [--limit N]     harness show 
 A failed first turn keeps its session: `harness send` can continue it. A
 background turn whose worker died is reported as `uncertain` by `wait`.
 
+## Following a run
+
+Every run keeps an event log (`events.jsonl` in its folder). Read it,
+rather than the agent's files, to know how it is doing.
+
+- `harness status <run-id>` is the run's last turn now: its phase
+  (`queued`, `admitting` while it waits for its budgets, keys or a running
+  slot, `running`, `backing off` between attempts, `checking`, then its
+  outcome), its attempt and how long its timeout has left, when the agent
+  last wrote output, its tokens and cost so far, its latest tool calls and
+  messages, the files changed where it works, and the commands to run next.
+  For a `--worktree` run the changes are exactly its own (its branch since
+  it started); otherwise they are everything changed in its folder since
+  the last commit, by anyone.
+- `harness wait <run-id> --timeout 5m` prints the same when it times out
+  (exit 7), so each wait tells you something. It also returns early (exit
+  7, `harness: attention: ...`, and `attention` in `--json`) when the turn
+  needs you: a `timeout_soon` event, when its deadline is a fifth away or
+  its agent has been quiet for three quarters of its idle limit.
+- `harness events <run-id> [--since C]` prints the log from cursor `C`
+  (default: the start) and the next cursor on stderr. With `--wait 2m` it
+  waits for the next event, or for the turn to end, and exits 7 if nothing
+  happened. Lifecycle events are `queued`, `started`, `attempt`, `retry`,
+  `check`, `stop`, `finished` and `lost`; activity events (`tool`, `file`,
+  `say`, `step`) come from the definition's `output.progress` rules.
+- `--json` on each prints the same as JSON; the Go API has `Status`,
+  `Events` and `WaitEvents`.
+
+## Time, idleness and context
+
+- **Give a turn more time** while it runs: `harness extend <run-id> 30m`
+  moves its deadline to at least 30 minutes from now (for every attempt of
+  that turn) and resets its idle clock. An agent that harness started can
+  do it for itself, before a long build or a long think:
+  `harness extend --self 30m --reason "full test suite"`. Each extension is
+  in the event log.
+- **Idle limit:** an agent whose CLI streams events, and has written
+  nothing for the profile's `idle` (15m by default), is stopped.
+- **Parked:** a turn stopped by its timeout or idle limit ends
+  `uncertain`, keeps its session, and its hint says to look at
+  `harness status` and continue with `harness send`. The idle limit never
+  retries (a fresh attempt would start the work over); the timeout retries
+  as the profile's `retry` says, as before.
+- **Context:** when a turn ends with the agent's context past the profile's
+  `handover_at` (80% by default; needs `context_tokens` and a window), its
+  hint, and `status`, suggest `harness handover <run-id> --next "<task>"`.
+  That asks the agent, in its session, for handover notes (goal, done,
+  left, decisions, dead ends, how to check), then starts a new run of the
+  same profile in the same folder with the notes and the next task, in the
+  background, and prints its id. `harness show` on the new run names the
+  run it came from; the old run's log names the new one.
+
+## Talking with a run's agent
+
+A run's agent can reach whoever started it, and be reached, while it
+works. Its system prompt says how (unless the profile sets
+`intercom: false`); it needs a shell tool that may run harness.
+
+- **From the agent** (run inside the run, which harness finds as it finds a
+  nested run): `harness note "tests pass; starting the docs"` posts
+  progress. `harness ask "v1 or v2 API?"` posts a question and waits for
+  the answer (up to `--wait`, 10m by default; exit 7 if none came, and the
+  question is closed). While it waits, the idle limit does not count.
+- **From the caller:** `harness wait` returns early on a question (exit 7,
+  `attention`), and `status` lists open questions with the command to
+  answer each: `harness reply <run-id> [q-id] "v2"` (the id can be left out
+  when only one is open).
+- **Steering:** `harness steer <run-id> "use the new parser"` posts a
+  message. The agent reads it with `harness inbox` between steps; what it
+  has not read when its turn ends leads its next turn's prompt (once).
+  `--now` stops the running turn and continues the session at once with
+  the message, in the background.
+
+Notes, questions, answers and messages are all in the run's event log.
+
+## Many agents and people
+
+Several agents, in different harnesses, and people can work on one
+machine together. Each has an address and a mailbox, all event logs like a
+run's:
+
+| Address | Who | Mailbox |
+|---|---|---|
+| `<alias>` | an agent session or a person that ran `harness join --as <alias>` (`--human` for a person) | `parties/<alias>.jsonl` |
+| `run:<id>` | a run's agent | its event log |
+| `room:<name>` | everyone in the room (`join --room <name>`) | `rooms/<name>.jsonl` |
+
+- **Speak as yourself** with `--as <alias>` (or `HARNESS_AS`). An agent that
+  harness started is its run without it. A party counts as present while it
+  runs harness commands, and away after 30 minutes without: there is no
+  daemon to keep a session open. `harness peers` lists parties, with what
+  they work on, their rooms and claims, and the runs going now.
+- **Your runs:** `harness start <profile> --as <me> "task"` makes the run
+  yours, so its questions, warnings and end reach your inbox.
+- **One inbox:** `harness inbox --as <me> --wait 5m` returns, once each,
+  what is new: your mailbox, your rooms (not your own posts), and what your
+  runs need from you, each line with how to answer. A coordinating agent
+  loops on it; exit 7 means nothing came.
+- **Messages and questions:** `harness post <to> "..."` posts to an alias, a
+  run or a room. `harness ask --as <me> --to <to> "..."` asks and waits for
+  the answer, which the other answers with `harness reply --as <them> <q-id> "..."`.
+  An agent inside a run can ask a peer the same way with `--to`.
+- **Claims** are advisory: `harness claim src/gate --note "refactor"` (paths
+  are resolved from the current folder; a folder covers everything under
+  it) refuses, exit 5 and naming the holder, if someone else holds an
+  overlapping claim. A claim ends after `--for` (2h), when its run ends, or
+  when its party leaves or is away; `harness release` drops it. Claim before
+  editing shared files, and ask the holder rather than work around a claim.
+- **People:** `harness watch` follows every active run and room as it
+  happens (`--room` for one, `--as <me>` for your inbox); answer with
+  `harness reply`, redirect with `harness steer`.
+
+## Bridges
+
+A run's agent reads what was posted to it with `harness inbox`, or at its
+next turn. With a bridge, messages reach it mid-turn through its harness's
+own messaging instead.
+
+- **`bridge: pi-intercom`**, for a Pi agent with the
+  [pi-intercom](https://pi.dev/packages/pi-intercom) extension. While an
+  attempt runs, harness joins pi-intercom's broker as `harness-<run>`
+  (`$PI_CODING_AGENT_DIR/intercom/broker.sock`, default `~/.pi/agent`),
+  finds the agent's session, and sends it what is steered or posted to the
+  run, which pi-intercom puts in at its next safe point; a message delivered
+  this way is not repeated at the next turn. What the agent sends
+  `harness-<run>` through intercom becomes a note in the run's log, or a
+  question, answered with `harness reply`. Without a broker it says so once
+  in the log, and messages wait for the next turn. Built against
+  pi-intercom 0.18's protocol (version 1) and tested with a broker that
+  speaks it, not yet with Pi itself; not on Windows yet.
+
+How much you see depends on the CLI: one that streams JSONL events, with
+progress rules, shows each tool call as it happens; one that prints only
+its answer shows its phase, time and changed files.
+
 ## Verified examples
 
 Definitions known to work, with the CLI version they were checked against.
@@ -427,23 +621,55 @@ fail the run.
 Without `--mode json`, Pi prints only the answer (`"output": {"format": "text"}`),
 and reports no tokens or cost.
 
-**Claude Code** (2.1.220), one JSON result:
+**Claude Code** (2.1.322), streaming JSON events (`--output-format
+stream-json`, which needs `--verbose` with `-p`). Each `assistant` event is
+one content block of one model call, with that call's `usage`; the final
+`result` event has the answer, totals, cost, and each model's
+`contextWindow` under `modelUsage.<model>`. Top-level events have
+`parent_tool_use_id` null, which `""` matches, so a subagent's calls do not
+count as the agent's context. Checked live: tool and message progress, the
+answer, session resume with `send`, tokens, cost, context and window.
 
 ```json
 {"command": "claude",
- "args": [["-p"], ["--output-format", "json"], ["--model", "{model}"], ["--tools", "{tools}"],
+ "args": [["-p"], ["--output-format", "stream-json"], ["--verbose"], ["--model", "{model}"], ["--tools", "{tools}"],
+          ["--permission-mode", "{permission_mode}"], ["--allowedTools", "{allowed_tools}"],
           ["--append-system-prompt-file", "{system_file}"],
           ["--session-id", "{new_session}"], ["--resume", "{resume_session}"]],
  "session": "mint",
- "output": {"format": "json", "field": "result", "error_field": "is_error", "session_field": "session_id",
+ "output": {"format": "jsonl",
+   "answer": {"where": {"type": "result"}, "field": "result"},
+   "session": {"where": {"type": "system", "subtype": "init"}, "field": "session_id", "pick": "first"},
+   "error": {"where": {"type": "result", "is_error": "true"}},
    "metrics": {
-     "input_tokens": {"field": "usage.input_tokens+usage.cache_read_input_tokens+usage.cache_creation_input_tokens"},
-     "cached_tokens": {"field": "usage.cache_read_input_tokens"},
-     "output_tokens": {"field": "usage.output_tokens"},
-     "cost_usd": {"field": "total_cost_usd"},
-     "turns": {"field": "num_turns"}}},
+     "input_tokens": {"where": {"type": "result"}, "field": "usage.input_tokens+usage.cache_read_input_tokens+usage.cache_creation_input_tokens"},
+     "cached_tokens": {"where": {"type": "result"}, "field": "usage.cache_read_input_tokens"},
+     "output_tokens": {"where": {"type": "result"}, "field": "usage.output_tokens"},
+     "cost_usd": {"where": {"type": "result"}, "field": "total_cost_usd"},
+     "turns": {"where": {"type": "result"}, "field": "num_turns"},
+     "tool_calls": {"where": {"type": "assistant", "message.content.0.type": "tool_use"}, "pick": "count"},
+     "context_tokens": {"where": {"type": "assistant", "parent_tool_use_id": ""},
+       "field": "message.usage.input_tokens+message.usage.cache_read_input_tokens+message.usage.cache_creation_input_tokens"},
+     "context_window": {"where": {"type": "result"}, "field": "modelUsage.*.contextWindow"}},
+   "progress": [
+     {"kind": "tool", "where": {"type": "assistant", "message.content.0.type": "tool_use"}, "field": "message.content.0.name",
+      "detail": "message.content.0.input.file_path|message.content.0.input.command|message.content.0.input.pattern|message.content.0.input.description"},
+     {"kind": "say", "where": {"type": "assistant", "parent_tool_use_id": "", "message.content.0.type": "text"}, "field": "message.content.0.text"}]},
  "failures": [{"match": "(?i)rate.?limit|overloaded|\\b429\\b", "outcome": "throttled"}]}
 ```
+
+Without `permission_mode` (`acceptEdits`, say), Claude Code in print mode
+refuses to edit files, and says so in its answer. To let the agent talk to
+you through harness (below) without opening its shell to everything, give it
+`tools: Bash,Read,Edit,Write` and `allowed_tools: Bash(harness *)`: it may
+then run harness, and nothing else, without a prompt. Checked live: an agent
+asked through `harness ask`, the caller's `wait` woke on it, and the reply
+reached the agent, which went on. When subagents run on
+other models, `modelUsage` lists each, so set `context_window` in the
+profile. The older one-document form, `--output-format json` with `"format":
+"json"`, `"field": "result"`, `"error_field": "is_error"` and
+`"session_field": "session_id"`, still works, but shows nothing until the
+end.
 
 **Codex** (0.162.1), JSONL events. Codex may strip its commands'
 environment (`shell_environment_policy`), so harness's variables are set
@@ -525,6 +751,35 @@ points to check with `harness def check <name> --profile <p>` once they are:
 has `result`, `is_error`, `session_id` and a Claude-style `usage`; and
 **Kimi Code** `kimi -p {prompt}`, whose answer is all of stdout (it also has
 `--output-format stream-json`).
+
+### Progress and context for the other CLIs
+
+Add these to `output` in the definitions above (`progress` beside
+`metrics`, the metric into `metrics`). Pi's event and field names are from
+its `docs/json.md` and message types, Codex's from its `exec_events.rs`;
+OpenCode's tool event is not documented, and none of these were run live,
+so watch the first run with `harness events` and adjust.
+
+- **Pi** (`--mode json`). Each `turn_end` carries that model call's usage;
+  Pi reports no window, so set `context_window` in the profile.
+  `"progress": [{"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command|args.pattern"},
+  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}]`,
+  `"context_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.input+message.usage.cacheRead+message.usage.cacheWrite"}`
+- **OpenCode** (`--format json`). Each `step_finish` carries that step's
+  tokens; no window, so set `context_window` in the profile.
+  `"progress": [{"kind": "tool", "where": {"type": "tool_use"}, "field": "part.tool", "detail": "part.state.input.filePath|part.state.input.command|part.state.title"},
+  {"kind": "say", "where": {"type": "text"}, "field": "part.text"}]`,
+  `"context_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.input+part.tokens.cache.read+part.tokens.cache.write"}`
+- **Codex** (`--json`).
+  `"progress": [{"kind": "tool", "where": {"type": "item.started", "item.type": "command_execution"}, "field": "item.type", "detail": "item.command"},
+  {"kind": "file", "where": {"type": "item.completed", "item.type": "file_change"}, "field": "item.changes.0.path"},
+  {"kind": "say", "where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"}]`.
+  No context: `codex exec --json` reports usage only once per turn,
+  summed over all of the turn's model calls, which overstates the context
+  several times over, and no window. Leave `context_tokens` out rather than
+  map that total to it.
+- **Hermes** prints only its answer: no progress; its usage report is
+  totals, so no context either.
 
 ## Other commands
 

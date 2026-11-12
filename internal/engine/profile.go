@@ -43,12 +43,30 @@ type Profile struct {
 	// SpendUnknown is how the profile's spending limits count a cost
 	// harness could not record (spend_unknown); "" leaves it to config.
 	SpendUnknown string
-	Budget       []hertasdk.Requirement
-	Serialize    string // key template; runs sharing a key run one at a time
-	Vars         Vars
-	System       string
-	Scope        string // project or global, once loaded
-	Path         string
+	// ContextWindow is the model's context window in tokens, for a CLI
+	// that does not report it (metric context_window); 0 if unknown.
+	ContextWindow int64
+	// Idle stops an attempt whose agent wrote nothing for this long, when
+	// IdleSet; otherwise a CLI that streams events gets defaultIdle.
+	Idle    time.Duration
+	IdleSet bool
+	// HandoverAt is how full the agent's context (0 to 1) may get before
+	// a turn's hint suggests handing over to a fresh session; when not
+	// HandoverSet, defaultHandoverAt. 0 turns the hint off.
+	HandoverAt  float64
+	HandoverSet bool
+	// NoIntercom leaves out the note that tells the agent how to reach
+	// whoever started it (intercom: false).
+	NoIntercom bool
+	// Bridge carries messages live to the agent through its harness's own
+	// messaging, while it works: "pi-intercom" (piintercom.go).
+	Bridge    string
+	Budget    []hertasdk.Requirement
+	Serialize string // key template; runs sharing a key run one at a time
+	Vars      Vars
+	System    string
+	Scope     string // project or global, once loaded
+	Path      string
 
 	header []headerLine // kept in order so Set preserves the file
 }
@@ -63,7 +81,8 @@ var reservedKeys = map[string]bool{
 	"harness": true, "description": true, "effect": true, "admission": true,
 	"timeout": true, "retry": true, "budget": true, "serialize": true,
 	"backoff": true, "max_wait": true, "check": true, "check_timeout": true, "worktree": true,
-	"spend_limit_usd": true, "spend_unknown": true,
+	"spend_limit_usd": true, "spend_unknown": true, "context_window": true,
+	"idle": true, "handover_at": true, "intercom": true, "bridge": true,
 }
 
 // builtinVars are filled in by HarnessSDK for every attempt; a profile
@@ -214,6 +233,22 @@ func (p *Profile) apply(key, value string) error {
 		if _, err = parseUnknown(value); err == nil {
 			p.SpendUnknown = value
 		}
+	case "bridge":
+		if value != "" && value != "none" && value != BridgePiIntercom {
+			err = fmt.Errorf("%q is not a bridge harness knows (pi-intercom, or none)", value)
+		} else if value != "none" {
+			p.Bridge = value
+		}
+	case "intercom":
+		p.NoIntercom = !Vars{"v": value}.truthy("v")
+	case "idle":
+		p.Idle, err = parseTimeout(value)
+		p.IdleSet = err == nil
+	case "handover_at":
+		p.HandoverAt, err = parseShare(value)
+		p.HandoverSet = err == nil
+	case "context_window":
+		p.ContextWindow, err = parseTokens(value)
 	case "budget":
 		p.Budget, err = parseBudget(value)
 	case "serialize":
@@ -229,6 +264,42 @@ func (p *Profile) apply(key, value string) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	return nil
+}
+
+func (p *Profile) intercom() bool { return !p.NoIntercom }
+
+// parseShare reads a share of a whole: 80%, 0.8, or none (0).
+func parseShare(s string) (float64, error) {
+	t := strings.TrimSpace(s)
+	if t == "" || t == "0" || strings.EqualFold(t, "none") {
+		return 0, nil
+	}
+	pct := strings.HasSuffix(t, "%")
+	f, err := strconv.ParseFloat(strings.TrimSuffix(t, "%"), 64)
+	if pct {
+		f /= 100
+	}
+	if err != nil || !finite(f) || f <= 0 || f > 1 {
+		return 0, fmt.Errorf("%q is not a share such as 80%% or 0.8 (or none)", s)
+	}
+	return f, nil
+}
+
+// parseTokens reads a token count: 200000, 200k or 1m.
+func parseTokens(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	mult := 1.0
+	switch {
+	case strings.HasSuffix(t, "k"):
+		mult, t = 1e3, strings.TrimSuffix(t, "k")
+	case strings.HasSuffix(t, "m"):
+		mult, t = 1e6, strings.TrimSuffix(t, "m")
+	}
+	f, err := strconv.ParseFloat(t, 64)
+	if err != nil || !finite(f) || f*mult < 1 || f*mult > 1e10 {
+		return 0, fmt.Errorf("%q is not a number of tokens (such as 200000, 200k or 1m)", s)
+	}
+	return int64(f * mult), nil
 }
 
 func parseEffect(s string) (hertasdk.Effect, error) {

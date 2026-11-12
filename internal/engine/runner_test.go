@@ -114,6 +114,23 @@ func fakeHarness(args []string) int {
 	case "sleep":
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		fmt.Println("slept")
+	case "progress":
+		// Streams JSONL events as it works, edits a file, then waits for
+		// its gate file (if any) before answering.
+		fmt.Println(`{"type":"tool_start","tool":"edit","args":{"path":"a.go"}}`)
+		fmt.Println(`{"type":"tool_start","tool":"bash","args":{"command":"go test ./..."}}`)
+		fmt.Println(`{"type":"message","role":"assistant","text":"fixing the race","usage":{"ctx":300}}`)
+		os.WriteFile("touched.txt", []byte("edited by the agent\n"), 0o644)
+		if gate := opts["gate"]; gate != "" {
+			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+				if _, err := os.Stat(gate); err == nil {
+					break
+				}
+			}
+		}
+		fmt.Println(`{"type":"message","role":"assistant","text":"done","usage":{"ctx":400}}`)
+		answer, _ := json.Marshal("answer: " + strings.TrimSpace(string(in)))
+		fmt.Printf(`{"type":"done","text":%s,"models":{"m-1":{"contextWindow":1000}}}`+"\n", answer)
 	case "nested":
 		// Act as a harness command run by the agent; with strip=1, as one
 		// whose harness removed harness's environment variables.
@@ -128,6 +145,50 @@ func fakeHarness(args []string) int {
 		}
 		p := h.DiscoverParentage()
 		fmt.Printf("parent=%s lineage=%s found=%s\n", p.Parent, strings.Join(p.Lineage, ","), p.Found)
+	case "ask": // asks its caller through harness, from inside its run
+		h, err := NewHome(opts["home"])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		r, _ := NewRunner(h)
+		wait, _ := time.ParseDuration(or(opts["wait"], "20s"))
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		defer cancel()
+		var id, answer string
+		var ok bool
+		if to := opts["to"]; to != "" { // a peer, not whoever started it
+			id, answer, ok, err = r.AskTo(ctx, "run:"+h.DiscoverParentage().Parent, to, "use v1 or v2?")
+		} else {
+			_, id, answer, ok, err = r.Ask(ctx, "use v1 or v2?")
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if !ok {
+			fmt.Println("no answer to " + id)
+			return 0
+		}
+		fmt.Println("answer: " + answer)
+	case "inbox": // reads what its caller posted, from inside its run
+		h, err := NewHome(opts["home"])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_, msgs, err := h.Inbox(false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		var texts []string
+		for _, m := range msgs {
+			texts = append(texts, m.Text)
+		}
+		fmt.Printf("inbox: [%s] prompt: %s\n", strings.Join(texts, "|"), strings.TrimSpace(string(in)))
+	case "pichild": // a Pi agent with pi-intercom: asks harness-<run>, then waits for a message
+		os.Exit(fakePiChild(in))
 	case "sleeppid":
 		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(os.Getpid())), 0o644)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -247,7 +308,7 @@ func (f *fixture) start(ctx context.Context, profile string, tasks ...string) []
 
 func TestRunEcho(t *testing.T) {
 	f := newFixture(t, nil)
-	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
+	f.profile("echo", "harness: fake\neffect: pure\nintercom: false\nmode: echo")
 	rep := f.start(context.Background(), "echo", "hello")[0]
 	if rep.Err != nil || rep.Outcome != "success" || rep.Output != "echo: hello" {
 		t.Fatalf("%+v", rep)
