@@ -10,12 +10,13 @@ Delegation is one shell command, `harness run <profile> "task"` (or
 prompts and context. The child runs in its own harness's native one-shot mode
 (`pi -p`, `claude -p`, `opencode run`, ...).
 
-> **Status: v2.0.0-next.1**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
+> **Status: v2.0.0-next.2**, the v2 candidate (module `github.com/arahe-dev/harnesssdk/v2`;
 > v1.7.0 is the stable v1). Used on Windows 11 with Pi 1.0.4, Claude Code 2.1.220,
 > OpenCode 1.18.35, Codex 0.162.1 and Hermes Agent 0.20.5, including a Codex agent that starts a Pi
-> agent through harness. The test suite passes in CI on Ubuntu and Windows; no
-> real harness CLI has been run on Linux or macOS yet. See
-> [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
+> agent through harness, and on Linux with Claude Code 2.1.322 (streaming
+> events, questions between agents and people, handover). The test suite
+> passes in CI on Ubuntu and Windows; no real harness CLI has been run on
+> macOS yet. See [Limits](#limits) and the [CHANGELOG](CHANGELOG.md).
 
 ## One layer, nothing hardcoded
 
@@ -147,8 +148,12 @@ Windows, falling back to a parent-pid walk; a process group on Unix) and is
 
 ## Limits
 
-- **No real harness CLI has run on Linux or macOS yet.** The full test suite,
-  including process-group kill and SIGTERM handling, passes in CI on Ubuntu.
+- **No real harness CLI has run on macOS yet**, and on Linux only Claude
+  Code. The full test suite, including process-group kill and SIGTERM
+  handling, passes in CI on Ubuntu.
+- **The pi-intercom bridge** is tested against a broker speaking
+  pi-intercom 0.18's protocol, not yet against Pi itself, and does not
+  support Windows yet.
 - **Budgets are per machine**, not across machines: HertaSDK, and harness on
   top of it, stay local by design.
 - **Pi on some networks** ends long runs with `fetch failed`; the turn is

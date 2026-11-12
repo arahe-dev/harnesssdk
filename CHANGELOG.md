@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (v2.0.0-next.2)
+## v2.0.0-next.2 (2026-11-12)
 
 Agents that drive harness can see what their runs are doing, instead of
 reading the files they edit.
