@@ -155,7 +155,13 @@ func fakeHarness(args []string) int {
 		wait, _ := time.ParseDuration(or(opts["wait"], "20s"))
 		ctx, cancel := context.WithTimeout(context.Background(), wait)
 		defer cancel()
-		_, id, answer, ok, err := r.Ask(ctx, "use v1 or v2?")
+		var id, answer string
+		var ok bool
+		if to := opts["to"]; to != "" { // a peer, not whoever started it
+			id, answer, ok, err = r.AskTo(ctx, "run:"+h.DiscoverParentage().Parent, to, "use v1 or v2?")
+		} else {
+			_, id, answer, ok, err = r.Ask(ctx, "use v1 or v2?")
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -181,6 +187,8 @@ func fakeHarness(args []string) int {
 			texts = append(texts, m.Text)
 		}
 		fmt.Printf("inbox: [%s] prompt: %s\n", strings.Join(texts, "|"), strings.TrimSpace(string(in)))
+	case "pichild": // a Pi agent with pi-intercom: asks harness-<run>, then waits for a message
+		os.Exit(fakePiChild(in))
 	case "sleeppid":
 		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(os.Getpid())), 0o644)
 		time.Sleep(time.Duration(ms) * time.Millisecond)

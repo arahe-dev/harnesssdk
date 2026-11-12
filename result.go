@@ -106,6 +106,7 @@ type Run struct {
 	Depth   int    // 0 for a run started outside any run
 	Kind    string // the label given when it started
 	From    string // the run that handed its work over to this one, if any
+	Owner   string // the party that started it, if any
 	// Worktree and Branch are where a run started with Worktree works;
 	// Cwd is the folder it was started from.
 	Worktree, Branch string
@@ -134,7 +135,7 @@ type Turn struct {
 
 func runOf(r *engine.Run) Run {
 	out := Run{ID: r.ID, Profile: r.Profile, Harness: r.Harness, Cwd: r.Cwd, Parent: r.Parent,
-		Depth: r.Depth, Kind: r.Kind, From: r.From, Session: r.Session, Created: r.Created, Worktree: r.Worktree, Branch: r.Branch}
+		Depth: r.Depth, Kind: r.Kind, From: r.From, Owner: r.Owner, Session: r.Session, Created: r.Created, Worktree: r.Worktree, Branch: r.Branch}
 	for _, t := range r.Turns {
 		out.Turns = append(out.Turns, Turn{N: t.N, Outcome: Outcome(t.Outcome), Attempts: t.Attempts,
 			ExitCode: t.ExitCode, Queued: t.Queued, Started: t.Started, Ended: t.Ended, Error: t.Error,

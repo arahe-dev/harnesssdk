@@ -41,6 +41,11 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness handover <run-id> [--next task]  continue a run whose context is full in a fresh session; prints the new run id
   harness reply <run-id> [q-id] "answer"   answer a run's question (its agent waits for it)
   harness steer <run-id> "message" [--now] post to a run's agent: it reads it now (inbox) or at its next turn; --now: stop and continue with it
+  harness join --as <alias> [--room r]     be a party: an agent session or (--human) a person, with a mailbox; leave, peers
+  harness post <to> "text" [--as me]       message a party (alias), a run (run:<id>) or a room (room:<name>)
+  harness inbox --as <me> [--wait 5m]      your mailbox, rooms, and what your runs (started with --as) need from you
+  harness claim <path>... [--for 2h]       say what you are about to edit (advisory); release, claims
+  harness watch [--as me] [--room r]       follow rooms, runs and your inbox live (for a person)
   inside a run (for the agent):  harness note "..." | ask "question" [--wait 10m] | inbox [--peek] | extend --self 30m
   harness result <run-id>                  print a run's last turn without waiting
   harness stop <run-id>                    stop a run's turn
@@ -172,6 +177,22 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return c.steer(args)
 	case "inbox":
 		return c.inbox(args)
+	case "join":
+		return c.join(args)
+	case "leave":
+		return c.leave(args)
+	case "peers":
+		return c.peers(args)
+	case "post":
+		return c.post(args)
+	case "claim":
+		return c.claim(args)
+	case "release":
+		return c.release(args)
+	case "claims":
+		return c.claims(args)
+	case "watch":
+		return c.watch(args)
 	}
 	return harness.ExitUsage, usageErr("unknown command %q; see: harness help", cmd)
 }
@@ -623,6 +644,7 @@ func size(b int64) string {
 type turnFlags struct {
 	files, sets multi
 	asJSON, dry bool
+	as          string
 }
 
 func (tf *turnFlags) register(fs *flag.FlagSet) {
@@ -630,6 +652,19 @@ func (tf *turnFlags) register(fs *flag.FlagSet) {
 	fs.Var(&tf.sets, "set", "key=value placeholder value for this run (repeatable)")
 	fs.BoolVar(&tf.asJSON, "json", false, "print a JSON result")
 	fs.BoolVar(&tf.dry, "dry-run", false, "print the command without running it")
+	fs.StringVar(&tf.as, "as", "", "the party starting new runs (see harness join); its inbox follows them")
+}
+
+// owner is the party new runs belong to: --as, or HARNESS_AS.
+func (c *cli) owner(tf turnFlags) (string, error) {
+	if tf.as == "" && os.Getenv(harness.EnvAs) == "" {
+		return "", nil
+	}
+	who, err := c.home.Speaker(tf.as)
+	if strings.HasPrefix(who, "run:") {
+		return "", err
+	}
+	return who, err
 }
 
 func (tf *turnFlags) extra() (harness.Vars, error) {
@@ -726,6 +761,10 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	if err != nil {
 		return harness.ExitUsage, err
 	}
+	owner, err := c.owner(tf)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
 	dir, err := folder(*cwdFlag)
 	if err != nil {
 		return harness.ExitUsage, err
@@ -743,7 +782,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 		return 0, nil
 	}
 	if detach {
-		runs, err := r.Prepare(profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree})
+		runs, err := r.Prepare(profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree, Owner: owner})
 		if err != nil {
 			return exitFor(err), err
 		}
@@ -758,7 +797,7 @@ func (c *cli) runCmd(args []string, detach bool) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	reports, err := r.Start(ctx, profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree}, func(run *harness.Run) {
+	reports, err := r.Start(ctx, profile, prompts, dir, harness.TurnOptions{Extra: extra, Kind: *kind, Check: *check, Worktree: *worktree, Owner: owner}, func(run *harness.Run) {
 		fmt.Fprintf(c.stderr, "harness: %s started (%s → %s, %s)\n", run.ID, run.Profile, run.Harness, run.Cwd)
 	})
 	c.drain(r)

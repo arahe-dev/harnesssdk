@@ -224,6 +224,7 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain`. `harness extend` gives a running turn more |
 | `idle` | `15m` (default for a CLI that streams events), `none` | stop an attempt whose agent wrote nothing for this long; the turn is parked, not retried. A CLI that prints only at the end has no idle limit unless set |
 | `intercom` | `true` (default), `false` | tell the agent, in its system prompt, how to reach whoever started it (`harness note`, `ask`, `inbox`, `extend --self`); it needs a shell that can run harness |
+| `bridge` | `pi-intercom`, `none` (default) | carry messages live to a Pi agent that has the pi-intercom extension, mid-turn (see Bridges) |
 | `handover_at` | `80%` (default), `none` | when a turn ends with the agent's context this full, its hint says to hand over to a fresh session |
 | `budget` | `pi=1, gpu=4` | units claimed from named budgets while the turn runs |
 | `admission` | `wait` (default), `reject` | when a budget or key is taken: queue, or fail at once as `throttled` |
@@ -380,6 +381,11 @@ harness status <run-id> [--json]      harness events <run-id> [--since C] [--wai
 harness extend <run-id> <D> [--reason R]     harness extend --self <D>     harness handover <run-id> [--next T] [--json]
 harness reply <run-id> [q-id] "answer"       harness steer <run-id> "message" [--now]
 inside a run:  harness note "..."     harness ask "question" [--wait 10m]     harness inbox [--peek]
+harness join --as <me> [--human] [--room R]... [--note N]     harness leave --as <me>     harness peers [--room R] [--json]
+harness post <to> "text" [--as me]     harness ask --as <me> --to <to> "question"     harness reply --as <me> <q-id> "answer"
+harness inbox --as <me> [--wait D] [--peek] [--json]     harness watch [--as me] [--room R]
+harness claim <path>... [--as me] [--for 2h] [--note N]     harness release [<path>...] [--as me]     harness claims [--json]
+run, start: --as <me> makes the new runs yours: their questions and ends reach your inbox
 ```
 
 - The prompt is the words after the profile, or stdin with `-`. Each
@@ -515,6 +521,62 @@ works. Its system prompt says how (unless the profile sets
   the message, in the background.
 
 Notes, questions, answers and messages are all in the run's event log.
+
+## Many agents and people
+
+Several agents, in different harnesses, and people can work on one
+machine together. Each has an address and a mailbox, all event logs like a
+run's:
+
+| Address | Who | Mailbox |
+|---|---|---|
+| `<alias>` | an agent session or a person that ran `harness join --as <alias>` (`--human` for a person) | `parties/<alias>.jsonl` |
+| `run:<id>` | a run's agent | its event log |
+| `room:<name>` | everyone in the room (`join --room <name>`) | `rooms/<name>.jsonl` |
+
+- **Speak as yourself** with `--as <alias>` (or `HARNESS_AS`). An agent that
+  harness started is its run without it. A party counts as present while it
+  runs harness commands, and away after 30 minutes without: there is no
+  daemon to keep a session open. `harness peers` lists parties, with what
+  they work on, their rooms and claims, and the runs going now.
+- **Your runs:** `harness start <profile> --as <me> "task"` makes the run
+  yours, so its questions, warnings and end reach your inbox.
+- **One inbox:** `harness inbox --as <me> --wait 5m` returns, once each,
+  what is new: your mailbox, your rooms (not your own posts), and what your
+  runs need from you, each line with how to answer. A coordinating agent
+  loops on it; exit 7 means nothing came.
+- **Messages and questions:** `harness post <to> "..."` posts to an alias, a
+  run or a room. `harness ask --as <me> --to <to> "..."` asks and waits for
+  the answer, which the other answers with `harness reply --as <them> <q-id> "..."`.
+  An agent inside a run can ask a peer the same way with `--to`.
+- **Claims** are advisory: `harness claim src/gate --note "refactor"` (paths
+  are resolved from the current folder; a folder covers everything under
+  it) refuses, exit 5 and naming the holder, if someone else holds an
+  overlapping claim. A claim ends after `--for` (2h), when its run ends, or
+  when its party leaves or is away; `harness release` drops it. Claim before
+  editing shared files, and ask the holder rather than work around a claim.
+- **People:** `harness watch` follows every active run and room as it
+  happens (`--room` for one, `--as <me>` for your inbox); answer with
+  `harness reply`, redirect with `harness steer`.
+
+## Bridges
+
+A run's agent reads what was posted to it with `harness inbox`, or at its
+next turn. With a bridge, messages reach it mid-turn through its harness's
+own messaging instead.
+
+- **`bridge: pi-intercom`**, for a Pi agent with the
+  [pi-intercom](https://pi.dev/packages/pi-intercom) extension. While an
+  attempt runs, harness joins pi-intercom's broker as `harness-<run>`
+  (`$PI_CODING_AGENT_DIR/intercom/broker.sock`, default `~/.pi/agent`),
+  finds the agent's session, and sends it what is steered or posted to the
+  run, which pi-intercom puts in at its next safe point; a message delivered
+  this way is not repeated at the next turn. What the agent sends
+  `harness-<run>` through intercom becomes a note in the run's log, or a
+  question, answered with `harness reply`. Without a broker it says so once
+  in the log, and messages wait for the next turn. Built against
+  pi-intercom 0.18's protocol (version 1) and tested with a broker that
+  speaks it, not yet with Pi itself; not on Windows yet.
 
 How much you see depends on the CLI: one that streams JSONL events, with
 progress rules, shows each tool call as it happens; one that prints only

@@ -47,10 +47,11 @@ type Status struct {
 	// context_tokens and context_window, this turn's or the latest turn's
 	// that reported them). 0 when unknown.
 	ContextTokens, ContextWindow float64
-	Activity                     []Event  // the turn's most recent activity, oldest first
-	Said                         string   // the last thing the agent said
-	Asks                         []Event  // the agent\'s questions with no answer yet
-	Changes                      *Changes // nil outside git
+	Activity                     []Event     // the turn's most recent activity, oldest first
+	Said                         string      // the last thing the agent said
+	Asks                         []Event     // the agent\'s questions with no answer yet
+	Claims                       []PathClaim // paths its agent claimed
+	Changes                      *Changes    // nil outside git
 	Hint                         string
 	Error                        string
 	Cursor                       int64 // the event log's end: events --since this shows what comes next
@@ -187,6 +188,13 @@ func (r *Runner) Status(ctx context.Context, id string) (*Status, error) {
 		}
 		if st.ContextWindow == 0 {
 			st.ContextWindow = m["context_window"]
+		}
+	}
+	if cs, err := r.home.Claims(); err == nil {
+		for _, c := range cs {
+			if c.Holder == "run:"+run.ID {
+				st.Claims = append(st.Claims, c)
+			}
 		}
 	}
 	st.Changes = changesOf(ctx, run)

@@ -27,6 +27,7 @@ type Run struct {
 	Depth   int    `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
 	Kind    string `json:"kind,omitempty"`   // a label for grouping stats, such as review
 	From    string `json:"from,omitempty"`   // the run that handed its work over to this one
+	Owner   string `json:"owner,omitempty"`  // the party that started it (--as), whose inbox follows it
 	// Worktree is the git worktree a run started with --worktree works in,
 	// on its own Branch; Workdir is the agent's folder inside it, the
 	// counterpart of Cwd, whose project and profiles still apply.

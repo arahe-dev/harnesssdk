@@ -50,6 +50,18 @@ func fakeAgent(args []string) int {
 		os.Stdout.Write(append([]byte("echo: "), in...))
 		return 0
 	}
+	if len(args) == 1 && args[0] == "askparent" {
+		exe, _ := os.Executable()
+		cmd := exec.Command(exe, "ask", "--wait", "20s", "which database?")
+		cmd.Env = append(os.Environ(), "HARNESS_TEST_FAKE=", "HARNESS_TEST_CLI=1")
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return 1
+		}
+		fmt.Printf("using %s", out)
+		return 0
+	}
 	if len(args) == 1 && args[0] == "selfextend" {
 		// An agent that knows it needs longer than its timeout says so
 		// through harness itself, then takes that long.
@@ -400,5 +412,68 @@ func TestCLIExtendSelf(t *testing.T) {
 	}
 	if code, _, errs := harnessCLI(t, "", "extend", "--self", "5m"); code != 2 || !strings.Contains(errs, "not running inside a harness run") {
 		t.Fatalf("extend --self outside a run: %d %s", code, errs)
+	}
+}
+
+// Several parties on one machine: one starts a run whose agent asks it a
+// question; its inbox wakes with the question and how to answer; claims
+// keep two agents off the same files; peers shows who is there.
+func TestCLIMultiplayer(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["askparent"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, _, errs := harnessCLI(t, "---\nharness: fake\neffect: idempotent\n---\n", "profile", "set", "p", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	for _, j := range [][]string{{"join", "--as", "alice", "--room", "team", "--note", "db layer"}, {"join", "--as", "ana", "--human", "--room", "team"}} {
+		if code, _, errs := harnessCLI(t, "", j...); code != 0 {
+			t.Fatalf("%v: %s", j, errs)
+		}
+	}
+	code, out, errs := harnessCLI(t, "", "start", "p", "--as", "alice", "set up the db")
+	id := strings.TrimSpace(out)
+	if code != 0 || id == "" {
+		t.Fatalf("start: %d %s", code, errs)
+	}
+	// Alice's inbox wakes on her run's question, with how to answer it.
+	var inbox string
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(inbox, "which database?"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no question in alice's inbox: %s", inbox)
+		}
+		_, out, _ := harnessCLI(t, "", "inbox", "--as", "alice", "--wait", "10s")
+		inbox += out
+	}
+	if !strings.Contains(inbox, "harness reply "+id+" q-") {
+		t.Fatalf("inbox: %s", inbox)
+	}
+	if code, _, errs := harnessCLI(t, "", "reply", id, "postgres"); code != 0 {
+		t.Fatalf("reply: %s", errs)
+	}
+	if code, out, errs := harnessCLI(t, "", "wait", id, "--timeout", "60s"); code != 0 || strings.TrimSpace(out) != "using postgres" {
+		t.Fatalf("wait: %d %q %s", code, out, errs)
+	}
+	// The run's end reaches alice too.
+	if _, out, _ := harnessCLI(t, "", "inbox", "--as", "alice", "--json"); !strings.Contains(out, `"kind": "finished"`) {
+		t.Fatalf("alice's inbox after the end: %s", out)
+	}
+	// Rooms.
+	harnessCLI(t, "", "post", "--as", "ana", "room:team", "please keep migrations backward compatible")
+	if _, out, _ := harnessCLI(t, "", "inbox", "--as", "alice"); !strings.Contains(out, "room:team") || !strings.Contains(out, "ana:") {
+		t.Fatalf("room post: %s", out)
+	}
+	// Claims.
+	dir := t.TempDir()
+	if code, _, errs := harnessCLI(t, "", "claim", "--as", "alice", filepath.Join(dir, "db")); code != 0 {
+		t.Fatalf("claim: %s", errs)
+	}
+	if code, _, errs := harnessCLI(t, "", "claim", "--as", "ana", filepath.Join(dir, "db", "schema.sql")); code != harness.ExitThrottled || !strings.Contains(errs, "claimed by alice") {
+		t.Fatalf("conflicting claim: %d %s", code, errs)
+	}
+	if code, out, _ := harnessCLI(t, "", "peers"); code != 0 || !strings.Contains(out, "alice") || !strings.Contains(out, "human") || !strings.Contains(out, filepath.Join(dir, "db")) {
+		t.Fatalf("peers: %s", out)
 	}
 }

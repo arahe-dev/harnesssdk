@@ -64,10 +64,29 @@ reading the files they edit.
   and `harness steer` posts a message; unread messages lead the next turn,
   and `steer --now` stops the turn and continues with the message. Checked
   live with a Claude Code agent asking through its shell.
+- **Many agents and people.** `harness join --as <alias>` (`--human` for
+  a person) gives an agent session or a person a mailbox; `--room` puts it
+  in a shared one. `harness post` messages an alias, a run or a room;
+  `harness ask --to` waits for anyone's answer and `harness reply --as`
+  gives it; runs started `--as` a party are its own. `harness inbox --as
+  <me> --wait` gathers, once each, its mailbox, its rooms, and its runs'
+  questions, warnings and ends. `harness claim` takes advisory leases on
+  paths (refusing, exit 5, an overlap with someone else's; ending with the
+  run, the party, or `--for`); `harness peers` shows who is here, and
+  `harness watch` follows it all live. No daemon: a party is present while
+  it uses harness.
+- **`bridge: pi-intercom`.** For a Pi agent with the pi-intercom
+  extension: messages steered or posted to the run reach it mid-turn
+  through pi-intercom's broker (and are not repeated at the next turn), and
+  what it sends back becomes notes and questions in the run's log. Built
+  against pi-intercom 0.18 (protocol 1) and tested with a broker speaking
+  it; not yet checked with Pi itself, and not on Windows.
 - **Claude Code definition:** an `{allowed_tools}` group, so an agent can be
   allowed to run harness (`Bash(harness *)`) and nothing else.
 - **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`,
-  `Client.Extend`, `Client.Handover`, `Client.Reply`, `Client.Steer`; `Status` has `ContextTokens`,
+  `Client.Extend`, `Client.Handover`, `Client.Reply`, `Client.Steer`,
+  `Client.Join`, `Leave`, `Parties`, `Post`, `Ask`, `Answer`, `Inbox`,
+  `Claim`, `Release`, `Claims`; `Request.Owner`, `Run.Owner`, `Event.From`; `Status` has `ContextTokens`,
   `ContextWindow`, `ContextUsed`, `Deadline` and `Idle`; `Run.From`.
 
 ## v2.0.0-next.1 (2026-10-12)

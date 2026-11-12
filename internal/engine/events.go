@@ -64,8 +64,12 @@ type Event struct {
 	Turn    int       `json:"turn"`
 	Attempt int       `json:"attempt,omitempty"`
 	Kind    string    `json:"kind"`
-	Name    string    `json:"name,omitempty"`
-	Text    string    `json:"text,omitempty"`
+	// From is who posted a message (a run, run:<id>, or a party's alias);
+	// To, in a room or a party's mailbox, who it is for.
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
+	Name string `json:"name,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 // lifecycle reports whether the event moves a turn from one phase to the
@@ -83,7 +87,10 @@ func (r *Run) note(ev Event) {
 	noteAt(r.dir, ev)
 }
 
-func noteAt(dir string, ev Event) {
+func noteAt(dir string, ev Event) { appendEvent(filepath.Join(dir, eventsFile), ev) }
+
+// appendEvent appends an event to the log at path.
+func appendEvent(path string, ev Event) {
 	ev.Format = eventFormat
 	if ev.Time.IsZero() {
 		ev.Time = time.Now().UTC()
@@ -94,7 +101,7 @@ func noteAt(dir string, ev Event) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(dir, eventsFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
@@ -121,17 +128,29 @@ const maxEventRead = 1 << 20
 // harness, is skipped. A cursor past the end (the run was replaced) reads
 // from the start.
 func readEvents(dir string, since int64) ([]Event, int64, error) {
-	f, err := os.Open(filepath.Join(dir, eventsFile))
+	return readEventsAt(filepath.Join(dir, eventsFile), since)
+}
+
+// readEventsAt is readEvents for the log at path.
+func readEventsAt(path string, since int64) ([]Event, int64, error) {
+	evs, _, next, err := readEventsEnds(path, since)
+	return evs, next, err
+}
+
+// readEventsEnds is readEventsAt that also returns, for each event, the
+// offset just after its line.
+func readEventsEnds(path string, since int64) ([]Event, []int64, int64, error) {
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
+		return nil, nil, 0, nil
 	}
 	if err != nil {
-		return nil, since, err
+		return nil, nil, since, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, since, err
+		return nil, nil, since, err
 	}
 	if since < 0 || since > fi.Size() {
 		since = 0
@@ -139,19 +158,22 @@ func readEvents(dir string, since int64) ([]Event, int64, error) {
 	data := make([]byte, min(fi.Size()-since, maxEventRead))
 	n, err := f.ReadAt(data, since)
 	if err != nil && err != io.EOF {
-		return nil, since, err
+		return nil, nil, since, err
 	}
 	data = data[:n]
 	end := bytes.LastIndexByte(data, '\n') + 1 // complete lines only
 	var evs []Event
+	var ends []int64
+	off := since
 	for line := range bytes.SplitSeq(data[:end], []byte{'\n'}) {
+		off += int64(len(line)) + 1
 		var ev Event
 		if len(line) == 0 || json.Unmarshal(line, &ev) != nil || ev.Format > eventFormat || ev.Kind == "" {
 			continue
 		}
-		evs = append(evs, ev)
+		evs, ends = append(evs, ev), append(ends, off)
 	}
-	return evs, since + int64(end), nil
+	return evs, ends, since + int64(end), nil
 }
 
 // tailEvents reads the events of the last part of the log, at most back

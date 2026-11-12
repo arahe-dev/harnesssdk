@@ -430,6 +430,11 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	actx, cancelAttempt := context.WithCancelCause(ctx)
 	defer cancelAttempt(nil)
 	stopClock := t.watchClock(actx, cancelAttempt, stdoutPath, stderrPath)
+	agentPID := make(chan int, 1)
+	stopBridge := func() {}
+	if t.Profile.Bridge == BridgePiIntercom {
+		stopBridge = startPiBridge(actx, t, agentPID)
+	}
 	code, warnings, runErr := runProcess(actx, procSpec{
 		Argv: argv, Dir: t.Run.AgentDir(), Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
@@ -437,8 +442,13 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 			// Record this attempt's agent, so a nested run can find this
 			// turn even when its sibling turns share this process.
 			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
+			select {
+			case agentPID <- pid:
+			default:
+			}
 		},
 	})
+	stopBridge()
 	stopClock()
 	tail.end()
 	t.exitCode = code
@@ -532,6 +542,9 @@ type TurnOptions struct {
 	Check string
 	// Worktree runs each new run in a git worktree of its own.
 	Worktree bool
+	// Owner is the party starting new runs (--as), whose inbox follows
+	// them.
+	Owner string
 }
 
 // request is what a queued turn needs besides its prompt.
@@ -655,7 +668,7 @@ func (r *Runner) create(ctx context.Context, nr *newRuns, tx string) (staged []*
 		}
 		// The first turn is queued before the run is published, so a run
 		// never appears without it.
-		s.Depth, s.Kind = nr.depth, nr.o.Kind
+		s.Depth, s.Kind, s.Owner = nr.depth, nr.o.Kind, nr.o.Owner
 		if err = createStage("mark"); err == nil {
 			err = os.WriteFile(s.Path(creatingFile), []byte(tx+"\n"), 0o600)
 		}

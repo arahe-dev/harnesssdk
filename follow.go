@@ -20,12 +20,13 @@ type Event struct {
 	Kind    string
 	Name    string
 	Text    string
+	From    string // who posted a message: a party's alias, or run:<id>
 }
 
 func eventsOf(evs []engine.Event) []Event {
 	out := make([]Event, len(evs))
 	for i, e := range evs {
-		out[i] = Event{Time: e.Time, Turn: e.Turn, Attempt: e.Attempt, Kind: e.Kind, Name: e.Name, Text: e.Text}
+		out[i] = Event{Time: e.Time, Turn: e.Turn, Attempt: e.Attempt, Kind: e.Kind, Name: e.Name, Text: e.Text, From: e.From}
 	}
 	return out
 }
@@ -150,4 +151,96 @@ func (c *Client) Steer(ctx context.Context, run, message string, now bool) error
 	}
 	_, err := c.home.Steer(run, message)
 	return err
+}
+
+// Party is an agent session or a person that joined, with a mailbox.
+type Party struct {
+	Alias, Kind, Cwd, Note string
+	Rooms                  []string
+	Joined, Seen           time.Time
+	Away                   bool // no harness command for 30 minutes
+}
+
+// Join makes this program a party (kind "agent" or "human") with alias,
+// in rooms. Runs started with Request.Owner set to the alias report to its
+// Inbox.
+func (c *Client) Join(alias, kind, cwd, note string, rooms []string) error {
+	_, err := c.home.Join(alias, kind, cwd, note, rooms)
+	return err
+}
+
+// Leave removes a party and its claims.
+func (c *Client) Leave(alias string) error { return c.home.Leave(alias) }
+
+// Parties lists the parties, most recently seen first.
+func (c *Client) Parties() ([]Party, error) {
+	ps, err := c.home.Parties()
+	out := make([]Party, len(ps))
+	for i, p := range ps {
+		out[i] = Party{Alias: p.Alias, Kind: p.Kind, Cwd: p.Cwd, Note: p.Note, Rooms: p.Rooms, Joined: p.Joined, Seen: p.Seen, Away: p.Away()}
+	}
+	return out, err
+}
+
+// Post puts a message from a party (or "" for the caller) in a mailbox: a
+// party's alias, run:<id> or room:<name>. It returns the message's id.
+func (c *Client) Post(from, to, text string) (string, error) { return c.home.Post(from, to, text) }
+
+// Ask puts a question from a party in a mailbox and waits, until ctx ends,
+// for the answer; answered is false if none came.
+func (c *Client) Ask(ctx context.Context, from, to, question string) (answer string, answered bool, err error) {
+	_, answer, answered, err = c.runner.AskTo(ctx, from, to, question)
+	return answer, answered, err
+}
+
+// Answer replies, as party me, to a question asked of it or of a room it
+// is in, by the question's id.
+func (c *Client) Answer(me, questionID, answer string) error {
+	_, err := c.home.ReplyTo(me, questionID, answer)
+	return err
+}
+
+// InboxItem is one thing in a party's inbox: Source is "me" (its mailbox),
+// room:<name>, or run:<id> (one of its runs).
+type InboxItem struct {
+	Source string
+	Event
+}
+
+// Inbox returns what is new for a party, waiting until there is something
+// or ctx ends, and marks it read: its mailbox, its rooms, and what its runs
+// need from it (questions, warnings, endings).
+func (c *Client) Inbox(ctx context.Context, alias string) ([]InboxItem, error) {
+	items, err := c.home.WaitPartyInbox(ctx, alias, false)
+	out := make([]InboxItem, len(items))
+	for i, it := range items {
+		out[i] = InboxItem{Source: it.Source, Event: eventsOf([]engine.Event{it.Event})[0]}
+	}
+	return out, err
+}
+
+// Claim is an advisory lease on a path.
+type Claim struct {
+	Path, Holder, Note string
+	Until              time.Time
+}
+
+// Claim leases absolute paths (files, or folders and all under them) for
+// holder (a party's alias, or run:<id>) for ttl. A path overlapping
+// someone else's live claim refuses the request, naming them.
+func (c *Client) Claim(holder string, paths []string, ttl time.Duration, note string) error {
+	return c.home.ClaimPaths(holder, paths, ttl, note)
+}
+
+// Release drops holder's claims on paths, or all of them.
+func (c *Client) Release(holder string, paths []string) error { return c.home.Release(holder, paths) }
+
+// Claims lists the live claims.
+func (c *Client) Claims() ([]Claim, error) {
+	cs, err := c.home.Claims()
+	out := make([]Claim, len(cs))
+	for i, cl := range cs {
+		out[i] = Claim{Path: cl.Path, Holder: cl.Holder, Note: cl.Note, Until: cl.Until}
+	}
+	return out, err
 }

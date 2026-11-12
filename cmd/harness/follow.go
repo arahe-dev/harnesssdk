@@ -285,6 +285,13 @@ func printStatus(w io.Writer, st *harness.Status) {
 		}
 		fmt.Fprintf(w, "changes:  %s\n", line)
 	}
+	if len(st.Claims) > 0 {
+		var paths []string
+		for _, c := range st.Claims {
+			paths = append(paths, c.Path)
+		}
+		fmt.Fprintf(w, "claims:   %s\n", strings.Join(paths, ", "))
+	}
 	if st.Error != "" {
 		fmt.Fprintf(w, "error:    %s\n", st.Error)
 	}
@@ -404,53 +411,6 @@ func (c *cli) noteCmd(args []string) (int, error) {
 	return 0, nil
 }
 
-func (c *cli) ask(args []string) (int, error) {
-	fs := c.flags("ask")
-	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for the answer (exit 7 if none came)")
-	pos, err := parse(fs, args)
-	if err != nil {
-		return harness.ExitUsage, err
-	}
-	if len(pos) == 0 {
-		return harness.ExitUsage, usageErr("ask needs a question")
-	}
-	r, err := harness.NewRunner(c.home)
-	if err != nil {
-		return harness.ExitUsage, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), *wait)
-	defer cancel()
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	run, id, answer, answered, err := r.Ask(ctx, strings.Join(pos, " "))
-	if err != nil {
-		return harness.ExitUsage, errUsage{err}
-	}
-	if !answered {
-		fmt.Fprintf(c.stderr, "harness: no answer to %s within %s; go on with your best judgement and say what you assumed, or check later with: harness inbox\n", id, *wait)
-		return harness.ExitRunning, nil
-	}
-	fmt.Fprintln(c.stdout, answer)
-	fmt.Fprintf(c.stderr, "harness: answer to %s in run %s\n", id, run.ID)
-	return 0, nil
-}
-
-func (c *cli) reply(args []string) (int, error) {
-	if len(args) < 2 {
-		return harness.ExitUsage, usageErr("reply needs <run-id> [question-id] \"answer\"")
-	}
-	id, qid, answer := args[0], "", strings.Join(args[1:], " ")
-	if len(args) > 2 && strings.HasPrefix(args[1], "q-") && !strings.Contains(args[1], " ") {
-		qid, answer = args[1], strings.Join(args[2:], " ")
-	}
-	qid, err := c.home.Reply(id, qid, answer)
-	if err != nil {
-		return harness.ExitUsage, errUsage{err}
-	}
-	fmt.Fprintf(c.stderr, "harness: answered %s in run %s\n", qid, id)
-	return 0, nil
-}
-
 func (c *cli) steer(args []string) (int, error) {
 	fs := c.flags("steer")
 	now := fs.Bool("now", false, "stop the running turn and continue the session with the message at once")
@@ -479,24 +439,5 @@ func (c *cli) steer(args []string) (int, error) {
 		return exitFor(err), err
 	}
 	fmt.Fprintf(c.stderr, "harness: %s continues with the message as turn %d, in the background; follow it with: harness wait %s\n", id, n, id)
-	return 0, nil
-}
-
-func (c *cli) inbox(args []string) (int, error) {
-	fs := c.flags("inbox")
-	peek := fs.Bool("peek", false, "show the messages without marking them read")
-	if _, err := parse(fs, args); err != nil {
-		return harness.ExitUsage, err
-	}
-	run, msgs, err := c.home.Inbox(*peek)
-	if err != nil {
-		return harness.ExitUsage, errUsage{err}
-	}
-	for _, m := range msgs {
-		fmt.Fprintf(c.stdout, "%s  %s\n", m.Time.Local().Format("15:04:05"), m.Text)
-	}
-	if len(msgs) == 0 {
-		fmt.Fprintf(c.stderr, "harness: no new messages for run %s\n", run.ID)
-	}
 	return 0, nil
 }

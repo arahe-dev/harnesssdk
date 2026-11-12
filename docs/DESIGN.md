@@ -25,6 +25,9 @@ the same name, which splits one lock into two.
 | `runs/<id>/extend-<turn>` | how far `harness extend` moved the turn's deadline (no lock: replaced whole, under the state lock) |
 | `runs/<id>/asking.lock` | an agent of the run is waiting in `harness ask`; the idle clock counts it as activity |
 | `runs/<id>/inbox.cursor` | how far the run's agent has read the messages posted to it (replaced whole) |
+| `parties/<alias>.lock` | read-modify-write of `parties/<alias>.json` (never removed) |
+| `parties/<alias>.jsonl`, `rooms/<name>.jsonl` | mailboxes: event logs like a run's (no lock: one append each) |
+| `claims.lock` | `claims.json`, the advisory claims (never removed) |
 | `runs/<id>/events.jsonl` | the run's event log (no lock: each event is one append) |
 | `spend/<run>-<turn>-<attempt>-<random>.json` | the spending ledger: one attempt's entry, replaced whole (no lock) |
 | `created/<creation>` | a committed creation (no lock; made once) |
@@ -106,6 +109,36 @@ takes the first reply. Messages are read once: `inbox` moves
 `inbox.cursor`, and a follow-up turn, queued under the state lock, takes
 what is still unread into its prompt and moves the cursor, logging a
 `delivery` event.
+
+## Parties, rooms and claims
+
+A party is a record (`parties/<alias>.json`: kind, folder, rooms, when
+last seen, and its read cursors) and a mailbox. Every command run `--as`
+it updates it under its lock, which is its presence; there is no process
+to hold a session open. Its inbox reads its mailbox, its rooms and the logs
+of the runs it owns from its cursors, and saves them once read, so each
+thing reaches it once; a room it joins is read from then on.
+
+A question to an address goes to that mailbox; its answer goes to the
+asker's (a party's, or its run's log), which the asker watches from where
+it asked, and to the question's mailbox too, which closes it there.
+
+Claims live in one small file, changed under `claims.lock`. Each change
+first drops claims whose holder no longer holds them (expired; its run
+finished; its party gone or away), then refuses a claim overlapping
+someone else's, so a dead holder never blocks anyone.
+
+## The pi-intercom bridge
+
+With `bridge: pi-intercom`, the attempt's process connects to the broker's
+Unix socket, registers (with no liveness interval, so the broker never
+drops it for silence), and lists sessions until it finds the agent's (its
+harness session id, its process id, or one started in its folder since the
+attempt began). It then reads the run's log from the attempt's start, sends
+each message and each reply to an intercom ask, and on the broker's
+`delivered` moves the run's inbox cursor past that message. It unregisters
+when the attempt ends. Nothing depends on it: without it, messages wait for
+the next turn.
 
 ## Creating runs
 
