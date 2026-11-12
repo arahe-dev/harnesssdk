@@ -26,6 +26,12 @@ Most requests are one of these:
   what it is doing and what it has changed; `harness events <run-id> --since <cursor> --wait 2m`
   wakes on what it does next. `harness wait --timeout` prints the status
   when it times out. Use these rather than reading the files it edits.
+- **Time and context:** `harness extend <run-id> 30m` gives a running turn
+  more time (an agent harness started can run `harness extend --self 30m`).
+  A turn stopped by its timeout or idle limit is parked: check it with
+  `harness status`, then `harness send`. If a hint says the context is
+  nearly full, `harness handover <run-id> --next "<task>"` continues in a
+  fresh session.
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
 - **Choose between agents:** `harness stats --kind <label>` shows each
   profile's success rate, time, tokens and cost so far; `harness compare a,b "task"`

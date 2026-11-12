@@ -221,7 +221,9 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `effect` | `pure`, `idempotent`, `non-idempotent` | required: what repeating a run does. Use `idempotent` only if the agent cannot change anything (read-only tools); anything that can edit files or run commands is `non-idempotent`. |
 | `retry` | `transient x2`, `transient,throttled,uncertain x4`, `none` | which outcomes are retried, total attempts. `uncertain` and `throttled` are refused for `non-idempotent` profiles: a run that may have edited files (a rate limit can stop an agent half way) is never replayed blind; continue its session with `send` instead. |
 | `backoff` | `5s` (default `2s`) | the wait before the first retry; it doubles for each retry after, up to 5 minutes, with jitter, and is at least what the CLI asked for (`retry_after`). A turn holds no budget, key or slot while it waits. |
-| `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain` |
+| `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain`. `harness extend` gives a running turn more |
+| `idle` | `15m` (default for a CLI that streams events), `none` | stop an attempt whose agent wrote nothing for this long; the turn is parked, not retried. A CLI that prints only at the end has no idle limit unless set |
+| `handover_at` | `80%` (default), `none` | when a turn ends with the agent's context this full, its hint says to hand over to a fresh session |
 | `budget` | `pi=1, gpu=4` | units claimed from named budgets while the turn runs |
 | `admission` | `wait` (default), `reject` | when a budget or key is taken: queue, or fail at once as `throttled` |
 | `max_wait` | `10m` | the longest a turn waits for its budgets, keys and slot before failing as `throttled` (default: config `max_wait_minutes`) |
@@ -374,6 +376,7 @@ harness def check <name> [--profile P]
 harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json]
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
 harness status <run-id> [--json]      harness events <run-id> [--since C] [--wait D] [--json]
+harness extend <run-id> <D> [--reason R]     harness extend --self <D>     harness handover <run-id> [--next T] [--json]
 ```
 
 - The prompt is the words after the profile, or stdin with `-`. Each
@@ -450,7 +453,10 @@ rather than the agent's files, to know how it is doing.
   it started); otherwise they are everything changed in its folder since
   the last commit, by anyone.
 - `harness wait <run-id> --timeout 5m` prints the same when it times out
-  (exit 7), so each wait tells you something.
+  (exit 7), so each wait tells you something. It also returns early (exit
+  7, `harness: attention: ...`, and `attention` in `--json`) when the turn
+  needs you: a `timeout_soon` event, when its deadline is a fifth away or
+  its agent has been quiet for three quarters of its idle limit.
 - `harness events <run-id> [--since C]` prints the log from cursor `C`
   (default: the start) and the next cursor on stderr. With `--wait 2m` it
   waits for the next event, or for the turn to end, and exits 7 if nothing
@@ -459,6 +465,30 @@ rather than the agent's files, to know how it is doing.
   `say`, `step`) come from the definition's `output.progress` rules.
 - `--json` on each prints the same as JSON; the Go API has `Status`,
   `Events` and `WaitEvents`.
+
+## Time, idleness and context
+
+- **Give a turn more time** while it runs: `harness extend <run-id> 30m`
+  moves its deadline to at least 30 minutes from now (for every attempt of
+  that turn) and resets its idle clock. An agent that harness started can
+  do it for itself, before a long build or a long think:
+  `harness extend --self 30m --reason "full test suite"`. Each extension is
+  in the event log.
+- **Idle limit:** an agent whose CLI streams events, and has written
+  nothing for the profile's `idle` (15m by default), is stopped.
+- **Parked:** a turn stopped by its timeout or idle limit ends
+  `uncertain`, keeps its session, and its hint says to look at
+  `harness status` and continue with `harness send`. The idle limit never
+  retries (a fresh attempt would start the work over); the timeout retries
+  as the profile's `retry` says, as before.
+- **Context:** when a turn ends with the agent's context past the profile's
+  `handover_at` (80% by default; needs `context_tokens` and a window), its
+  hint, and `status`, suggest `harness handover <run-id> --next "<task>"`.
+  That asks the agent, in its session, for handover notes (goal, done,
+  left, decisions, dead ends, how to check), then starts a new run of the
+  same profile in the same folder with the notes and the next task, in the
+  background, and prints its id. `harness show` on the new run names the
+  run it came from; the old run's log names the new one.
 
 How much you see depends on the CLI: one that streams JSONL events, with
 progress rules, shows each tool call as it happens; one that prints only

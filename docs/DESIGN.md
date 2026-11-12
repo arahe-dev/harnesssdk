@@ -22,6 +22,7 @@ the same name, which splits one lock into two.
 | `gate/live/<ticket>.live` | a gate ticket's owner is alive |
 | `runs/.new-<id>.lock` | a run being created; removed only under `create.lock` |
 | `create.lock` | taking and removing creation locks (never removed); waits for it end with the caller |
+| `runs/<id>/extend-<turn>` | how far `harness extend` moved the turn's deadline (no lock: replaced whole, under the state lock) |
 | `runs/<id>/events.jsonl` | the run's event log (no lock: each event is one append) |
 | `spend/<run>-<turn>-<attempt>-<random>.json` | the spending ledger: one attempt's entry, replaced whole (no lock) |
 | `created/<creation>` | a committed creation (no lock; made once) |
@@ -64,8 +65,13 @@ or once a second to reclaim dead tickets.
    worker holds `exec.lock` for the whole turn.
 3. **Each attempt** is admitted at the gate on its own, re-checks the repeat
    guard and spending limits, runs the CLI through Herta (one attempt: its
-   effect checks, timeout as `uncertain`, classification), then, if it
-   answered, the check.
+   effect checks and classification), then, if it answered, the check. The
+   attempt's clock is harness's (`clock.go`): Herta's timeout is a deadline
+   fixed when the attempt begins, and `harness extend` must be able to move
+   it. A watch reads `runs/<id>/extend-<turn>` (replaced whole, no lock) and
+   the output files' times, and cancels the attempt past its deadline, or
+   after `idle` with no output; either is `uncertain`, as Herta's timeout
+   was. An attempt the idle limit stopped is never retried.
 4. **Retries** are harness's own, because Herta 1.0-next has no backoff and
    cannot retry `throttled`: a retryable failure releases its ticket, waits
    the backoff (at least the CLI's `retry_after`), and is admitted again. A

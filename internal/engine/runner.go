@@ -29,9 +29,10 @@ type Turn struct {
 	Def     *Definition
 	Extra   Vars // per-invocation values (--set)
 
-	home        string     // the data folder, for {harness_home}
-	lineage     []string   // gate tickets held for this turn and its ancestors
-	inherit     []*os.File // locks the agent CLI inherits (Unix)
+	home        string        // the data folder, for {harness_home}
+	lineage     []string      // gate tickets held for this turn and its ancestors
+	inherit     []*os.File    // locks the agent CLI inherits (Unix)
+	idle        time.Duration // the idle limit of its attempts; 0 for none
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
@@ -225,7 +226,9 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 // attempt per call; the retries, with backoff and throttled outcomes that
 // Herta 1.0-next cannot express yet, are harness's own (execute).
 func policyFor(p *Profile) hertasdk.Policy[*Turn] {
-	return hertasdk.Policy[*Turn]{Effect: p.Effect, Timeout: p.Timeout, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
+	// No Herta timeout: the attempt's clock is harness's, so that it can be
+	// extended (clock.go).
+	return hertasdk.Policy[*Turn]{Effect: p.Effect, Retry: hertasdk.RetryPolicy{MaxAttempts: 1}}
 }
 
 // retryable reports whether a failed attempt may be repeated: its outcome
@@ -423,7 +426,10 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	}
 	t.Run.note(Event{Turn: t.N, Attempt: t.attempts, Kind: EvAttempt, Name: v["model"], Text: limit})
 	tail := followProgress(t.Def, t.Run, stdoutPath, t.N, t.attempts)
-	code, warnings, runErr := runProcess(ctx, procSpec{
+	actx, cancelAttempt := context.WithCancelCause(ctx)
+	defer cancelAttempt(nil)
+	stopClock := t.watchClock(actx, cancelAttempt, stdoutPath, stderrPath)
+	code, warnings, runErr := runProcess(actx, procSpec{
 		Argv: argv, Dir: t.Run.AgentDir(), Env: env,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr, Inherit: t.inherit,
 		OnStart: func(pid int) {
@@ -432,6 +438,7 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 			r.home.writeActive(activeMarker{Run: t.Run.ID, Turn: t.N, PID: os.Getpid(), AgentPID: pid, AgentStart: processStart(pid)})
 		},
 	})
+	stopClock()
 	tail.end()
 	t.exitCode = code
 	t.stderrTail = readTail(stderrPath, mark, 8<<10)
@@ -461,6 +468,12 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)
+	}
+	if err := clockFailure(actx); err != nil {
+		if x.Session != "" {
+			t.lastSession = x.Session
+		}
+		return nil, err
 	}
 	answer, session := x.Answer, x.Session
 	if code == 0 && xerr == nil && !x.Failed {
@@ -953,6 +966,11 @@ func (r *Runner) Execute(ctx context.Context, id string, n int) Report {
 	if t != nil && len(t.spendHints) > 0 {
 		rep.Hint = strings.TrimPrefix(rep.Hint+"; "+strings.Join(t.spendHints, "; "), "; ")
 	}
+	for _, h := range []string{parkedHint(run, err), handoverHint(run, t)} {
+		if h != "" {
+			rep.Hint = strings.TrimPrefix(rep.Hint+"; "+h, "; ")
+		}
+	}
 	run, ferr := r.finish(id, n, t, res, err, rep.Hint)
 	if run != nil {
 		rep.Run = run
@@ -1005,7 +1023,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 			return nil, nil, err
 		}
 	}
-	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat}
+	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat,
+		idle: idleFor(p, d)}
 	// The repeat guard follows what runs: the profile and definition as
 	// loaded now, which may have been edited since the turn was queued.
 	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
@@ -1112,7 +1131,8 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 				t.logf("== harness warning: recording the attempt's metrics: %v", serr)
 			}
 		}
-		again := executed && retryable(p, err) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
+		// A stuck agent is parked, not started over (clock.go).
+		again := executed && retryable(p, err) && !errors.Is(err, ErrIdle) && t.attempts < p.Retry.MaxAttempts && ctx.Err() == nil && r.closingCtx.Err() == nil
 		if !again {
 			// Counted while the turn still holds its budget, before a
 			// waiting turn of the same request is admitted and checks it.

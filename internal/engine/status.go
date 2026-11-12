@@ -26,6 +26,14 @@ type Status struct {
 	Started     time.Time     // the turn
 	AttemptAt   time.Time     // the current attempt
 	Timeout     time.Duration // per attempt; 0 for none
+	// Deadline is when the current attempt is stopped: its start plus
+	// Timeout, or later if extended; zero if it has no timeout.
+	Deadline time.Time
+	Extended bool          // harness extend moved the deadline
+	Idle     time.Duration // the attempt stops after this long with no output; 0 for none
+	// HandoverAt is how full the context may get before handing over
+	// is suggested; 0 never.
+	HandoverAt float64
 	// LastOutput is when the agent last wrote to its stdout or stderr.
 	// With Live, its CLI streams events as it works, so a long silence
 	// means it is thinking, waiting on a tool, or stuck; without, the CLI
@@ -90,6 +98,7 @@ func (r *Runner) Status(ctx context.Context, id string) (*Status, error) {
 	if perr == nil {
 		st.Timeout, st.MaxAttempts = p.Timeout, max(p.Retry.MaxAttempts, 1)
 		st.Live = d.Output.Format == "jsonl"
+		st.Idle, st.HandoverAt = idleFor(p, d), handoverAt(p)
 	}
 
 	evs, cursor, _ := tailEvents(run.dir, 256<<10)
@@ -129,6 +138,13 @@ func (r *Runner) Status(ctx context.Context, id string) (*Status, error) {
 		}
 		if rec.Outcome == "running" && last == "" {
 			st.Phase = "admitting"
+		}
+	}
+	until, _ := readExtension(run, rec.N)
+	if !st.AttemptAt.IsZero() && st.Timeout > 0 {
+		st.Deadline = st.AttemptAt.Add(st.Timeout)
+		if until.After(st.Deadline) {
+			st.Deadline, st.Extended = until, true
 		}
 	}
 	for _, name := range []string{"stdout.log", "stderr.log"} {
@@ -261,12 +277,16 @@ func (s *Status) Next() []string {
 		return []string{
 			"harness wait " + id + " --timeout 5m",
 			fmt.Sprintf("harness events %s --since %d --wait 2m", id, s.Cursor),
+			"harness extend " + id + " 30m",
 			"harness stop " + id,
 		}
 	}
 	next := []string{"harness result " + id}
 	if s.Run.Session != "" {
 		next = append(next, "harness send "+id+" \"<follow-up>\"")
+		if share, ok := s.ContextUsed(); ok && s.HandoverAt > 0 && share >= s.HandoverAt {
+			next = append(next, "harness handover "+id+" --next \"<the next task>\"")
+		}
 	}
 	return next
 }

@@ -50,6 +50,21 @@ func fakeAgent(args []string) int {
 		os.Stdout.Write(append([]byte("echo: "), in...))
 		return 0
 	}
+	if len(args) == 1 && args[0] == "selfextend" {
+		// An agent that knows it needs longer than its timeout says so
+		// through harness itself, then takes that long.
+		exe, _ := os.Executable()
+		cmd := exec.Command(exe, "extend", "--self", "20s", "--reason", "a long build")
+		cmd.Env = append(os.Environ(), "HARNESS_TEST_FAKE=", "HARNESS_TEST_CLI=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "extend --self: %v: %s", err, out)
+			return 1
+		}
+		time.Sleep(2500 * time.Millisecond)
+		fmt.Println("extended myself")
+		return 0
+	}
 	if len(args) == 2 && args[0] == "stream" {
 		// JSONL progress, then the answer once the gate file exists.
 		fmt.Println(`{"type":"tool","name":"edit","path":"a.go"}`)
@@ -359,5 +374,31 @@ func TestCLIFollowRun(t *testing.T) {
 	}
 	if code, out, _ := harnessCLI(t, "", "status", id); code != 0 || !strings.Contains(out, "phase:    success") || !strings.Contains(out, "harness result "+id) {
 		t.Fatalf("status: %d %s", code, out)
+	}
+}
+
+// A running agent can give itself more time: harness extend --self, run
+// inside the run, moves its own deadline.
+func TestCLIExtendSelf(t *testing.T) {
+	t.Setenv("HARNESS_HOME", t.TempDir())
+	exe, _ := os.Executable()
+	def := `{"command":` + strconv.Quote(exe) + `,"args":[["selfextend"]],"env":{"HARNESS_TEST_FAKE":"1"},"output":{"format":"text"}}`
+	if code, _, errs := harnessCLI(t, def, "def", "set", "fake", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	if code, _, errs := harnessCLI(t, "---\nharness: fake\neffect: idempotent\ntimeout: 1s\n---\n", "profile", "set", "p", "--file", "-"); code != 0 {
+		t.Fatal(errs)
+	}
+	code, out, errs := harnessCLI(t, "", "run", "p", "go")
+	if code != 0 || strings.TrimSpace(out) != "extended myself" {
+		t.Fatalf("run: %d %q %s", code, out, errs)
+	}
+	code, out, _ = harnessCLI(t, "", "runs", "--limit", "1")
+	id := strings.Fields(out)[0]
+	if code, out, _ := harnessCLI(t, "", "events", id); code != 0 || !strings.Contains(out, "extend  self  until") || !strings.Contains(out, "a long build") {
+		t.Fatalf("events: %d %s", code, out)
+	}
+	if code, _, errs := harnessCLI(t, "", "extend", "--self", "5m"); code != 2 || !strings.Contains(errs, "not running inside a harness run") {
+		t.Fatalf("extend --self outside a run: %d %s", code, errs)
 	}
 }

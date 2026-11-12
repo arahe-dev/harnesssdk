@@ -215,6 +215,51 @@ func (r *Runner) WaitEvents(ctx context.Context, id string, since int64) (evs []
 	}
 }
 
+// needsAttention reports whether an event should wake a caller waiting for
+// the turn to end: something it can still act on.
+func needsAttention(e Event) bool { return e.Kind == EvTimeoutSoon }
+
+// WaitAttention is WaitTurn for the run's last turn that also returns,
+// unfinished, as soon as an event that needs the caller's attention is
+// logged (such as timeout_soon), with those events.
+func (r *Runner) WaitAttention(ctx context.Context, id string) (rep Report, finished bool, alerts []Event, err error) {
+	run, err := r.home.LoadRun(id)
+	if err != nil {
+		return Report{}, false, nil, err
+	}
+	n := len(run.Turns)
+	_, cursor, err := tailEvents(run.dir, 0)
+	if err != nil {
+		return Report{}, false, nil, err
+	}
+	now, cancel := context.WithCancel(ctx)
+	cancel()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if rep, finished, err = r.WaitTurn(now, id, n); err != nil || finished {
+			return rep, finished, nil, err
+		}
+		var evs []Event
+		if evs, cursor, err = readEvents(run.dir, cursor); err != nil {
+			return rep, false, nil, err
+		}
+		for _, e := range evs {
+			if e.Turn == n && needsAttention(e) {
+				alerts = append(alerts, e)
+			}
+		}
+		if len(alerts) > 0 {
+			return rep, false, alerts, nil
+		}
+		select {
+		case <-ctx.Done():
+			return rep, false, nil, nil
+		case <-tick.C:
+		}
+	}
+}
+
 func lastFinished(run *Run) bool {
 	n := len(run.Turns)
 	return n == 0 || run.Turns[n-1].finished()

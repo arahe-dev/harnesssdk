@@ -26,6 +26,7 @@ type Run struct {
 	Parent  string `json:"parent,omitempty"` // the harness run whose agent started this one
 	Depth   int    `json:"depth,omitempty"`  // nesting below the top-level run: 0 at top
 	Kind    string `json:"kind,omitempty"`   // a label for grouping stats, such as review
+	From    string `json:"from,omitempty"`   // the run that handed its work over to this one
 	// Worktree is the git worktree a run started with --worktree works in,
 	// on its own Branch; Workdir is the agent's folder inside it, the
 	// counterpart of Cwd, whose project and profiles still apply.

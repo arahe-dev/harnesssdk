@@ -107,6 +107,84 @@ func (c *cli) events(args []string) (int, error) {
 	return 0, nil
 }
 
+func (c *cli) extend(args []string) (int, error) {
+	fs := c.flags("extend")
+	self := fs.Bool("self", false, "extend the run this agent is running in (for an agent that harness started)")
+	reason := fs.String("reason", "", "why, for the run's event log")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	id, by := "", "caller"
+	switch {
+	case *self && len(pos) == 1:
+		p := c.home.DiscoverParentage()
+		if p.Parent == "" {
+			return harness.ExitUsage, usageErr("--self: this process is not running inside a harness run")
+		}
+		id, by = p.Parent, "self"
+	case !*self && len(pos) == 2:
+		id = pos[0]
+		pos = pos[1:]
+	default:
+		return harness.ExitUsage, usageErr("extend needs <run-id> <duration>, or --self <duration>")
+	}
+	d, err := time.ParseDuration(pos[0])
+	if err != nil {
+		return harness.ExitUsage, usageErr("duration %q: use a form such as 30m or 1h30m", pos[0])
+	}
+	until, err := r.Extend(id, d, *reason, by)
+	if err != nil {
+		return harness.ExitUsage, errUsage{err}
+	}
+	fmt.Fprintf(c.stdout, "%s may run until %s (%s from now)\n", id, until.Local().Format("15:04:05"), time.Until(until).Round(time.Second))
+	return 0, nil
+}
+
+func (c *cli) handover(args []string) (int, error) {
+	fs := c.flags("handover")
+	next := fs.String("next", "", "what the new run should do next (default: continue the work)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	if len(pos) != 1 {
+		return harness.ExitUsage, usageErr("handover needs <run-id>")
+	}
+	r, err := harness.NewRunner(c.home)
+	if err != nil {
+		return harness.ExitUsage, err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(c.stderr, "harness: asking %s for handover notes\n", pos[0])
+	nr, rep, err := r.Handover(ctx, pos[0], *next)
+	c.drain(r)
+	if err != nil {
+		if rep.Run != nil {
+			c.status1(rep)
+		}
+		return exitFor(err), err
+	}
+	fmt.Fprintf(c.stderr, "harness: %s handed over to %s, started in the background; its notes are turn %d of %s\n", pos[0], nr.ID, rep.Turn, pos[0])
+	if *asJSON {
+		data, _ := json.MarshalIndent(struct {
+			Run   string `json:"run"`
+			From  string `json:"from"`
+			Notes string `json:"notes"`
+		}{nr.ID, pos[0], rep.Output}, "", "  ")
+		fmt.Fprintln(c.stdout, string(data))
+	} else {
+		fmt.Fprintln(c.stdout, nr.ID)
+	}
+	return 0, nil
+}
+
 // eventLine is one event on a line: time, turn, kind, name, text.
 func eventLine(ev harness.Event) string {
 	parts := []string{ev.Time.Local().Format("15:04:05"), fmt.Sprintf("turn %d", ev.Turn), ev.Kind}
@@ -146,15 +224,23 @@ func printStatus(w io.Writer, st *harness.Status) {
 		}
 		phase += " · " + end.Sub(st.Started).Round(time.Second).String()
 	}
-	if st.Phase == "running" && !st.AttemptAt.IsZero() && st.Timeout > 0 {
-		left := st.Timeout - time.Since(st.AttemptAt)
-		phase += fmt.Sprintf(" · %s left of its %s timeout", max(left, 0).Round(time.Second), st.Timeout)
+	if st.Phase == "running" && !st.Deadline.IsZero() {
+		left := max(time.Until(st.Deadline), 0).Round(time.Second)
+		if st.Extended {
+			phase += fmt.Sprintf(" · %s left (extended to %s)", left, st.Deadline.Local().Format("15:04:05"))
+		} else {
+			phase += fmt.Sprintf(" · %s left of its %s timeout", left, st.Timeout)
+		}
 	}
 	fmt.Fprintf(w, "phase:    %s\n", phase)
 	if st.Phase == "running" && !st.LastOutput.IsZero() {
 		quiet := time.Since(st.LastOutput).Round(time.Second)
 		if st.Live {
-			fmt.Fprintf(w, "output:   last %s ago (its CLI streams events as it works)\n", quiet)
+			limit := ""
+			if st.Idle > 0 {
+				limit = fmt.Sprintf("; stopped after %s quiet", st.Idle)
+			}
+			fmt.Fprintf(w, "output:   last %s ago (its CLI streams events as it works%s)\n", quiet, limit)
 		} else {
 			fmt.Fprintf(w, "output:   its CLI prints only when it is done; follow its files below\n")
 		}
@@ -232,7 +318,9 @@ type jsonStatus struct {
 	ElapsedMS   int64              `json:"elapsed_ms,omitempty"`
 	TimeoutMS   int64              `json:"timeout_ms,omitempty"`
 	TimeLeftMS  *int64             `json:"time_left_ms,omitempty"`
+	Deadline    *time.Time         `json:"deadline,omitempty"`
 	QuietMS     *int64             `json:"quiet_ms,omitempty"`
+	IdleMS      int64              `json:"idle_ms,omitempty"`
 	Live        bool               `json:"live"`
 	Metrics     map[string]float64 `json:"metrics,omitempty"`
 	// Context: tokens in the agent's context, its model's window, and the
@@ -271,10 +359,12 @@ func statusJSON(st *harness.Status) jsonStatus {
 			j.ElapsedMS = end.Sub(st.Started).Milliseconds()
 		}
 	}
+	j.IdleMS = st.Idle.Milliseconds()
 	if st.Phase == "running" {
-		if !st.AttemptAt.IsZero() && st.Timeout > 0 {
-			left := max(st.Timeout-time.Since(st.AttemptAt), 0).Milliseconds()
+		if !st.Deadline.IsZero() {
+			left := max(time.Until(st.Deadline), 0).Milliseconds()
 			j.TimeLeftMS = &left
+			j.Deadline = &st.Deadline
 		}
 		if !st.LastOutput.IsZero() {
 			quiet := time.Since(st.LastOutput).Milliseconds()

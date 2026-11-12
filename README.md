@@ -25,11 +25,13 @@ prompts and context. The child runs in its own harness's native one-shot mode
   an agent built on it is a Markdown **profile**. Agents create both by
   running `harness` commands, after reading the CLI's own `--help`.
 - **HertaSDK owns the execution contract.** Each profile is a Herta operation
-  with a declared effect, retry table and per-attempt timeout, checked when the
-  profile is saved: a profile that could replay a half-finished file-editing
-  run is rejected before it ever runs. Budgets and serialize keys are
-  arbitrated once, across every harness process on the machine, with Herta's
-  budget rules.
+  with a declared effect and retry table, checked when the profile is saved:
+  a profile that could replay a half-finished file-editing run is rejected
+  before it ever runs. Budgets and serialize keys are arbitrated once, across
+  every harness process on the machine, with Herta's budget rules. Where Herta
+  cannot yet express something an agent needs (backoff, retrying throttled
+  turns, a deadline that can be extended), harness does it beside Herta,
+  under the same rules.
 
 ## Example: a Pi GPT-6.1 Sol reviewer
 
@@ -131,6 +133,7 @@ rather than misread it, and reads files from earlier releases as they are.
 | **Checks and worktrees** | A profile's `check` (or `--check`) is a command, such as `go test ./...`, that must pass in the agent's folder for the turn to succeed, so success means the work is right. `--worktree` gives a run its own git worktree and branch, so agents that edit files run side by side and `compare` can set them against each other. |
 | **Metrics** (`output.metrics` in a definition) | Numbers read from the CLI's own output with every turn: tokens, cost, model calls, tool calls. `harness stats` sums them up per profile and model (and per `--kind` of task) with success rates and times; `harness compare a,b "task"` runs one task on several profiles side by side. The guide's section on choosing a harness and model turns a 2026 study of harness design into starting points to check this way. |
 | **Run** (`runs/<id>/`) | One delegated agent: its session, every turn's prompt and answer, raw stdout/stderr. `run` waits; `start` returns at once and a background worker finishes the turn; `wait`, `result`, `stop` and `send` work on it from any later command. |
+| **Time and context** | A profile's `timeout` is per attempt and can be extended while it runs, by the caller or the agent itself (`harness extend <run-id> 30m`, `harness extend --self 30m`); `timeout_soon` warns first and wakes a waiting `wait`. An agent whose CLI streams events is stopped after `idle` (15m by default) without output. Either way the turn is **parked**: its session is kept, and a stuck agent is not started over. When a turn ends with the agent's context past `handover_at` (80%), its hint says so, and `harness handover <run-id>` continues the work in a fresh session from the agent's own handover notes. |
 | **Events and status** (`runs/<id>/events.jsonl`) | How a caller follows a run while it works, without reading the files its agent edits. The log records each turn's lifecycle (queued, admitted, attempts, retries, check, finished) and, through a definition's `output.progress` rules, the agent's tool calls and messages as the CLI streams them. `harness status <run-id>` sums it up with how full the agent's context is (`context_tokens` against `context_window`), the files changed and what to run next; `harness events --since <cursor> --wait 2m` wakes on what happens next; `wait --timeout` prints the status instead of nothing. |
 
 How a run ends maps to Herta outcomes and exit codes: 0 success, 3 permanent,

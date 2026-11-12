@@ -35,8 +35,29 @@ reading the files they edit.
   `{permission_mode}` group, without which print mode cannot edit files.
   The guide adds progress and context rules for Pi and OpenCode, and says
   why Codex's stream has no measure of context.
-- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`;
-  `Status` has `ContextTokens`, `ContextWindow` and `ContextUsed`.
+- **Extendable timeouts.** The attempt clock is harness's now, not Herta's
+  (Herta's per-attempt deadline is fixed when the attempt begins): same
+  `timeout`, same `uncertain` outcome and retries, but
+  `harness extend <run-id> 30m`, or `harness extend --self 30m` from the
+  agent, moves a running turn's deadline and resets its idle clock.
+- **Idle limit.** A profile's `idle` (15m by default for a CLI that streams
+  events, none for one that prints only at the end; `idle: none` turns it
+  off) stops an agent that wrote nothing for that long. It is not retried.
+- **Parked turns.** A turn stopped by its timeout or idle limit keeps its
+  session, and its hint says to check it and continue with `send`.
+- **`timeout_soon`.** A deadline's last fifth, or three quarters of an idle
+  limit, is announced in the log once, and `harness wait` returns early on
+  it (exit 7, with the status and an `attention` list), so the caller can
+  extend in time.
+- **Handover.** A turn that ends with the agent's context past the
+  profile's `handover_at` (80% by default; `none` turns it off) says so in
+  its hint and in `status`. `harness handover <run-id> [--next task]` asks
+  the agent for handover notes in its session, then starts a new run of the
+  same profile and folder with them, in the background; the new run
+  records `from`.
+- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`,
+  `Client.Extend`, `Client.Handover`; `Status` has `ContextTokens`,
+  `ContextWindow`, `ContextUsed`, `Deadline` and `Idle`; `Run.From`.
 
 ## v2.0.0-next.1 (2026-10-12)
 

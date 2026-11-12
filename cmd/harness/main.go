@@ -37,6 +37,8 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness wait <run-id> [--timeout 5m]     wait for a run's turn to finish, then print it (exit 7: still running, with its status)
   harness status <run-id>                  where a run is, what its agent is doing and has changed; --json
   harness events <run-id> [--since c]      a run's event log from a cursor; --wait 2m for the next ones; --json
+  harness extend <run-id|--self> 30m       give a running turn more time (and reset its idle clock); --reason
+  harness handover <run-id> [--next task]  continue a run whose context is full in a fresh session; prints the new run id
   harness result <run-id>                  print a run's last turn without waiting
   harness stop <run-id>                    stop a run's turn
   harness runs | show <run-id> | status    past runs; budgets, keys and active runs
@@ -153,6 +155,10 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return c.statusCmd(args)
 	case "events":
 		return c.events(args)
+	case "extend":
+		return c.extend(args)
+	case "handover":
+		return c.handover(args)
 	}
 	return harness.ExitUsage, usageErr("unknown command %q; see: harness help", cmd)
 }
@@ -860,7 +866,14 @@ func (c *cli) wait(args []string, now bool) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rep, finished, err := r.Wait(ctx, pos[0])
+	var rep harness.Report
+	var finished bool
+	var alerts []harness.Event
+	if now {
+		rep, finished, err = r.Wait(ctx, pos[0])
+	} else {
+		rep, finished, alerts, err = r.WaitAttention(ctx, pos[0])
+	}
 	if err != nil {
 		return harness.ExitUsage, errUsage{err}
 	}
@@ -875,8 +888,11 @@ func (c *cli) wait(args []string, now bool) (int, error) {
 				j := statusJSON(st)
 				js = &j
 			}
-			c.reportStatus(rep, js)
+			c.reportStatus(rep, js, alerts)
 		} else {
+			for _, e := range alerts {
+				fmt.Fprintf(c.stderr, "harness: attention: %s\n", eventLine(e))
+			}
 			fmt.Fprintf(c.stderr, "harness: %s turn %d is still %s; wait again with: harness wait %s\n", rep.Run.ID, rep.Turn, rep.Outcome, rep.Run.ID)
 			if serr == nil {
 				printStatus(c.stdout, st)
@@ -940,7 +956,8 @@ type jsonReport struct {
 	Branch     string             `json:"branch,omitempty"`  // a worktree run's branch
 	Changes    string             `json:"changes,omitempty"`
 	// Status is where an unfinished turn is, for wait --timeout.
-	Status *jsonStatus `json:"status,omitempty"`
+	Status    *jsonStatus     `json:"status,omitempty"`
+	Attention []harness.Event `json:"attention,omitempty"`
 }
 
 func jsonOf(rep harness.Report) jsonReport {
@@ -957,10 +974,11 @@ func jsonOf(rep harness.Report) jsonReport {
 	return j
 }
 
-// reportStatus prints an unfinished turn as JSON, with its status.
-func (c *cli) reportStatus(rep harness.Report, st *jsonStatus) {
+// reportStatus prints an unfinished turn as JSON, with its status and the
+// events that woke the wait early.
+func (c *cli) reportStatus(rep harness.Report, st *jsonStatus, alerts []harness.Event) {
 	j := jsonOf(rep)
-	j.ExitCode, j.Status = harness.ExitRunning, st
+	j.ExitCode, j.Status, j.Attention = harness.ExitRunning, st, alerts
 	data, _ := json.MarshalIndent(j, "", "  ")
 	fmt.Fprintln(c.stdout, string(data))
 }
@@ -1083,6 +1101,9 @@ func (c *cli) show(args []string) error {
 	}
 	if r.Kind != "" {
 		fmt.Fprintf(c.stdout, "kind:    %s\n", r.Kind)
+	}
+	if r.From != "" {
+		fmt.Fprintf(c.stdout, "from:    %s (handed over)\n", r.From)
 	}
 	if r.Worktree != "" {
 		fmt.Fprintf(c.stdout, "branch:  %s (worktree %s, from %.12s)\n", r.Branch, r.Worktree, r.Base)

@@ -58,6 +58,8 @@ type Status struct {
 	Started     time.Time
 	AttemptAt   time.Time     // when the current attempt began
 	Timeout     time.Duration // per attempt; 0 for none
+	Deadline    time.Time     // when the current attempt stops, extensions included; zero for none
+	Idle        time.Duration // the attempt stops after this long with no output; 0 for none
 	// LastOutput is when the agent last wrote output. Live says its CLI
 	// streams events as it works; otherwise it prints only at the end.
 	LastOutput time.Time
@@ -98,7 +100,7 @@ func (c *Client) Status(ctx context.Context, run string) (*Status, error) {
 		return nil, err
 	}
 	out := &Status{Run: st.Run.ID, Turn: st.Turn, Outcome: Outcome(st.Outcome), Phase: st.Phase, Attempt: st.Attempt,
-		MaxAttempts: st.MaxAttempts, Started: st.Started, AttemptAt: st.AttemptAt, Timeout: st.Timeout,
+		MaxAttempts: st.MaxAttempts, Started: st.Started, AttemptAt: st.AttemptAt, Timeout: st.Timeout, Deadline: st.Deadline, Idle: st.Idle,
 		LastOutput: st.LastOutput, Live: st.Live, Metrics: metricsOf(st.Metrics), Activity: eventsOf(st.Activity),
 		Said: st.Said, Hint: st.Hint, Error: st.Error, Cursor: st.Cursor, Next: st.Next()}
 	out.ContextTokens, out.ContextWindow, out.ContextUsed = int64(st.ContextTokens), int64(st.ContextWindow), -1
@@ -110,4 +112,23 @@ func (c *Client) Status(ctx context.Context, run string) (*Status, error) {
 			Added: ch.Added, Deleted: ch.Deleted}
 	}
 	return out, nil
+}
+
+// Extend gives a run's unfinished turn until at least d from now (its
+// attempts' timeout is moved, and its idle clock reset), and returns the
+// new deadline. reason is noted in the run's event log.
+func (c *Client) Extend(run string, d time.Duration, reason string) (time.Time, error) {
+	return c.runner.Extend(run, d, reason, "caller")
+}
+
+// Handover continues a run whose context is full in a fresh session: it
+// asks the agent for handover notes, then starts a new run of the same
+// profile and folder, in the background, with the notes and next ("" to
+// continue the work). It returns the new run's id and the notes.
+func (c *Client) Handover(ctx context.Context, run, next string) (newRun, notes string, err error) {
+	nr, rep, err := c.runner.Handover(ctx, run, next)
+	if nr != nil {
+		newRun = nr.ID
+	}
+	return newRun, rep.Output, err
 }
