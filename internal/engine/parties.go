@@ -408,6 +408,9 @@ func (h *Home) PartyInbox(alias string, peek bool) ([]InboxItem, error) {
 		}
 		read(key, filepath.Join(run.dir, eventsFile), forParty)
 	}
+	// Oldest first. Each source keeps its own order; items from different
+	// sources with the same time (one clock tick: coarse on Windows) come in
+	// the order the sources are read.
 	slices.SortStableFunc(items, func(a, b InboxItem) int { return a.Time.Compare(b.Time) })
 	if !peek {
 		_, err = h.updateParty(alias, false, func(p *Party) error {

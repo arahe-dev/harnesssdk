@@ -50,9 +50,14 @@ func TestPartiesAndRooms(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("bob peeks: %v %v", itemKinds(items), err)
 	}
+	// Ordered by time; two posts in the same clock tick (Windows' clock is
+	// coarse) from different sources may come either way round.
 	items, _ = h.PartyInbox("bob", false)
-	if got := itemKinds(items); !slices.Equal(got, []string{"room:team/message", "me/message"}) || items[1].From != "alice" {
-		t.Fatalf("bob's inbox: %v", got)
+	got := itemKinds(items)
+	slices.Sort(got)
+	direct := slices.IndexFunc(items, func(it InboxItem) bool { return it.Source == "me" })
+	if !slices.Equal(got, []string{"me/message", "room:team/message"}) || direct < 0 || items[direct].From != "alice" || items[direct].Text != "can you review #12?" {
+		t.Fatalf("bob's inbox: %v", itemKinds(items))
 	}
 	if items, _ := h.PartyInbox("bob", false); len(items) != 0 {
 		t.Fatalf("read twice: %v", itemKinds(items))
