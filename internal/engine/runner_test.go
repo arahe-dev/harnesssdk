@@ -119,7 +119,7 @@ func fakeHarness(args []string) int {
 		// its gate file (if any) before answering.
 		fmt.Println(`{"type":"tool_start","tool":"edit","args":{"path":"a.go"}}`)
 		fmt.Println(`{"type":"tool_start","tool":"bash","args":{"command":"go test ./..."}}`)
-		fmt.Println(`{"type":"message","role":"assistant","text":"fixing the race"}`)
+		fmt.Println(`{"type":"message","role":"assistant","text":"fixing the race","usage":{"ctx":300}}`)
 		os.WriteFile("touched.txt", []byte("edited by the agent\n"), 0o644)
 		if gate := opts["gate"]; gate != "" {
 			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -128,8 +128,8 @@ func fakeHarness(args []string) int {
 				}
 			}
 		}
-		fmt.Println(`{"type":"message","role":"assistant","text":"done"}`)
-		fmt.Printf(`{"type":"done","text":"answer: %s"}`+"\n", strings.TrimSpace(string(in)))
+		fmt.Println(`{"type":"message","role":"assistant","text":"done","usage":{"ctx":400}}`)
+		fmt.Printf(`{"type":"done","text":"answer: %s","models":{"m-1":{"contextWindow":1000}}}`+"\n", strings.TrimSpace(string(in)))
 	case "nested":
 		// Act as a harness command run by the agent; with strip=1, as one
 		// whose harness removed harness's environment variables.

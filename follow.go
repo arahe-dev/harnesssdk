@@ -63,8 +63,14 @@ type Status struct {
 	LastOutput time.Time
 	Live       bool
 	Metrics    Metrics
-	Activity   []Event // the turn's most recent activity, oldest first
-	Said       string  // the last thing the agent said
+	// ContextTokens is what the agent's context held at its last model
+	// call and ContextWindow its model's window, from the CLI's metrics
+	// (context_tokens, context_window) or the profile's context_window; 0
+	// when unknown. ContextUsed is their ratio, 0 to 1, or -1 if unknown.
+	ContextTokens, ContextWindow int64
+	ContextUsed                  float64
+	Activity                     []Event // the turn's most recent activity, oldest first
+	Said                         string  // the last thing the agent said
 	// Changes are the files changed where the agent works: Scope "branch"
 	// for a worktree run, "folder" for everything changed there since its
 	// last commit, by anyone. Nil outside git.
@@ -95,6 +101,10 @@ func (c *Client) Status(ctx context.Context, run string) (*Status, error) {
 		MaxAttempts: st.MaxAttempts, Started: st.Started, AttemptAt: st.AttemptAt, Timeout: st.Timeout,
 		LastOutput: st.LastOutput, Live: st.Live, Metrics: metricsOf(st.Metrics), Activity: eventsOf(st.Activity),
 		Said: st.Said, Hint: st.Hint, Error: st.Error, Cursor: st.Cursor, Next: st.Next()}
+	out.ContextTokens, out.ContextWindow, out.ContextUsed = int64(st.ContextTokens), int64(st.ContextWindow), -1
+	if share, ok := st.ContextUsed(); ok {
+		out.ContextUsed = share
+	}
 	if ch := st.Changes; ch != nil {
 		out.Changes = &Changes{Scope: ch.Scope, Summary: ch.Summary(), Files: ch.Files, Changed: ch.Changed, New: ch.New,
 			Added: ch.Added, Deleted: ch.Deleted}

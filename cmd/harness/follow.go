@@ -162,6 +162,9 @@ func printStatus(w io.Writer, st *harness.Status) {
 	if s := spend(st.Metrics); s != "" {
 		fmt.Fprintf(w, "spent:    %s\n", strings.TrimPrefix(s, " · "))
 	}
+	if line := contextLine(st); line != "" {
+		fmt.Fprintf(w, "context:  %s\n", line)
+	}
 	if len(st.Activity) > 0 {
 		for i, ev := range st.Activity {
 			label := "          "
@@ -204,6 +207,18 @@ func printStatus(w io.Writer, st *harness.Status) {
 	}
 }
 
+// contextLine is how full the agent's context is, as far as it is known.
+func contextLine(st *harness.Status) string {
+	used := map[string]float64{"t": st.ContextTokens}
+	switch share, ok := st.ContextUsed(); {
+	case ok:
+		return fmt.Sprintf("%.0f%% (%s of %s tokens)", share*100, tokens(used, "t"), tokens(map[string]float64{"t": st.ContextWindow}, "t"))
+	case st.ContextTokens > 0:
+		return tokens(used, "t") + " tokens (window unknown: set context_window in the profile)"
+	}
+	return ""
+}
+
 type jsonStatus struct {
 	Run         string             `json:"run"`
 	Profile     string             `json:"profile"`
@@ -220,13 +235,18 @@ type jsonStatus struct {
 	QuietMS     *int64             `json:"quiet_ms,omitempty"`
 	Live        bool               `json:"live"`
 	Metrics     map[string]float64 `json:"metrics,omitempty"`
-	Activity    []harness.Event    `json:"activity,omitempty"`
-	Said        string             `json:"said,omitempty"`
-	Changes     *jsonChanges       `json:"changes,omitempty"`
-	Error       string             `json:"error,omitempty"`
-	Hint        string             `json:"hint,omitempty"`
-	Cursor      int64              `json:"cursor"`
-	Next        []string           `json:"next,omitempty"`
+	// Context: tokens in the agent's context, its model's window, and the
+	// share used, when known.
+	ContextTokens float64         `json:"context_tokens,omitempty"`
+	ContextWindow float64         `json:"context_window,omitempty"`
+	ContextUsed   *float64        `json:"context_used,omitempty"`
+	Activity      []harness.Event `json:"activity,omitempty"`
+	Said          string          `json:"said,omitempty"`
+	Changes       *jsonChanges    `json:"changes,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	Hint          string          `json:"hint,omitempty"`
+	Cursor        int64           `json:"cursor"`
+	Next          []string        `json:"next,omitempty"`
 }
 
 type jsonChanges struct {
@@ -260,6 +280,11 @@ func statusJSON(st *harness.Status) jsonStatus {
 			quiet := time.Since(st.LastOutput).Milliseconds()
 			j.QuietMS = &quiet
 		}
+	}
+	j.ContextTokens, j.ContextWindow = st.ContextTokens, st.ContextWindow
+	if share, ok := st.ContextUsed(); ok {
+		share = float64(int(share*1000+0.5)) / 1000
+		j.ContextUsed = &share
 	}
 	if ch := st.Changes; ch != nil {
 		j.Changes = &jsonChanges{Scope: ch.Scope, Summary: ch.Summary(), Files: ch.Files}

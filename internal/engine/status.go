@@ -33,12 +33,18 @@ type Status struct {
 	LastOutput time.Time
 	Live       bool
 	Metrics    map[string]float64 // the turn's so far, the current attempt included
-	Activity   []Event            // the turn's most recent activity, oldest first
-	Said       string             // the last thing the agent said
-	Changes    *Changes           // nil outside git
-	Hint       string
-	Error      string
-	Cursor     int64 // the event log's end: events --since this shows what comes next
+	// ContextTokens is what the agent's context held at its last model
+	// call, and ContextWindow its model's window: the profile's
+	// context_window if it sets one, else the CLI's (metrics
+	// context_tokens and context_window, this turn's or the latest turn's
+	// that reported them). 0 when unknown.
+	ContextTokens, ContextWindow float64
+	Activity                     []Event  // the turn's most recent activity, oldest first
+	Said                         string   // the last thing the agent said
+	Changes                      *Changes // nil outside git
+	Hint                         string
+	Error                        string
+	Cursor                       int64 // the event log's end: events --since this shows what comes next
 }
 
 // Changes are the files changed where a run's agent works.
@@ -139,9 +145,30 @@ func (r *Runner) Status(ctx context.Context, id string) (*Status, error) {
 				sum[k] = v
 			}
 			for k, v := range x.Metrics {
-				sum[k] += v
+				if gauge(k) {
+					sum[k] = v
+				} else {
+					sum[k] += v
+				}
 			}
 			st.Metrics = finiteMetrics(sum)
+		}
+	}
+	st.ContextTokens = st.Metrics["context_tokens"]
+	if perr == nil && p.ContextWindow > 0 {
+		// Said outright, it wins: a CLI that reports several models (an
+		// agent's subagents) may not say which window is the agent's.
+		st.ContextWindow = float64(p.ContextWindow)
+	} else {
+		st.ContextWindow = st.Metrics["context_window"]
+	}
+	for i := len(run.Turns) - 1; i >= 0 && (st.ContextTokens == 0 || st.ContextWindow == 0); i-- {
+		m := run.Turns[i].Metrics
+		if st.ContextTokens == 0 {
+			st.ContextTokens = m["context_tokens"] // a resumed session starts where it was
+		}
+		if st.ContextWindow == 0 {
+			st.ContextWindow = m["context_window"]
 		}
 	}
 	st.Changes = changesOf(ctx, run)
@@ -213,6 +240,15 @@ func (c *Changes) Summary() string {
 		parts = append(parts, fmt.Sprintf("%d new", c.New))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ContextUsed is the share of the context window in use, 0 to 1, and
+// whether it is known.
+func (s *Status) ContextUsed() (float64, bool) {
+	if s.ContextTokens <= 0 || s.ContextWindow <= 0 {
+		return 0, false
+	}
+	return s.ContextTokens / s.ContextWindow, true
 }
 
 // Next is what the caller can do now, as commands.

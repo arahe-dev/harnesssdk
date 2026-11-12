@@ -23,7 +23,20 @@ reading the files they edit.
   nothing happened).
 - **`harness wait --timeout`** prints the run's status when it times out
   (and `--json` adds a `status` object), instead of only "still running".
-- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`.
+- **Context.** Two metric names, `context_tokens` (the last model call's
+  prompt tokens) and `context_window`, hold the latest value instead of
+  adding up, and `status` shows `context: 61% (122k of 200k tokens)`. A
+  profile's `context_window` (`200k`, `1m`) gives the window for a CLI
+  that does not report it, and wins over one it does. A `*` in a selector
+  path stands for a key not known in advance (`modelUsage.*.contextWindow`).
+- **Claude Code over `stream-json`** in the guide, checked live on 2.1.322:
+  tool calls and messages as they happen, the answer, session resume,
+  tokens, cost, and context against the window Claude reports. It adds a
+  `{permission_mode}` group, without which print mode cannot edit files.
+  The guide adds progress and context rules for Pi and OpenCode, and says
+  why Codex's stream has no measure of context.
+- **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`;
+  `Status` has `ContextTokens`, `ContextWindow` and `ContextUsed`.
 
 ## v2.0.0-next.1 (2026-10-12)
 

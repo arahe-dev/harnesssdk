@@ -453,7 +453,11 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 		if t.metrics == nil {
 			t.metrics = map[string]float64{}
 		}
-		t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
+		if gauge(k) {
+			t.metrics[k] = n
+		} else {
+			t.metrics[k] += n // an overflow stays infinite; finiteMetrics drops it
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s stopped after %d attempt(s): %w", t.Def.Name, t.attempts, err)

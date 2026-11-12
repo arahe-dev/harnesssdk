@@ -43,12 +43,15 @@ type Profile struct {
 	// SpendUnknown is how the profile's spending limits count a cost
 	// harness could not record (spend_unknown); "" leaves it to config.
 	SpendUnknown string
-	Budget       []hertasdk.Requirement
-	Serialize    string // key template; runs sharing a key run one at a time
-	Vars         Vars
-	System       string
-	Scope        string // project or global, once loaded
-	Path         string
+	// ContextWindow is the model's context window in tokens, for a CLI
+	// that does not report it (metric context_window); 0 if unknown.
+	ContextWindow int64
+	Budget        []hertasdk.Requirement
+	Serialize     string // key template; runs sharing a key run one at a time
+	Vars          Vars
+	System        string
+	Scope         string // project or global, once loaded
+	Path          string
 
 	header []headerLine // kept in order so Set preserves the file
 }
@@ -63,7 +66,7 @@ var reservedKeys = map[string]bool{
 	"harness": true, "description": true, "effect": true, "admission": true,
 	"timeout": true, "retry": true, "budget": true, "serialize": true,
 	"backoff": true, "max_wait": true, "check": true, "check_timeout": true, "worktree": true,
-	"spend_limit_usd": true, "spend_unknown": true,
+	"spend_limit_usd": true, "spend_unknown": true, "context_window": true,
 }
 
 // builtinVars are filled in by HarnessSDK for every attempt; a profile
@@ -214,6 +217,8 @@ func (p *Profile) apply(key, value string) error {
 		if _, err = parseUnknown(value); err == nil {
 			p.SpendUnknown = value
 		}
+	case "context_window":
+		p.ContextWindow, err = parseTokens(value)
 	case "budget":
 		p.Budget, err = parseBudget(value)
 	case "serialize":
@@ -229,6 +234,23 @@ func (p *Profile) apply(key, value string) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	return nil
+}
+
+// parseTokens reads a token count: 200000, 200k or 1m.
+func parseTokens(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	mult := 1.0
+	switch {
+	case strings.HasSuffix(t, "k"):
+		mult, t = 1e3, strings.TrimSuffix(t, "k")
+	case strings.HasSuffix(t, "m"):
+		mult, t = 1e6, strings.TrimSuffix(t, "m")
+	}
+	f, err := strconv.ParseFloat(t, 64)
+	if err != nil || !finite(f) || f*mult < 1 || f*mult > 1e10 {
+		return 0, fmt.Errorf("%q is not a number of tokens (such as 200000, 200k or 1m)", s)
+	}
+	return int64(f * mult), nil
 }
 
 func parseEffect(s string) (hertasdk.Effect, error) {

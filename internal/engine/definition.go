@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"regexp"
@@ -681,7 +682,11 @@ func (s *Selector) matches(ev any) bool {
 // negative index counts from the end.
 func lookup(doc any, path string) (any, bool) {
 	cur := doc
-	for _, key := range strings.Split(path, ".") {
+	keys := strings.Split(path, ".")
+	for i, key := range keys {
+		if key == "*" {
+			return lookupAny(cur, keys[i+1:])
+		}
 		switch node := cur.(type) {
 		case map[string]any:
 			next, ok := node[key]
@@ -704,6 +709,39 @@ func lookup(doc any, path string) (any, bool) {
 	}
 	return cur, true
 }
+
+// lookupAny follows rest from the first member of an object (by key
+// order) or array that has it: "*" stands for a key that is not known in
+// advance, such as a model's name.
+func lookupAny(node any, rest []string) (any, bool) {
+	try := func(v any) (any, bool) {
+		if len(rest) == 0 {
+			return v, true
+		}
+		return lookup(v, strings.Join(rest, "."))
+	}
+	switch n := node.(type) {
+	case map[string]any:
+		for _, k := range slices.Sorted(maps.Keys(n)) {
+			if v, ok := try(n[k]); ok {
+				return v, true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if v, ok := try(v); ok {
+				return v, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// Gauges are metrics that hold the latest value rather than a total:
+// context_tokens (the tokens the agent's context held at its last model
+// call) and context_window (its model's window). A retry or a later
+// reading replaces them instead of adding to them.
+func gauge(name string) bool { return name == "context_tokens" || name == "context_window" }
 
 func scalar(v any) string {
 	switch x := v.(type) {

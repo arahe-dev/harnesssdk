@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,8 +19,12 @@ func progressDef(f *fixture) {
 		Args:    [][]string{{"{mode}"}, {"{*opts}"}, {"--sid", "{new_session}"}, {"--resume", "{resume_session}"}},
 		Session: "mint",
 		Output: OutputRule{Format: "jsonl",
-			Answer:  &Selector{Where: map[string]string{"type": "done"}, Field: "text"},
-			Metrics: map[string]*Selector{"turns": {Where: map[string]string{"type": "message"}, Pick: "count"}},
+			Answer: &Selector{Where: map[string]string{"type": "done"}, Field: "text"},
+			Metrics: map[string]*Selector{
+				"turns":          {Where: map[string]string{"type": "message"}, Pick: "count"},
+				"context_tokens": {Where: map[string]string{"type": "message"}, Field: "usage.ctx"},
+				"context_window": {Where: map[string]string{"type": "done"}, Field: "models.*.contextWindow"},
+			},
 			Progress: []ProgressRule{
 				{Kind: EvTool, Where: map[string]string{"type": "tool_start"}, Field: "tool", Detail: "args.path|args.command"},
 				{Kind: EvSay, Where: map[string]string{"type": "message", "role": "assistant"}, Field: "text"},
@@ -148,6 +153,10 @@ func TestStatusWhileRunning(t *testing.T) {
 	if st.Metrics["turns"] != 1 {
 		t.Fatalf("live metrics: %v", st.Metrics)
 	}
+	// The CLI reports its window only at the end.
+	if _, ok := st.ContextUsed(); ok || st.ContextTokens != 300 || st.ContextWindow != 0 {
+		t.Fatalf("context while running: %v of %v", st.ContextTokens, st.ContextWindow)
+	}
 	if ch := st.Changes; ch == nil || ch.Scope != "folder" || ch.New != 1 || !slices.Contains(ch.Files, "touched.txt") || ch.Summary() != "1 new" {
 		t.Fatalf("changes: %+v", st.Changes)
 	}
@@ -166,6 +175,16 @@ func TestStatusWhileRunning(t *testing.T) {
 	}
 	if st.Phase != "success" || st.Said != "done" || st.Metrics["turns"] != 2 {
 		t.Fatalf("finished status: phase %s said %q metrics %v", st.Phase, st.Said, st.Metrics)
+	}
+	// The last model call's context, and the window the CLI reported
+	// under its model's name.
+	if used, ok := st.ContextUsed(); !ok || st.ContextTokens != 400 || st.ContextWindow != 1000 || used != 0.4 {
+		t.Fatalf("context at the end: %v of %v", st.ContextTokens, st.ContextWindow)
+	}
+	// A window the profile states wins over the CLI's.
+	f.saveProfile("worker", "harness: stream\neffect: idempotent\ncontext_window: 2k\nmode: progress\nopts: gate="+gate)
+	if st, err = f.r.Status(context.Background(), run.ID); err != nil || st.ContextWindow != 2000 {
+		t.Fatalf("profile's window: %v %v", st.ContextWindow, err)
 	}
 	if next := st.Next(); len(next) != 2 || next[0] != "harness result "+run.ID || !strings.HasPrefix(next[1], "harness send "+run.ID) {
 		t.Fatalf("next: %v", next)
@@ -280,5 +299,62 @@ func TestReadEventsCompleteLinesOnly(t *testing.T) {
 	evs, _, _ = readEvents(dir, next)
 	if len(evs) != 1 || evs[0].Kind != EvStarted {
 		t.Fatalf("the finished line: %+v", evs)
+	}
+}
+
+// "*" in a path stands for a key not known in advance, such as a model's
+// name: the first, in key order, that has the rest of the path.
+func TestLookupWildcard(t *testing.T) {
+	var doc any
+	json.Unmarshal([]byte(`{"modelUsage":{"b-model":{"contextWindow":200000},"a-haiku":{"costUSD":1}},"list":[{"x":1},{"y":2}]}`), &doc)
+	for path, want := range map[string]string{
+		"modelUsage.*.contextWindow": "200000",
+		"list.*.y":                   "2",
+		"modelUsage.*.costUSD":       "1",
+	} {
+		if v, ok := lookup(doc, path); !ok || scalar(v) != want {
+			t.Errorf("%s: %v %v, want %s", path, v, ok, want)
+		}
+	}
+	if _, ok := lookup(doc, "modelUsage.*.missing"); ok {
+		t.Error("a path no member has matched")
+	}
+}
+
+// context_tokens and context_window hold the latest value: retries do not
+// add them up.
+func TestContextIsAGauge(t *testing.T) {
+	f := newFixture(t, nil)
+	usageDef(f)
+	d, err := f.home.Definition("fakeusage", f.cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Output.Metrics["context_tokens"] = &Selector{Where: map[string]string{"type": "step"}, Field: "usage.input"}
+	data, _ := json.Marshal(d)
+	if _, err := f.home.SaveDefinition("fakeusage", data, ""); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(t.TempDir(), "state")
+	f.profile("u", "harness: fakeusage\neffect: idempotent\nretry: transient x2\nbackoff: 10ms\nmode: usage\nopts: state="+state)
+	rep := f.start(context.Background(), "u", "go")[0]
+	if rep.Err != nil || rep.Attempts != 2 {
+		t.Fatalf("%+v", rep)
+	}
+	if rep.Metrics["context_tokens"] != 100 || rep.Metrics["input_tokens"] <= 240 {
+		t.Fatalf("metrics: %v", rep.Metrics)
+	}
+}
+
+func TestParseTokens(t *testing.T) {
+	for in, want := range map[string]int64{"200000": 200000, "200k": 200000, "1m": 1000000, "1.5M": 1500000} {
+		if got, err := parseTokens(in); err != nil || got != want {
+			t.Errorf("%s: %d %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"", "lots", "-5", "0"} {
+		if _, err := parseTokens(in); err == nil {
+			t.Errorf("%q parsed", in)
+		}
 	}
 }

@@ -109,7 +109,23 @@ with `+`. Every attempt's metrics count, a failed one's too.
 Use these names, so profiles on different harnesses compare:
 `input_tokens` (every prompt token, cached ones included), `cached_tokens`,
 `output_tokens`, `cost_usd` (only as the CLI reports it; harness keeps no
-prices), `turns` (model calls) and `tool_calls`. Text output has no metrics
+prices), `turns` (model calls) and `tool_calls`.
+
+Two more names say how full the agent's context is, which `harness status`
+shows as `context: 61% (122k of 200k tokens)`:
+
+- `context_tokens`: the prompt tokens of the agent's **last** model call,
+  cached ones included, which is what its context holds. Select it from a
+  per-call event with the default `"pick": "last"`, never from a total.
+- `context_window`: the model's window, if the CLI reports it. A `*` in a
+  path stands for a key not known in advance, such as the model's name:
+  `modelUsage.*.contextWindow`.
+
+These two hold the latest value: a retry or a later reading replaces them,
+where other metrics add up. When the CLI does not report the window, set
+`context_window` in the profile; a profile's value always wins, since a CLI
+that reports several models (an agent's subagents) may not say which is the
+agent's. Text output has no metrics
 of its own: prefer a CLI's JSON mode, or its usage report.
 
 **Usage reports.** Some CLIs print only the answer and write their usage to
@@ -214,6 +230,7 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `check_timeout` | `10m` (default) | how long the check may run |
 | `worktree` | `true` | every new run works in a git worktree of its own (see Running) |
 | `spend_limit_usd` | `2.50` | refuse the profile's turns once they have cost that much in the last 24 hours, as the CLI reports it |
+| `context_window` | `200k`, `1m` | the model's context window in tokens, so `status` can say how full the agent's context is; wins over a window the CLI reports |
 | `spend_unknown` | `refuse` | what a cost harness could not record counts as for this profile's limits: `warn`, `refuse` or dollars (overrides config; see Machine limits) |
 | `description` | text | shown in `profile list` |
 
@@ -486,23 +503,49 @@ fail the run.
 Without `--mode json`, Pi prints only the answer (`"output": {"format": "text"}`),
 and reports no tokens or cost.
 
-**Claude Code** (2.1.220), one JSON result:
+**Claude Code** (2.1.322), streaming JSON events (`--output-format
+stream-json`, which needs `--verbose` with `-p`). Each `assistant` event is
+one content block of one model call, with that call's `usage`; the final
+`result` event has the answer, totals, cost, and each model's
+`contextWindow` under `modelUsage.<model>`. Top-level events have
+`parent_tool_use_id` null, which `""` matches, so a subagent's calls do not
+count as the agent's context. Checked live: tool and message progress, the
+answer, session resume with `send`, tokens, cost, context and window.
 
 ```json
 {"command": "claude",
- "args": [["-p"], ["--output-format", "json"], ["--model", "{model}"], ["--tools", "{tools}"],
-          ["--append-system-prompt-file", "{system_file}"],
+ "args": [["-p"], ["--output-format", "stream-json"], ["--verbose"], ["--model", "{model}"], ["--tools", "{tools}"],
+          ["--permission-mode", "{permission_mode}"], ["--append-system-prompt-file", "{system_file}"],
           ["--session-id", "{new_session}"], ["--resume", "{resume_session}"]],
  "session": "mint",
- "output": {"format": "json", "field": "result", "error_field": "is_error", "session_field": "session_id",
+ "output": {"format": "jsonl",
+   "answer": {"where": {"type": "result"}, "field": "result"},
+   "session": {"where": {"type": "system", "subtype": "init"}, "field": "session_id", "pick": "first"},
+   "error": {"where": {"type": "result", "is_error": "true"}},
    "metrics": {
-     "input_tokens": {"field": "usage.input_tokens+usage.cache_read_input_tokens+usage.cache_creation_input_tokens"},
-     "cached_tokens": {"field": "usage.cache_read_input_tokens"},
-     "output_tokens": {"field": "usage.output_tokens"},
-     "cost_usd": {"field": "total_cost_usd"},
-     "turns": {"field": "num_turns"}}},
+     "input_tokens": {"where": {"type": "result"}, "field": "usage.input_tokens+usage.cache_read_input_tokens+usage.cache_creation_input_tokens"},
+     "cached_tokens": {"where": {"type": "result"}, "field": "usage.cache_read_input_tokens"},
+     "output_tokens": {"where": {"type": "result"}, "field": "usage.output_tokens"},
+     "cost_usd": {"where": {"type": "result"}, "field": "total_cost_usd"},
+     "turns": {"where": {"type": "result"}, "field": "num_turns"},
+     "tool_calls": {"where": {"type": "assistant", "message.content.0.type": "tool_use"}, "pick": "count"},
+     "context_tokens": {"where": {"type": "assistant", "parent_tool_use_id": ""},
+       "field": "message.usage.input_tokens+message.usage.cache_read_input_tokens+message.usage.cache_creation_input_tokens"},
+     "context_window": {"where": {"type": "result"}, "field": "modelUsage.*.contextWindow"}},
+   "progress": [
+     {"kind": "tool", "where": {"type": "assistant", "message.content.0.type": "tool_use"}, "field": "message.content.0.name",
+      "detail": "message.content.0.input.file_path|message.content.0.input.command|message.content.0.input.pattern|message.content.0.input.description"},
+     {"kind": "say", "where": {"type": "assistant", "parent_tool_use_id": "", "message.content.0.type": "text"}, "field": "message.content.0.text"}]},
  "failures": [{"match": "(?i)rate.?limit|overloaded|\\b429\\b", "outcome": "throttled"}]}
 ```
+
+Without `permission_mode` (`acceptEdits`, say), Claude Code in print mode
+refuses to edit files, and says so in its answer. When subagents run on
+other models, `modelUsage` lists each, so set `context_window` in the
+profile. The older one-document form, `--output-format json` with `"format":
+"json"`, `"field": "result"`, `"error_field": "is_error"` and
+`"session_field": "session_id"`, still works, but shows nothing until the
+end.
 
 **Codex** (0.162.1), JSONL events. Codex may strip its commands'
 environment (`shell_environment_policy`), so harness's variables are set
@@ -585,26 +628,34 @@ has `result`, `is_error`, `session_id` and a Claude-style `usage`; and
 **Kimi Code** `kimi -p {prompt}`, whose answer is all of stdout (it also has
 `--output-format stream-json`).
 
-### Progress rules for these CLIs
+### Progress and context for the other CLIs
 
-Added to `output` in the definitions above. Their event names come from
-each CLI's JSON stream; they were not checked live, so watch the first run
-with `harness events` and adjust.
+Add these to `output` in the definitions above (`progress` beside
+`metrics`, the metric into `metrics`). Pi's event and field names are from
+its `docs/json.md` and message types, Codex's from its `exec_events.rs`;
+OpenCode's tool event is not documented, and none of these were run live,
+so watch the first run with `harness events` and adjust.
 
-- **Pi** (`--mode json`):
-  `[{"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command|args.pattern"},
-  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}]`
-- **Codex** (`--json`):
-  `[{"kind": "tool", "where": {"type": "item.started", "item.type": "command_execution"}, "field": "item.type", "detail": "item.command"},
+- **Pi** (`--mode json`). Each `turn_end` carries that model call's usage;
+  Pi reports no window, so set `context_window` in the profile.
+  `"progress": [{"kind": "tool", "where": {"type": "tool_execution_start"}, "field": "toolName", "detail": "args.path|args.command|args.pattern"},
+  {"kind": "say", "where": {"type": "message_end", "message.role": "assistant"}, "field": "message.content.-1.text"}]`,
+  `"context_tokens": {"where": {"type": "turn_end"}, "field": "message.usage.input+message.usage.cacheRead+message.usage.cacheWrite"}`
+- **OpenCode** (`--format json`). Each `step_finish` carries that step's
+  tokens; no window, so set `context_window` in the profile.
+  `"progress": [{"kind": "tool", "where": {"type": "tool_use"}, "field": "part.tool", "detail": "part.state.input.filePath|part.state.input.command|part.state.title"},
+  {"kind": "say", "where": {"type": "text"}, "field": "part.text"}]`,
+  `"context_tokens": {"where": {"type": "step_finish"}, "field": "part.tokens.input+part.tokens.cache.read+part.tokens.cache.write"}`
+- **Codex** (`--json`).
+  `"progress": [{"kind": "tool", "where": {"type": "item.started", "item.type": "command_execution"}, "field": "item.type", "detail": "item.command"},
   {"kind": "file", "where": {"type": "item.completed", "item.type": "file_change"}, "field": "item.changes.0.path"},
-  {"kind": "say", "where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"}]`
-- **OpenCode** (`--format json`):
-  `[{"kind": "tool", "where": {"type": "tool_use"}, "field": "part.tool", "detail": "part.state.input.filePath|part.state.input.command|part.state.title"},
-  {"kind": "say", "where": {"type": "text"}, "field": "part.text"}]`
-- **Claude Code** with `--output-format json` prints one document at the
-  end, so it has no progress; `--output-format stream-json --verbose`
-  streams events, with its answer in the `result` event.
-- **Hermes** prints only its answer: no progress.
+  {"kind": "say", "where": {"type": "item.completed", "item.type": "agent_message"}, "field": "item.text"}]`.
+  No context: `codex exec --json` reports usage only once per turn,
+  summed over all of the turn's model calls, which overstates the context
+  several times over, and no window. Leave `context_tokens` out rather than
+  map that total to it.
+- **Hermes** prints only its answer: no progress; its usage report is
+  totals, so no context either.
 
 ## Other commands
 
