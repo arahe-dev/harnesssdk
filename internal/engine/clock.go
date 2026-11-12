@@ -177,6 +177,9 @@ func (t *Turn) watchClock(ctx context.Context, cancel context.CancelCauseFunc, o
 				if extendedAt.After(last) {
 					last = extendedAt
 				}
+				if asking(t.Run) {
+					last = now // waiting for an answer is not being stuck
+				}
 				quiet := now.Sub(last)
 				if quiet >= idle {
 					cancel(fmt.Errorf("%w (%s)", ErrIdle, idle))

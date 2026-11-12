@@ -55,8 +55,19 @@ reading the files they edit.
   the agent for handover notes in its session, then starts a new run of the
   same profile and folder with them, in the background; the new run
   records `from`.
+- **Talking with a run's agent.** The agent's system prompt says how to
+  reach whoever started it (`intercom: false` leaves that out). From
+  inside its run: `harness note` posts progress, `harness ask` posts a
+  question and waits for the answer (the idle clock does not count the
+  wait), `harness inbox` reads what was posted to it. The caller's `wait`
+  wakes on a question, `status` lists open ones, `harness reply` answers,
+  and `harness steer` posts a message; unread messages lead the next turn,
+  and `steer --now` stops the turn and continues with the message. Checked
+  live with a Claude Code agent asking through its shell.
+- **Claude Code definition:** an `{allowed_tools}` group, so an agent can be
+  allowed to run harness (`Bash(harness *)`) and nothing else.
 - **Go API:** `Client.Status`, `Client.Events`, `Client.WaitEvents`,
-  `Client.Extend`, `Client.Handover`; `Status` has `ContextTokens`,
+  `Client.Extend`, `Client.Handover`, `Client.Reply`, `Client.Steer`; `Status` has `ContextTokens`,
   `ContextWindow`, `ContextUsed`, `Deadline` and `Idle`; `Run.From`.
 
 ## v2.0.0-next.1 (2026-10-12)

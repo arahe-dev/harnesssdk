@@ -33,6 +33,7 @@ type Turn struct {
 	lineage     []string      // gate tickets held for this turn and its ancestors
 	inherit     []*os.File    // locks the agent CLI inherits (Unix)
 	idle        time.Duration // the idle limit of its attempts; 0 for none
+	system      string        // the system prompt: the profile's, with the intercom note
 	attempts    int
 	metrics     map[string]float64 // summed over attempts
 	repeat      string             // the request's fingerprint, for the repeat guard
@@ -344,7 +345,7 @@ func (t *Turn) vars() Vars {
 	}
 	v["prompt"] = t.Prompt
 	v["prompt_file"] = t.Run.Path(fmt.Sprintf("turn-%d.prompt.md", t.N))
-	if t.Profile.System != "" {
+	if t.system != "" {
 		v["system_file"] = t.Run.Path("system.md")
 	}
 	v["cwd"], v["run_id"], v["run_dir"] = t.Run.AgentDir(), t.Run.ID, t.Run.dir
@@ -407,9 +408,9 @@ func (r *Runner) attempt(ctx context.Context, t *Turn) (*Result, error) {
 	var stdin *os.File
 	if t.Def.Stdin != "none" {
 		input := v["prompt_file"]
-		if t.Def.Stdin == "system+prompt" && t.Profile.System != "" {
+		if t.Def.Stdin == "system+prompt" && t.system != "" {
 			input = t.Run.Path(fmt.Sprintf("turn-%d.input.md", t.N))
-			text := "<instructions>\n" + t.Profile.System + "\n</instructions>\n\n" + t.Prompt
+			text := "<instructions>\n" + t.system + "\n</instructions>\n\n" + t.Prompt
 			if err := os.WriteFile(input, []byte(text), 0o600); err != nil {
 				return nil, hertasdk.Fail(hertasdk.Permanent, err)
 			}
@@ -769,7 +770,8 @@ func (r *Runner) PrepareSend(id, prompt string, o TurnOptions) (int, error) {
 		if run.Session == "" {
 			return fmt.Errorf("run %s has no session to resume: harness %s neither mints nor captures one", id, run.Harness)
 		}
-		n, err = queue(run, prompt, request{Resume: true, Extra: o.Extra, Check: o.Check, Repeat: fp, Caller: "send:" + id})
+		// What was posted to the agent and it has not read leads the turn.
+		n, err = queue(run, withUnread(run, len(run.Turns)+1, prompt), request{Resume: true, Extra: o.Extra, Check: o.Check, Repeat: fp, Caller: "send:" + id})
 		return err
 	})
 	return n, err
@@ -1018,13 +1020,14 @@ func (r *Runner) execute(ctx context.Context, run *Run, n int, execLock *os.File
 	if d.Name != run.Harness {
 		return nil, nil, fmt.Errorf("run %s was started on harness %s, but profile %s now uses %s", run.ID, run.Harness, p.Name, d.Name)
 	}
-	if p.System != "" {
-		if err := os.WriteFile(run.Path("system.md"), []byte(p.System+"\n"), 0o600); err != nil {
+	system := systemFor(p, run)
+	if system != "" {
+		if err := os.WriteFile(run.Path("system.md"), []byte(system+"\n"), 0o600); err != nil {
 			return nil, nil, err
 		}
 	}
 	t = &Turn{Run: run, N: n, Prompt: string(prompt), Resume: req.Resume, Profile: p, Def: d, Extra: req.Extra, home: r.home.Dir, repeat: req.Repeat,
-		idle: idleFor(p, d)}
+		idle: idleFor(p, d), system: system}
 	// The repeat guard follows what runs: the profile and definition as
 	// loaded now, which may have been edited since the turn was queued.
 	if kind, caller, ok := strings.Cut(req.Caller, ":"); ok {
@@ -1570,7 +1573,7 @@ func (r *Runner) DryRun(profile, prompt, cwd string, extra Vars) (*Plan, error) 
 		return nil, err
 	}
 	run := &Run{ID: "<run-id>", Cwd: cwd, dir: "<run-dir>"}
-	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
+	return plan(&Turn{Run: run, N: 1, Prompt: prompt, Profile: p, Def: d, Extra: extra, home: r.home.Dir, system: systemFor(p, run)})
 }
 
 // DryRunSend renders the command a follow-up turn of a run would execute.
@@ -1583,7 +1586,7 @@ func (r *Runner) DryRunSend(id, prompt string, extra Vars) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra, home: r.home.Dir})
+	return plan(&Turn{Run: run, N: len(run.Turns) + 1, Prompt: prompt, Resume: true, Profile: p, Def: d, Extra: extra, home: r.home.Dir, system: systemFor(p, run)})
 }
 
 func plan(t *Turn) (*Plan, error) {

@@ -223,6 +223,7 @@ execution policy (HertaSDK); every other key is a placeholder value.
 | `backoff` | `5s` (default `2s`) | the wait before the first retry; it doubles for each retry after, up to 5 minutes, with jitter, and is at least what the CLI asked for (`retry_after`). A turn holds no budget, key or slot while it waits. |
 | `timeout` | `20m`, `1h`, `none` | per attempt; on expiry the whole process tree is killed and the outcome is `uncertain`. `harness extend` gives a running turn more |
 | `idle` | `15m` (default for a CLI that streams events), `none` | stop an attempt whose agent wrote nothing for this long; the turn is parked, not retried. A CLI that prints only at the end has no idle limit unless set |
+| `intercom` | `true` (default), `false` | tell the agent, in its system prompt, how to reach whoever started it (`harness note`, `ask`, `inbox`, `extend --self`); it needs a shell that can run harness |
 | `handover_at` | `80%` (default), `none` | when a turn ends with the agent's context this full, its hint says to hand over to a fresh session |
 | `budget` | `pi=1, gpu=4` | units claimed from named budgets while the turn runs |
 | `admission` | `wait` (default), `reject` | when a budget or key is taken: queue, or fail at once as `throttled` |
@@ -377,6 +378,8 @@ harness wait <run-id> [--timeout D] [--json]     harness result <run-id> [--json
 harness stop <run-id>                 harness runs [--limit N]     harness show <run-id>     harness status
 harness status <run-id> [--json]      harness events <run-id> [--since C] [--wait D] [--json]
 harness extend <run-id> <D> [--reason R]     harness extend --self <D>     harness handover <run-id> [--next T] [--json]
+harness reply <run-id> [q-id] "answer"       harness steer <run-id> "message" [--now]
+inside a run:  harness note "..."     harness ask "question" [--wait 10m]     harness inbox [--peek]
 ```
 
 - The prompt is the words after the profile, or stdin with `-`. Each
@@ -490,6 +493,29 @@ rather than the agent's files, to know how it is doing.
   background, and prints its id. `harness show` on the new run names the
   run it came from; the old run's log names the new one.
 
+## Talking with a run's agent
+
+A run's agent can reach whoever started it, and be reached, while it
+works. Its system prompt says how (unless the profile sets
+`intercom: false`); it needs a shell tool that may run harness.
+
+- **From the agent** (run inside the run, which harness finds as it finds a
+  nested run): `harness note "tests pass; starting the docs"` posts
+  progress. `harness ask "v1 or v2 API?"` posts a question and waits for
+  the answer (up to `--wait`, 10m by default; exit 7 if none came, and the
+  question is closed). While it waits, the idle limit does not count.
+- **From the caller:** `harness wait` returns early on a question (exit 7,
+  `attention`), and `status` lists open questions with the command to
+  answer each: `harness reply <run-id> [q-id] "v2"` (the id can be left out
+  when only one is open).
+- **Steering:** `harness steer <run-id> "use the new parser"` posts a
+  message. The agent reads it with `harness inbox` between steps; what it
+  has not read when its turn ends leads its next turn's prompt (once).
+  `--now` stops the running turn and continues the session at once with
+  the message, in the background.
+
+Notes, questions, answers and messages are all in the run's event log.
+
 How much you see depends on the CLI: one that streams JSONL events, with
 progress rules, shows each tool call as it happens; one that prints only
 its answer shows its phase, time and changed files.
@@ -545,7 +571,8 @@ answer, session resume with `send`, tokens, cost, context and window.
 ```json
 {"command": "claude",
  "args": [["-p"], ["--output-format", "stream-json"], ["--verbose"], ["--model", "{model}"], ["--tools", "{tools}"],
-          ["--permission-mode", "{permission_mode}"], ["--append-system-prompt-file", "{system_file}"],
+          ["--permission-mode", "{permission_mode}"], ["--allowedTools", "{allowed_tools}"],
+          ["--append-system-prompt-file", "{system_file}"],
           ["--session-id", "{new_session}"], ["--resume", "{resume_session}"]],
  "session": "mint",
  "output": {"format": "jsonl",
@@ -570,7 +597,12 @@ answer, session resume with `send`, tokens, cost, context and window.
 ```
 
 Without `permission_mode` (`acceptEdits`, say), Claude Code in print mode
-refuses to edit files, and says so in its answer. When subagents run on
+refuses to edit files, and says so in its answer. To let the agent talk to
+you through harness (below) without opening its shell to everything, give it
+`tools: Bash,Read,Edit,Write` and `allowed_tools: Bash(harness *)`: it may
+then run harness, and nothing else, without a prompt. Checked live: an agent
+asked through `harness ask`, the caller's `wait` woke on it, and the reply
+reached the agent, which went on. When subagents run on
 other models, `modelUsage` lists each, so set `context_window` in the
 profile. The older one-document form, `--output-format json` with `"format":
 "json"`, `"field": "result"`, `"error_field": "is_error"` and

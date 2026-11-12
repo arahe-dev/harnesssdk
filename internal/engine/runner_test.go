@@ -129,7 +129,8 @@ func fakeHarness(args []string) int {
 			}
 		}
 		fmt.Println(`{"type":"message","role":"assistant","text":"done","usage":{"ctx":400}}`)
-		fmt.Printf(`{"type":"done","text":"answer: %s","models":{"m-1":{"contextWindow":1000}}}`+"\n", strings.TrimSpace(string(in)))
+		answer, _ := json.Marshal("answer: " + strings.TrimSpace(string(in)))
+		fmt.Printf(`{"type":"done","text":%s,"models":{"m-1":{"contextWindow":1000}}}`+"\n", answer)
 	case "nested":
 		// Act as a harness command run by the agent; with strip=1, as one
 		// whose harness removed harness's environment variables.
@@ -144,6 +145,42 @@ func fakeHarness(args []string) int {
 		}
 		p := h.DiscoverParentage()
 		fmt.Printf("parent=%s lineage=%s found=%s\n", p.Parent, strings.Join(p.Lineage, ","), p.Found)
+	case "ask": // asks its caller through harness, from inside its run
+		h, err := NewHome(opts["home"])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		r, _ := NewRunner(h)
+		wait, _ := time.ParseDuration(or(opts["wait"], "20s"))
+		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		defer cancel()
+		_, id, answer, ok, err := r.Ask(ctx, "use v1 or v2?")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if !ok {
+			fmt.Println("no answer to " + id)
+			return 0
+		}
+		fmt.Println("answer: " + answer)
+	case "inbox": // reads what its caller posted, from inside its run
+		h, err := NewHome(opts["home"])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_, msgs, err := h.Inbox(false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		var texts []string
+		for _, m := range msgs {
+			texts = append(texts, m.Text)
+		}
+		fmt.Printf("inbox: [%s] prompt: %s\n", strings.Join(texts, "|"), strings.TrimSpace(string(in)))
 	case "sleeppid":
 		os.WriteFile(opts["pidfile"], []byte(strconv.Itoa(os.Getpid())), 0o644)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -263,7 +300,7 @@ func (f *fixture) start(ctx context.Context, profile string, tasks ...string) []
 
 func TestRunEcho(t *testing.T) {
 	f := newFixture(t, nil)
-	f.profile("echo", "harness: fake\neffect: pure\nmode: echo")
+	f.profile("echo", "harness: fake\neffect: pure\nintercom: false\nmode: echo")
 	rep := f.start(context.Background(), "echo", "hello")[0]
 	if rep.Err != nil || rep.Outcome != "success" || rep.Output != "echo: hello" {
 		t.Fatalf("%+v", rep)

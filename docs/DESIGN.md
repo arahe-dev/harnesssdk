@@ -23,6 +23,8 @@ the same name, which splits one lock into two.
 | `runs/.new-<id>.lock` | a run being created; removed only under `create.lock` |
 | `create.lock` | taking and removing creation locks (never removed); waits for it end with the caller |
 | `runs/<id>/extend-<turn>` | how far `harness extend` moved the turn's deadline (no lock: replaced whole, under the state lock) |
+| `runs/<id>/asking.lock` | an agent of the run is waiting in `harness ask`; the idle clock counts it as activity |
+| `runs/<id>/inbox.cursor` | how far the run's agent has read the messages posted to it (replaced whole) |
 | `runs/<id>/events.jsonl` | the run's event log (no lock: each event is one append) |
 | `spend/<run>-<turn>-<attempt>-<random>.json` | the spending ledger: one attempt's entry, replaced whole (no lock) |
 | `created/<creation>` | a committed creation (no lock; made once) |
@@ -92,6 +94,18 @@ Readers keep a byte offset as their cursor and take complete lines only.
 A turn's `finished` event is written before its record is saved, so whoever
 sees the turn finished finds its event. The log is advisory: an event that
 cannot be written is dropped, and no outcome, retry or limit depends on it.
+
+## The intercom
+
+A run's event log is also its mailbox. The agent's `note` and `ask`, the
+caller's `reply` and `steer`, are events in it, so they share its
+guarantees: one append each, read by cursor. An ask is open until a
+`reply` or `expired` event names it; `reply` refuses an ask that is not
+open, and the asking process, which watches the log from where it asked,
+takes the first reply. Messages are read once: `inbox` moves
+`inbox.cursor`, and a follow-up turn, queued under the state lock, takes
+what is still unread into its prompt and moves the cursor, logging a
+`delivery` event.
 
 ## Creating runs
 

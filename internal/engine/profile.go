@@ -55,12 +55,15 @@ type Profile struct {
 	// HandoverSet, defaultHandoverAt. 0 turns the hint off.
 	HandoverAt  float64
 	HandoverSet bool
-	Budget      []hertasdk.Requirement
-	Serialize   string // key template; runs sharing a key run one at a time
-	Vars        Vars
-	System      string
-	Scope       string // project or global, once loaded
-	Path        string
+	// NoIntercom leaves out the note that tells the agent how to reach
+	// whoever started it (intercom: false).
+	NoIntercom bool
+	Budget     []hertasdk.Requirement
+	Serialize  string // key template; runs sharing a key run one at a time
+	Vars       Vars
+	System     string
+	Scope      string // project or global, once loaded
+	Path       string
 
 	header []headerLine // kept in order so Set preserves the file
 }
@@ -76,7 +79,7 @@ var reservedKeys = map[string]bool{
 	"timeout": true, "retry": true, "budget": true, "serialize": true,
 	"backoff": true, "max_wait": true, "check": true, "check_timeout": true, "worktree": true,
 	"spend_limit_usd": true, "spend_unknown": true, "context_window": true,
-	"idle": true, "handover_at": true,
+	"idle": true, "handover_at": true, "intercom": true,
 }
 
 // builtinVars are filled in by HarnessSDK for every attempt; a profile
@@ -227,6 +230,8 @@ func (p *Profile) apply(key, value string) error {
 		if _, err = parseUnknown(value); err == nil {
 			p.SpendUnknown = value
 		}
+	case "intercom":
+		p.NoIntercom = !Vars{"v": value}.truthy("v")
 	case "idle":
 		p.Idle, err = parseTimeout(value)
 		p.IdleSet = err == nil
@@ -251,6 +256,8 @@ func (p *Profile) apply(key, value string) error {
 	}
 	return nil
 }
+
+func (p *Profile) intercom() bool { return !p.NoIntercom }
 
 // parseShare reads a share of a whole: 80%, 0.8, or none (0).
 func parseShare(s string) (float64, error) {

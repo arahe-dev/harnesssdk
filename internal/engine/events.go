@@ -68,14 +68,14 @@ type Event struct {
 	Text    string    `json:"text,omitempty"`
 }
 
-// lifecycle reports whether the event says where a turn is, rather than
-// what its agent is doing.
+// lifecycle reports whether the event moves a turn from one phase to the
+// next; the others (activity, messages, the clock) happen within a phase.
 func (e Event) lifecycle() bool {
 	switch e.Kind {
-	case EvTool, EvFile, EvSay, EvStep:
-		return false
+	case EvQueued, EvStarted, EvAttempt, EvRetry, EvCheck, EvFinished, EvLost:
+		return true
 	}
-	return true
+	return false
 }
 
 // note appends an event to the run's log. It never fails the caller.
@@ -217,7 +217,7 @@ func (r *Runner) WaitEvents(ctx context.Context, id string, since int64) (evs []
 
 // needsAttention reports whether an event should wake a caller waiting for
 // the turn to end: something it can still act on.
-func needsAttention(e Event) bool { return e.Kind == EvTimeoutSoon }
+func needsAttention(e Event) bool { return e.Kind == EvTimeoutSoon || e.Kind == EvAsk }
 
 // WaitAttention is WaitTurn for the run's last turn that also returns,
 // unfinished, as soon as an event that needs the caller's attention is

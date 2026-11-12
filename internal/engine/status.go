@@ -49,6 +49,7 @@ type Status struct {
 	ContextTokens, ContextWindow float64
 	Activity                     []Event  // the turn's most recent activity, oldest first
 	Said                         string   // the last thing the agent said
+	Asks                         []Event  // the agent\'s questions with no answer yet
 	Changes                      *Changes // nil outside git
 	Hint                         string
 	Error                        string
@@ -104,6 +105,7 @@ func (r *Runner) Status(ctx context.Context, id string) (*Status, error) {
 	evs, cursor, _ := tailEvents(run.dir, 256<<10)
 	st.Cursor = cursor
 	last := ""
+	st.Asks = openAsks(evs)
 	for _, ev := range evs {
 		if ev.Turn != rec.N {
 			continue
@@ -274,12 +276,17 @@ func (s *Status) Next() []string {
 	case "new":
 		return nil
 	case "queued", "running":
-		return []string{
-			"harness wait " + id + " --timeout 5m",
-			fmt.Sprintf("harness events %s --since %d --wait 2m", id, s.Cursor),
-			"harness extend " + id + " 30m",
-			"harness stop " + id,
+		var next []string
+		for _, a := range s.Asks {
+			next = append(next, fmt.Sprintf("harness reply %s %s \"<answer>\"", id, a.Name))
 		}
+		return append(next,
+			"harness wait "+id+" --timeout 5m",
+			fmt.Sprintf("harness events %s --since %d --wait 2m", id, s.Cursor),
+			"harness extend "+id+" 30m",
+			"harness steer "+id+" \"<message>\"",
+			"harness stop "+id,
+		)
 	}
 	next := []string{"harness result " + id}
 	if s.Run.Session != "" {

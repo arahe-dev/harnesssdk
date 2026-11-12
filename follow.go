@@ -132,3 +132,22 @@ func (c *Client) Handover(ctx context.Context, run, next string) (newRun, notes 
 	}
 	return newRun, rep.Output, err
 }
+
+// Reply answers a run's question (an agent waiting in harness ask): the
+// one with questionID, or its only open one. It returns the question's id.
+func (c *Client) Reply(run, questionID, answer string) (string, error) {
+	return c.home.Reply(run, questionID, answer)
+}
+
+// Steer posts a message to a run's agent, which reads it with harness
+// inbox, or at the top of its next turn. With now, a running turn is
+// stopped and the session continues with the message at once, in the
+// background.
+func (c *Client) Steer(ctx context.Context, run, message string, now bool) error {
+	if now {
+		_, err := c.runner.SteerNow(ctx, run, message)
+		return err
+	}
+	_, err := c.home.Steer(run, message)
+	return err
+}

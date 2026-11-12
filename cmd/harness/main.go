@@ -39,6 +39,9 @@ const usage = `harness runs agents in other harnesses (Pi, Claude Code, Codex, .
   harness events <run-id> [--since c]      a run's event log from a cursor; --wait 2m for the next ones; --json
   harness extend <run-id|--self> 30m       give a running turn more time (and reset its idle clock); --reason
   harness handover <run-id> [--next task]  continue a run whose context is full in a fresh session; prints the new run id
+  harness reply <run-id> [q-id] "answer"   answer a run's question (its agent waits for it)
+  harness steer <run-id> "message" [--now] post to a run's agent: it reads it now (inbox) or at its next turn; --now: stop and continue with it
+  inside a run (for the agent):  harness note "..." | ask "question" [--wait 10m] | inbox [--peek] | extend --self 30m
   harness result <run-id>                  print a run's last turn without waiting
   harness stop <run-id>                    stop a run's turn
   harness runs | show <run-id> | status    past runs; budgets, keys and active runs
@@ -159,6 +162,16 @@ func (c *cli) dispatch(cmd string, args []string) (int, error) {
 		return c.extend(args)
 	case "handover":
 		return c.handover(args)
+	case "note":
+		return c.noteCmd(args)
+	case "ask":
+		return c.ask(args)
+	case "reply":
+		return c.reply(args)
+	case "steer":
+		return c.steer(args)
+	case "inbox":
+		return c.inbox(args)
 	}
 	return harness.ExitUsage, usageErr("unknown command %q; see: harness help", cmd)
 }

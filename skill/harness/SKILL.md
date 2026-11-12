@@ -32,6 +32,10 @@ Most requests are one of these:
   `harness status`, then `harness send`. If a hint says the context is
   nearly full, `harness handover <run-id> --next "<task>"` continues in a
   fresh session.
+- **Talk to a running agent:** when `wait` returns early with a question
+  (`attention: ... ask q-...`), answer it with `harness reply <run-id> "answer"`;
+  redirect an agent with `harness steer <run-id> "message"` (`--now` to stop
+  it and continue with the message at once).
 - **Follow up:** `harness send <run-id> "more"` continues the same session.
 - **Choose between agents:** `harness stats --kind <label>` shows each
   profile's success rate, time, tokens and cost so far; `harness compare a,b "task"`
